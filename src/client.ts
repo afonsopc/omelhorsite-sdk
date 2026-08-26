@@ -53,6 +53,18 @@ export interface OmsOptions {
    * passing both throws. Build one with `refreshingTokenProvider`.
    */
   readonly tokens?: TokenProvider;
+  /**
+   * Authenticate with the browser's httpOnly session cookie instead of a
+   * token. First-party pages only, and never the default: see
+   * {@link ApiClientOptions.sessionCookie} for why it has to be asked for
+   * by name.
+   *
+   * ```ts
+   * // in the omelhorsite web app, served from the same site as the API
+   * const oms = new Oms({ sessionCookie: true });
+   * ```
+   */
+  readonly sessionCookie?: boolean;
   /** API root. Defaults to `https://backend.omelhorsite.pt`. */
   readonly baseUrl?: string;
   /**
@@ -133,6 +145,9 @@ export class Oms {
     if (options.tokens && options.token !== undefined && options.token !== null) {
       throw new TypeError("Pass either `token` or `tokens` to the Oms constructor, not both.");
     }
+    if (options.sessionCookie && (options.tokens || (options.token !== undefined && options.token !== null))) {
+      throw new TypeError("Pass either `sessionCookie` or a token to the Oms constructor, not both.");
+    }
 
     const tokens = options.tokens ?? providerFor(options.token);
 
@@ -140,6 +155,7 @@ export class Oms {
       ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(tokens === undefined ? {} : { tokens }),
+      ...(options.sessionCookie === undefined ? {} : { sessionCookie: options.sessionCookie }),
       ...(options.headers === undefined ? {} : { headers: options.headers }),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.retry === undefined ? {} : { retry: options.retry }),

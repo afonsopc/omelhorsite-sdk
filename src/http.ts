@@ -63,6 +63,23 @@ export interface ApiClientOptions {
   readonly fetch?: FetchLike;
   /** Where the bearer token comes from. */
   readonly tokens?: TokenProvider;
+  /**
+   * Authenticate with the browser's `oms_session` cookie instead of a token.
+   *
+   * FOR A FIRST-PARTY PAGE ONLY, and never the default. The cookie is httpOnly
+   * precisely so that no JavaScript can read the session token; a page served
+   * from omelhorsite.pt asks the browser to attach it, and the token itself
+   * stays out of reach of any script on the page.
+   *
+   * That is also why this has to be asked for by name. Left off, an SDK call is
+   * authenticated by the token it was handed and by nothing else, so a page
+   * that embeds the SDK cannot act as whoever happens to be signed in. Turning
+   * it on is a statement that this code IS the first-party app.
+   *
+   * Requires a same-site page: the cookie is host-only on the API host, so a
+   * page anywhere else gets an unauthenticated request, not an error.
+   */
+  readonly sessionCookie?: boolean;
   /** Headers merged into every request, below per-call headers. */
   readonly headers?: Record<string, string>;
   /** Default deadline for one call, retries included. `0` disables it. */
@@ -114,6 +131,7 @@ export class ApiClient {
 
   private readonly fetchImpl: FetchLike;
   private readonly tokens: TokenProvider | undefined;
+  private readonly sessionCookie: boolean;
   private readonly baseHeaders: Record<string, string>;
   private readonly timeoutMs: number;
   private readonly retry: ResolvedRetry | false;
@@ -130,7 +148,13 @@ export class ApiClient {
     // Unbind from the client so a host `fetch` that checks its receiver still works.
     this.fetchImpl = (input, init) => injected(input, init);
 
+    if (options.sessionCookie && options.tokens) {
+      throw new TypeError(
+        "Pass either `sessionCookie` or a token, not both: two credentials on one request means the server decides which identity wins, and the caller cannot tell which one it got.",
+      );
+    }
     this.tokens = options.tokens;
+    this.sessionCookie = options.sessionCookie ?? false;
     this.baseHeaders = { ...(options.headers ?? {}) };
     if (options.clientName) this.baseHeaders["X-Oms-Client"] = options.clientName;
     this.timeoutMs = options.timeoutMs ?? 60_000;
@@ -319,10 +343,12 @@ export class ApiClient {
       headers,
       signal,
       ...(body === undefined ? {} : { body }),
-      // Cookies belong to the browser session, not to an SDK call: an SDK
-      // request must be authenticated by the token it was given and nothing
-      // else, or a page embedding the SDK would act as the logged-in user.
-      credentials: "omit",
+      // "omit" unless the caller asked for the cookie by name. Cookies belong to
+      // the browser session, not to an SDK call: authenticated by the token it
+      // was given and nothing else, a page embedding the SDK cannot act as
+      // whoever is signed in. `sessionCookie` is the first-party app saying it
+      // is the exception. See ApiClientOptions.sessionCookie.
+      credentials: this.sessionCookie ? "include" : "omit",
       redirect: "follow",
     };
   }
