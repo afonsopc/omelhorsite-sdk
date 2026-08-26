@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "Declaration-only emit for the published package. The runtime JS comes from `bun build` (one bundled ESM file, which is what keeps the workspace-relative imports resolvable once the package is installed from npm); tsc's job here is only the .d.ts tree consumers read.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": false,
+    "stripInternal": true,
+    "rootDir": "src",
+    "outDir": "dist/types",
+    "types": []
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test", "scripts"]
+}

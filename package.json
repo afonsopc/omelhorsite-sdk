@@ -1,31 +1,37 @@
 {
   "name": "@omelhorsite/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "TypeScript SDK for the omelhorsite API. Isolate-safe: no node builtins, no environment access, no stdout.",
   "type": "module",
   "license": "UNLICENSED",
   "sideEffects": false,
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/types/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
-  "types": "./src/index.ts",
-  "main": "./src/index.ts",
+  "types": "./dist/types/index.d.ts",
+  "main": "./dist/index.js",
   "files": [
-    "src",
     "dist"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "check:isolate": "bun run scripts/check-isolate.ts",
-    "test": "bun run check:isolate && bun test"
+    "test": "bun run check:isolate && bun test",
+    "build": "bun build src/index.ts --target node --format esm --outdir dist --external uqr && tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
   },
   "dependencies": {
     "uqr": "^0.1.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/afonsopc/omelhorsite.git",
+    "directory": "apps/cli/packages/core"
   }
 }

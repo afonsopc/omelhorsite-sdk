@@ -31,4 +31,12 @@ export * from "./local/index";
 export * from "./resources/index";
 export * from "./types";
 
-export { Oms as default } from "./client";
+// `import` + `export default`, not `export { Oms as default } from "./client"`.
+// Oms already leaves this module by way of the `export *` above, and naming it
+// a second time in a re-export FROM the same path makes bun's bundler emit a
+// reference to a binding it renamed (`Export 'Oms2' is not defined in module`).
+// It never showed inside the workspace, where the entry resolves to this source
+// file and nothing is bundled - only in the published build.
+import { Oms } from "./client";
+
+export default Oms;
