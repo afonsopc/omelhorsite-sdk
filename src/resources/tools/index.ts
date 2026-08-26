@@ -9,7 +9,9 @@
  * - it is asynchronous: the create call answers with a row in `"pending"` and
  *   the work happens on a sidecar;
  * - it has a daily quota, metered in seconds for the audio and video tools and
- *   in edits for jumpstyle, and smaller for an anonymous caller;
+ *   in edits for jumpstyle, and smaller for an anonymous caller - each tool's
+ *   own `quota()` reads it, and `oms.quotas.list()` reads all of them plus the
+ *   storage ceilings in one request;
  * - an anonymous caller must pass a Turnstile token
  *   ({@link ToolCaptcha.captchaToken}, sent as `cf_turnstile_token`).
  *

@@ -24,6 +24,7 @@ export * from "./ipLookup";
 export * from "./jobs";
 export * from "./linkTrees";
 export * from "./notepads";
+export * from "./quotas";
 export * from "./shortLinks";
 export * from "./storage";
 export * from "./storage/upload";

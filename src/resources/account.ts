@@ -147,9 +147,12 @@ export interface AccountStorageUsage {
 /**
  * `GET /account/usage`: what the account has spent, per area.
  *
- * This is a bespoke report, not the daily tool quotas - each metered tool
- * reports its own ceiling through its `quota()` call. There is also a row
- * ceiling (250 000 nodes) that this report does not carry.
+ * This is a bespoke report, not a quota answer: it carries breakdowns nothing
+ * else has (the biggest files, the extension histogram) and it does NOT carry
+ * every ceiling - the row ceiling on the file tree and the music byte ceiling
+ * are absent from it. For ceilings, ask `oms.quotas.list()`, which answers all
+ * of them in one call; each metered tool also still reports its own through
+ * its `quota()`.
  */
 export interface AccountUsage {
   readonly user: { readonly id: Id; readonly handle: string; readonly name: string | null };

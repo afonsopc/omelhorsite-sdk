@@ -89,6 +89,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/new/path");
 | `oms.account` | The signed-in user, their profile, their usage report. |
 | `oms.storage` | The virtual filesystem: nodes, uploads, downloads, grants. |
 | `oms.tools` | The metered media tools, each with its own daily quota. |
+| `oms.quotas` | Every ceiling on the account - tools, storage and music - in one call. |
 | `oms.jobs` | Background jobs: list, get, wait, watch. The API has no cancel. |
 | `oms.tickets` | Support tickets and their message threads. |
 | `oms.shortLinks` `oms.notepads` `oms.dynamicQrs` `oms.chests` `oms.forms` `oms.linkTrees` | Everything that ends in a shareable URL. |

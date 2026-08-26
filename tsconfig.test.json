@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "The tests, checked separately from src. They need the bun host types (bun:test, Bun.serve, Bun.file) and src deliberately has `types: []` so no ambient host API can leak into code that must run in an isolate. Two projects is what keeps both true at once: the tests get their types, and src keeps having none.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

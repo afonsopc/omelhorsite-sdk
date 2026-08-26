@@ -17,11 +17,12 @@
     "dist"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit -p .",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.test.json",
     "check:isolate": "bun run scripts/check-isolate.ts",
     "test": "bun run check:isolate && bun test",
     "build": "bun build src/index.ts --target node --format esm --outdir dist --external uqr && tsc -p tsconfig.build.json",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
   "devDependencies": {
     "typescript": "^5.9.3"

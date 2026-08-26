@@ -23,6 +23,7 @@ import { IpLookupNamespace } from "./resources/ipLookup";
 import { JobsNamespace } from "./resources/jobs";
 import { LinkTreesNamespace } from "./resources/linkTrees";
 import { NotepadsNamespace } from "./resources/notepads";
+import { QuotasNamespace } from "./resources/quotas";
 import { ShortLinksNamespace } from "./resources/shortLinks";
 import { StorageNamespace } from "./resources/storage";
 import { TicketsNamespace } from "./resources/tickets";
@@ -116,6 +117,8 @@ export class Oms {
   readonly linkTrees: LinkTreesNamespace;
   /** Background jobs: listing, polling and watching. There is no cancel. */
   readonly jobs: JobsNamespace;
+  /** Every ceiling on the account - tools, storage and music - in one call. */
+  readonly quotas: QuotasNamespace;
   /** The metered media tools, each with its own daily quota. */
   readonly tools: ToolsNamespace;
 
@@ -155,6 +158,7 @@ export class Oms {
     this.forms = new FormsNamespace(this.http);
     this.linkTrees = new LinkTreesNamespace(this.http);
     this.jobs = new JobsNamespace(this.http);
+    this.quotas = new QuotasNamespace(this.http);
     this.tools = new ToolsNamespace(this.http);
   }
 
