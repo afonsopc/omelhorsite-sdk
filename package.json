@@ -1,6 +1,6 @@
 {
   "name": "@omelhorsite/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK for the omelhorsite API. Isolate-safe: no node builtins, no environment access, no stdout.",
   "type": "module",
   "license": "UNLICENSED",
@@ -32,7 +32,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/afonsopc/omelhorsite.git",
-    "directory": "apps/cli/packages/core"
+    "url": "git+https://github.com/afonsopc/omelhorsite-sdk.git"
   }
 }

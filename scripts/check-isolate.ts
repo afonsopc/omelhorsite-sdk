@@ -1,5 +1,5 @@
 /**
- * Enforces decision #2: `packages/core` runs inside a Cloudflare-Worker-class
+ * Enforces decision #2: `@omelhorsite/sdk` runs inside a Cloudflare-Worker-class
  * isolate, so it may not touch `node:*`, `process`, or `console`.
  *
  * Why this exists when `src/isolate-guard.d.ts` already declares a poisoned
@@ -39,7 +39,7 @@ import ts from "typescript";
 
 /** One thing in the core that would not survive in an isolate. */
 export interface IsolateViolation {
-  /** Path relative to `packages/core`, e.g. `src/local/qr.ts`. */
+  /** Path relative to `@omelhorsite/sdk`, e.g. `src/local/qr.ts`. */
   readonly file: string;
   /** 1-based, as an editor counts. */
   readonly line: number;
@@ -91,13 +91,13 @@ const BANNED_GLOBALS: ReadonlyMap<string, string> = new Map([
   ["Bun", "Bun globals are host APIs. Anything they do belongs in packages/cli."],
 ]);
 
-/** `packages/core`, derived from this file's own location rather than a cwd. */
+/** `@omelhorsite/sdk`, derived from this file's own location rather than a cwd. */
 export function corePackageDir(): string {
   return decodeURIComponent(new URL("..", import.meta.url).pathname).replace(/\/$/, "");
 }
 
 /**
- * Scans `packages/core/src` and returns every violation, in file order.
+ * Scans `src` and returns every violation, in file order.
  *
  * Empty means the core would load in a Worker. It is a pure function of the
  * files on disk, so both the CLI entry point below and `test/isolate.test.ts`
@@ -346,5 +346,5 @@ if ((import.meta as { main?: boolean }).main === true) {
         `The core runs in a Cloudflare-Worker-class isolate; host work belongs in packages/cli.`,
     );
   }
-  console.log("packages/core is isolate-safe: no node builtins, no process, no console.");
+  console.log("@omelhorsite/sdk is isolate-safe: no node builtins, no process, no console.");
 }

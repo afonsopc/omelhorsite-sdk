@@ -5,7 +5,7 @@
  * so the tests exercise the actual form encoding and the actual error mapping
  * rather than a mock of them.
  *
- * Lives outside `src/` on purpose: `packages/core/tsconfig.json` only includes
+ * Lives outside `src/` on purpose: `tsconfig.json` only includes
  * `src/**`, because the core is compiled under the isolate guard and a test
  * file is host code.
  */

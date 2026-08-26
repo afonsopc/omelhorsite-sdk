@@ -20,7 +20,7 @@
 import { describe, expect, test } from "bun:test";
 import { findIsolateViolations } from "../scripts/check-isolate";
 
-describe("packages/core is isolate-safe", () => {
+describe("the published source is isolate-safe", () => {
   test("no source file reaches for a node builtin, a process, or a console", () => {
     const violations = findIsolateViolations();
     // Rendered rather than counted: a failure should say which line to open.
