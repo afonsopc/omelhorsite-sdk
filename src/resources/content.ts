@@ -1980,6 +1980,19 @@ export const INTEL_UPSTREAM_READ_TIMEOUT_MS = 60_000;
  * bare-string error.
  *
  * Only `GET` is routed. There is no way to write anything through this proxy.
+ *
+ * @deprecated Intel now lives ENTIRELY inside Rails. The analysis pipeline
+ *   moved into Ruby and Solid Queue, and sources became per-user records with
+ *   sandboxed TS scripts, so the `omelhorsite-intel-analise` sidecar this
+ *   forwards to is on its way out. The route still answers today, which is why
+ *   this class is still here rather than deleted, but nothing new should be
+ *   built on it: when the sidecar goes, every call through here becomes a
+ *   `502 "Intel service unreachable."` with no deprecation window, because the
+ *   backend cannot tell a retired sidecar from a broken one.
+ *
+ *   Use the typed families under {@link IntelNamespace} instead: `articles`,
+ *   `reports`, `sources`, `scripts`, `items`, `config` and `stats` are real
+ *   controllers with real blueprints over the API's own tables.
  */
 export class IntelProxyNamespace extends Resource {
   /**
@@ -3529,7 +3542,12 @@ export class IntelNamespace extends Resource {
   readonly config: IntelConfigNamespace;
   /** Dashboard counters, in one expensive call. */
   readonly stats: IntelStatsNamespace;
-  /** The untyped passthrough to the old intel sidecar. See {@link IntelProxyNamespace}. */
+  /**
+   * The untyped passthrough to the old intel sidecar.
+   *
+   * @deprecated See {@link IntelProxyNamespace}. Kept only because the route
+   *   still answers; the typed families above are the intel API now.
+   */
   readonly proxy: IntelProxyNamespace;
 
   constructor(http: ApiClient) {
@@ -3547,6 +3565,9 @@ export class IntelNamespace extends Resource {
   /**
    * Alias for {@link IntelProxyNamespace.get}. Kept so 0.3.0 call sites still
    * compile; prefer `oms.content.intel.proxy.get(path)`.
+   *
+   * @deprecated The intel sidecar is being retired: intel now lives entirely
+   *   inside Rails. See {@link IntelProxyNamespace}.
    */
   async get<T = unknown>(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<T> {
     return this.proxy.get<T>(path, query, options);
@@ -3555,6 +3576,9 @@ export class IntelNamespace extends Resource {
   /**
    * Alias for {@link IntelProxyNamespace.fetch}. Kept so 0.3.0 call sites still
    * compile; prefer `oms.content.intel.proxy.fetch(path)`.
+   *
+   * @deprecated The intel sidecar is being retired: intel now lives entirely
+   *   inside Rails. See {@link IntelProxyNamespace}.
    */
   async fetch(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<FileOutput> {
     return this.proxy.fetch(path, query, options);
@@ -3563,6 +3587,9 @@ export class IntelNamespace extends Resource {
   /**
    * Alias for {@link IntelProxyNamespace.url}. Kept so 0.3.0 call sites still
    * compile; prefer `oms.content.intel.proxy.url(path)`.
+   *
+   * @deprecated The intel sidecar is being retired: intel now lives entirely
+   *   inside Rails. See {@link IntelProxyNamespace}.
    */
   url(path: string, query?: QueryParams): string {
     return this.proxy.url(path, query);
