@@ -16,15 +16,24 @@ import { staticToken, tokenFromFunction } from "./auth/tokens";
 import { ApiClient, type TokenProvider } from "./http";
 import { local, type LocalNamespace } from "./local/index";
 import { AccountNamespace } from "./resources/account";
+import { AdminNamespace } from "./resources/admin";
+import { PasskeysNamespace } from "./resources/auth/passkeys";
+import { AuthSessionsNamespace } from "./resources/auth/sessions";
 import { ChestsNamespace } from "./resources/chests";
+import { ContentNamespace } from "./resources/content";
 import { DynamicQrsNamespace } from "./resources/dynamicQrs";
 import { FormsNamespace } from "./resources/forms";
 import { IpLookupNamespace } from "./resources/ipLookup";
 import { JobsNamespace } from "./resources/jobs";
+import { LibraryNamespace } from "./resources/library";
 import { LinkTreesNamespace } from "./resources/linkTrees";
+import { MoviesNamespace } from "./resources/movies";
+import { MusicNamespace } from "./resources/music/index";
 import { NotepadsNamespace } from "./resources/notepads";
 import { QuotasNamespace } from "./resources/quotas";
+import { RealtimeNamespace } from "./resources/realtime";
 import { ShortLinksNamespace } from "./resources/shortLinks";
+import { SocialNamespace } from "./resources/social";
 import { StorageNamespace } from "./resources/storage";
 import { TicketsNamespace } from "./resources/tickets";
 import { ToolsNamespace } from "./resources/tools/index";
@@ -92,10 +101,32 @@ export interface OmsOptions {
  * const oms = new Oms({ token: "..." });
  * const me = await oms.account.me();
  * const link = await oms.shortLinks.create({ url: "https://example.com" });
+ * const songs = await oms.music.songs.list({ artist: "Nina Simone" });
+ * const cable = oms.realtime.connect({ token, socket: (u) => new WebSocket(u) });
  * ```
  *
- * Isolate-safe: no `node:*`, no environment, no stdout. A file is always a
- * value (`Blob` / `Uint8Array` / `ReadableStream`), never a path.
+ * ## Two credentials, two namespaces
+ *
+ * `oms.sessions` mints the opaque `Session` token the website and the mobile
+ * apps use, which carries the whole account. `oms.auth` runs OAuth, whose
+ * tokens are scoped and, because `enforce_oauth_scope!` denies by omission,
+ * cannot reach most of the API at all. `oms.realtime` accepts only the first
+ * kind. Picking the wrong one shows up as a `403 insufficient_scope`, or on the
+ * cable as a connection that is silently anonymous.
+ *
+ * ## Isolate-safe
+ *
+ * No `node:*`, no environment, no stdout, and `fetch` is injectable. A file is
+ * normally a VALUE (`Blob` / `Uint8Array` / `ReadableStream`), never a path,
+ * because turning a path into bytes is the host's job.
+ *
+ * The one exception is React Native, which cannot produce a usable `Blob` from
+ * a picked file: there, pass the picker's `{ uri, name, type }`
+ * ({@link NativeFile}) straight into a form bag and the transport appends it
+ * verbatim for RN's networking layer to stream off disk. That works on
+ * multipart endpoints only - the storage direct-upload path has to read and MD5
+ * the bytes, so it rejects a `NativeFile` with a message saying so rather than
+ * failing at the object store.
  */
 export class Oms {
   /**
@@ -105,8 +136,12 @@ export class Oms {
    */
   readonly http: ApiClient;
 
-  /** Signing in, refreshing, revoking, and the RFC 8628 device grant. */
+  /** OAuth: refreshing, revoking, the RFC 8628 device grant, OIDC discovery. */
   readonly auth: AuthNamespace;
+  /** Password sign-in, sign-up, and the emailed six-digit ceremonies. */
+  readonly sessions: AuthSessionsNamespace;
+  /** WebAuthn credentials: register one, sign in with one, list, revoke. */
+  readonly passkeys: PasskeysNamespace;
   /** The signed-in user, their profile, and their usage report. */
   readonly account: AccountNamespace;
   /** Support tickets and their message threads. */
@@ -133,6 +168,25 @@ export class Oms {
   readonly quotas: QuotasNamespace;
   /** The metered media tools, each with its own daily quota. */
   readonly tools: ToolsNamespace;
+  /** Songs, artists, playlists, imports, jams and the music assistant. */
+  readonly music: MusicNamespace;
+  /** Direct messages, friendships and blocks, group chats. */
+  readonly social: SocialNamespace;
+  /** The book library: uploads, shelves, annotations, the study assistant. */
+  readonly library: LibraryNamespace;
+  /** Stremio addons, collections and watch progress. Session credential only. */
+  readonly movies: MoviesNamespace;
+  /** Blogs, notifications, feedback, jokes, site config and the status page. */
+  readonly content: ContentNamespace;
+  /** OAuth client registration for anyone, plus the `/admin/*` routes. */
+  readonly admin: AdminNamespace;
+  /**
+   * The ActionCable connection: playback handoff, jams, notifications, job
+   * progress. Opens nothing until {@link RealtimeNamespace.connect} is called,
+   * and wants a `Session` token rather than the client's own credential - see
+   * that method for why.
+   */
+  readonly realtime: RealtimeNamespace;
 
   /**
    * Pure client-side helpers that touch no network and need no credential
@@ -163,6 +217,8 @@ export class Oms {
     });
 
     this.auth = new AuthNamespace(this.http);
+    this.sessions = new AuthSessionsNamespace(this.http);
+    this.passkeys = new PasskeysNamespace(this.http);
     this.account = new AccountNamespace(this.http);
     this.tickets = new TicketsNamespace(this.http);
     this.storage = new StorageNamespace(this.http);
@@ -176,6 +232,13 @@ export class Oms {
     this.jobs = new JobsNamespace(this.http);
     this.quotas = new QuotasNamespace(this.http);
     this.tools = new ToolsNamespace(this.http);
+    this.music = new MusicNamespace(this.http);
+    this.social = new SocialNamespace(this.http);
+    this.library = new LibraryNamespace(this.http);
+    this.movies = new MoviesNamespace(this.http);
+    this.content = new ContentNamespace(this.http);
+    this.admin = new AdminNamespace(this.http);
+    this.realtime = new RealtimeNamespace(this.http);
   }
 
   /** The API root this client talks to, with no trailing slash. */

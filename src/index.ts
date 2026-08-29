@@ -14,7 +14,10 @@
  * 1. It runs in a Cloudflare-Worker-class isolate. No `node:*`, no `process`,
  *    no filesystem, no stdout. `fetch` is injectable through the constructor.
  * 2. Files are values - `Blob`, `Uint8Array`, `ReadableStream` - never paths.
- *    Turning a path into bytes is the host's job.
+ *    Turning a path into bytes is the host's job. React Native is the single
+ *    exception, and only on multipart endpoints: a picked `{ uri, name, type }`
+ *    (`NativeFile`) goes to the wire verbatim because RN's `FormData` streams
+ *    it off disk and a `Blob` there uploads truncated.
  * 3. The TYPES are the public interface. In code mode a model reads the `.d.ts`
  *    and nothing else, so a name or a JSDoc line carries as much weight as the
  *    behaviour behind it.
