@@ -2,8 +2,17 @@
  * Primitives shared by every namespace of the SDK.
  *
  * Nothing here touches the platform: no `node:*`, no `process`, no `console`.
- * Files are values (Blob / Uint8Array / ReadableStream), never paths - the core
- * has no filesystem. Turning a path into a {@link FileInput} is the CLI's job.
+ * Files are normally values (Blob / Uint8Array / ReadableStream), never paths -
+ * the core has no filesystem, and turning a path into a {@link FileInput} is the
+ * CLI's job.
+ *
+ * React Native is the one exception, and it is the platform's exception rather
+ * than a relaxation of ours: a file the user picked there is a
+ * {@link NativeFile} descriptor `{ uri, name, type }` whose bytes live behind a
+ * `file://` / `content://` / `ph://` URI that only the RN runtime can resolve.
+ * It is still not a path the SDK reads - the SDK never reads it. It is handed
+ * back to RN's own `FormData`, which resolves it natively while building the
+ * multipart body. See {@link FileInput} and {@link NativeFile}.
  */
 
 /** Any JSON value the API can send or receive. */
@@ -20,20 +29,93 @@ export type JsonObject = { [key: string]: Json };
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 /**
+ * A file picked on React Native, exactly as the platform hands it over.
+ *
+ * This is the shape `expo-file-system`'s picker returns and the shape the app
+ * already builds by hand (`oms-music/src/features/settings/pickers.ts`,
+ * `features/playlist/artworkPicker.ts`), and it is a DESCRIPTOR, not bytes: the
+ * URI is a `file://`, `content://` or `ph://` handle into the device, and
+ * nothing in JavaScript can turn it into a `Blob` without a native module.
+ *
+ * The SDK therefore never reads it. It appends the object VERBATIM to a
+ * `FormData`, because RN's `FormData` is not the web one: `getParts()` sees an
+ * entry whose value is an object with a `uri` and emits a file part from it,
+ * and the native networking layer streams the file off disk while building the
+ * multipart body. Handing RN a `Blob` instead is the thing that does not work -
+ * on Android it silently uploads an empty or truncated part.
+ *
+ * The three fields are exactly the three RN reads. `size` is carried because
+ * pickers report it and the SDK's own ceilings want it, and it is harmless:
+ * RN spreads the object into the part and ignores what it does not know.
+ *
+ * ## Where it works, and where it does not
+ *
+ * - `postForm` / any multipart endpoint: yes, on RN. On a web or Bun runtime
+ *   the same object is REJECTED with a `TypeError` rather than stringified into
+ *   `"[object Object]"`, which is what a plain `FormData.append` would do to it.
+ *   See `supportsNativeFormDataFiles` in `http.ts`.
+ * - Storage direct upload (`resources/storage/upload.ts`): NO. That path
+ *   `PUT`s the bytes to a presigned URL and MD5s them first, and neither is
+ *   possible without reading the file. On RN, read it into bytes first (Expo's
+ *   `File#bytes()`), or use a native uploader. {@link readFileInput} throws a
+ *   message saying so rather than failing at the object store.
+ */
+export interface NativeFile {
+  /** Platform handle to the bytes: `file://`, `content://`, `ph://`. */
+  readonly uri: string;
+  /** Filename the server should store. RN sends it as the part's `filename`. */
+  readonly name: string;
+  /**
+   * MIME type. Pickers report `""` for some `content://` URIs, which is why the
+   * app falls back to a per-kind constant before it gets here; do the same, as
+   * Rails infers the container format from the part's content type for several
+   * of the tools.
+   */
+  readonly type?: string;
+  /** Byte length when the picker reported one. Ignored by RN, used by the SDK. */
+  readonly size?: number;
+}
+
+/**
+ * True when `value` is a {@link NativeFile} descriptor.
+ *
+ * The test is `uri` and `name` both being strings, which no other form value
+ * satisfies: a {@link FileInput} carries `data` + `filename`, and everything
+ * else in a form bag is a primitive. Deliberately tolerant of a missing `type`,
+ * because a `content://` pick on Android genuinely arrives without one and
+ * refusing it would lose the upload over a field RN treats as optional.
+ */
+export function isNativeFile(value: unknown): value is NativeFile {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { uri?: unknown; name?: unknown; type?: unknown };
+  if (typeof candidate.uri !== "string" || candidate.uri.length === 0) return false;
+  if (typeof candidate.name !== "string" || candidate.name.length === 0) return false;
+  return candidate.type === undefined || typeof candidate.type === "string";
+}
+
+/**
  * Bytes handed to the SDK for upload.
  *
- * `data` is a value, never a path. `filename` is required because the API
- * derives the stored name and, for some tools, the container format from it.
+ * `data` is a value, never a path - with the one platform exception,
+ * {@link NativeFile}, which is a descriptor RN resolves for us and which only
+ * works on a multipart endpoint. `filename` is required because the API derives
+ * the stored name and, for some tools, the container format from it.
  *
  * `ReadableStream` is accepted for symmetry with the platform, but note that
  * multipart form bodies have to be materialised: {@link readFileInput} buffers
  * a stream into a Blob before it can be appended to a `FormData`. For anything
  * large, prefer the storage direct-upload path, which streams straight to the
  * object store and never passes through Rails.
+ *
+ * On React Native there is no need to wrap a picked file in one of these at
+ * all: pass the picked `{ uri, name, type }` object straight into the form bag
+ * and the transport appends it verbatim. Wrapping it is for the case where the
+ * name the server should store differs from the name on the device, in which
+ * case `filename` wins and is what RN sends as the part's filename.
  */
 export interface FileInput {
-  /** The bytes. */
-  readonly data: Blob | Uint8Array | ReadableStream<Uint8Array>;
+  /** The bytes, or a {@link NativeFile} descriptor on React Native. */
+  readonly data: Blob | Uint8Array | ReadableStream<Uint8Array> | NativeFile;
   /** Name the server should store, e.g. `"take-3.wav"`. Required. */
   readonly filename: string;
   /** MIME type. Defaults to the Blob's own type, then `application/octet-stream`. */
@@ -62,8 +144,25 @@ export interface FileOutput {
  *
  * Buffers a `ReadableStream` fully - see the note on {@link FileInput}. Uses
  * only platform APIs, so it runs in an isolate.
+ *
+ * @throws {TypeError} for a {@link NativeFile}. There is no honest Blob to
+ *   return: the bytes are behind a device URI that only the RN runtime can
+ *   open, and returning an empty Blob would upload an empty file with a 200 on
+ *   it. Multipart endpoints never reach here - `buildFormData` appends a native
+ *   descriptor verbatim instead - so the throw belongs to the byte-hungry
+ *   callers (the storage direct-upload driver, which must also MD5 the body),
+ *   and it names the way out rather than just refusing.
  */
 export async function readFileInput(input: FileInput): Promise<{ blob: Blob; filename: string; contentType: string }> {
+  if (isNativeFile(input.data)) {
+    throw new TypeError(
+      `Cannot read the bytes of "${input.filename}": it is a React Native file descriptor (${input.data.uri}), ` +
+        "and only the RN runtime can resolve that URI. Multipart endpoints (postForm) take it as it is; " +
+        "this path needs real bytes, so read the file first (Expo: `new File(uri).bytes()`) and pass the " +
+        "Uint8Array, or upload it with a native uploader.",
+    );
+  }
+
   const contentType =
     input.contentType ?? (input.data instanceof Blob && input.data.type ? input.data.type : "application/octet-stream");
 
@@ -92,9 +191,14 @@ export async function readFileInput(input: FileInput): Promise<{ blob: Blob; fil
 /**
  * Convenience constructor for a {@link FileInput}. Prefer it over an object
  * literal so the `filename`-is-required rule stays visible at the call site.
+ *
+ * A {@link NativeFile} is accepted and needs this only when the server should
+ * store a different name than the device used; otherwise pass the picked object
+ * straight into the form bag. When wrapped, `filename` and `contentType` are
+ * what go on the wire - the descriptor's own `name` and `type` are overridden.
  */
 export function file(
-  data: Blob | Uint8Array | ReadableStream<Uint8Array>,
+  data: Blob | Uint8Array | ReadableStream<Uint8Array> | NativeFile,
   filename: string,
   options: { contentType?: string; size?: number } = {},
 ): FileInput {
@@ -111,6 +215,37 @@ export function file(
  *
  * `total` is `undefined` whenever the size is genuinely unknown (a stream
  * upload, a server-side render with no ETA). Do not fake it with a guess.
+ *
+ * ## What `phase: "upload"` can and cannot promise
+ *
+ * It ticks once per COMPLETED transfer, never per byte, and that is a property
+ * of `fetch` rather than a decision this SDK is free to revisit. No `fetch` -
+ * browser, React Native or Worker - exposes request-body progress. The web
+ * frontend gets a real byte counter in its 36 `onUploadProgress` call sites
+ * because axios is XHR underneath, and XHR is the only API that has ever
+ * reported bytes as they leave.
+ *
+ * There is therefore ONE mechanism in this SDK, not two: `resources/storage/upload.ts`
+ * ticks per finished transfer (one per 32 MiB part on the multipart tier, one
+ * per file on the direct tier), and a host that wants byte-level granularity
+ * hands an XHR-backed {@link FetchLike} to `UploadManagerOptions.fetch` and
+ * keeps the rest of the driver. That escape hatch is documented there with a
+ * working recipe, and it is available in exactly the runtimes that have XHR:
+ *
+ * - browser: yes, `xhr.upload.onprogress`;
+ * - React Native: yes. RN's own `fetch` is a thin layer over its `XMLHttpRequest`,
+ *   and `xhr.upload.onprogress` fires there for both `Blob` and
+ *   {@link NativeFile} parts - it is the same event `expo-file-system`'s
+ *   uploader surfaces;
+ * - Worker isolate: no. There is no XHR, so per-transfer ticks are the ceiling.
+ *
+ * `supportsUploadProgress()` in `http.ts` answers that question at runtime so a
+ * caller can hide a byte-accurate bar rather than let it sit at 0% and jump.
+ *
+ * The thing not to do is count bytes as they are handed to the runtime: a
+ * stream request body reports what was buffered, not what was acknowledged,
+ * which is the lie that parks a bar at 100% for a minute. It also breaks the
+ * presigned PUTs outright - see the module note in `storage/upload.ts`.
  */
 export interface Progress {
   /** What is happening right now. */
@@ -134,8 +269,19 @@ export interface RequestOptions {
    */
   readonly signal?: AbortSignal;
   /**
-   * Deadline in milliseconds for the whole call, retries included. Overrides
-   * the client default. `0` disables the deadline.
+   * Deadline in milliseconds for ONE ATTEMPT. Overrides the client default.
+   * `0` disables it.
+   *
+   * Not the deadline for the whole call: the transport starts a fresh one per
+   * attempt, so a call that retries can take up to `maxAttempts` times this
+   * plus the backoff between them (and a `429` waits out `Retry-After`, which
+   * this API sets from a one-minute window). To bound the wall clock, pass a
+   * {@link RequestOptions.signal} you abort yourself, or `retry: false`.
+   *
+   * The deadline covers getting a response, not draining it: it is disposed as
+   * soon as the headers arrive, which is what lets `raw()` and `streamText()`
+   * hold a stream open for longer than `timeoutMs`. A stream needs its own
+   * silence limit instead - `streamText` has one.
    */
   readonly timeoutMs?: number;
   /** Extra request headers. Merged over the client's, under `Authorization`. */

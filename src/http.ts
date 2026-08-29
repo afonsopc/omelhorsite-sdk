@@ -5,6 +5,24 @@
  * calls `fetch`, `AbortController`, `FormData`, `Blob` and `setTimeout` only -
  * all of which a Cloudflare Worker provides. `fetch` itself is injected, so a
  * host can wrap it (proxy, cache, test double) without patching a global.
+ *
+ * ## Three runtimes, and where they stop agreeing
+ *
+ * The same transport runs in a browser (the Next.js frontend), in React Native
+ * (the Expo app) and in Bun (the CLI and the MCP server). They agree on
+ * `fetch`, `AbortController`, `Headers`, `FormData` and `setTimeout`. They do
+ * NOT agree on three things, each of which has a named capability check here
+ * rather than a `try` and a shrug:
+ *
+ * | capability                        | browser | React Native | Worker / Bun |
+ * | --------------------------------- | ------- | ------------ | ------------ |
+ * | `supportsResponseStreaming()`     | yes     | **no**       | yes          |
+ * | `supportsUploadProgress()` (XHR)  | yes     | yes          | **no**       |
+ * | `supportsNativeFormDataFiles()`   | no      | **yes**      | no           |
+ *
+ * Read them at the point of use, not once at module load: a host may install a
+ * polyfill after the SDK is imported, and in RN the fetch implementation is
+ * swapped by libraries often enough that a cached answer goes stale.
  */
 
 import {
@@ -20,11 +38,13 @@ import {
   type FetchLike,
   type FileInput,
   type FileOutput,
+  type NativeFile,
   type QueryParams,
   type QueryValue,
   type RequestOptions,
   type ResolvedRetry,
   type RetryOptions,
+  isNativeFile,
   readFileInput,
   resolvePageNumber,
   resolvePageSize,
@@ -32,6 +52,129 @@ import {
 
 /** Production API root. Override only for a local backend or a test double. */
 export const DEFAULT_BASE_URL = "https://backend.omelhorsite.pt";
+
+/**
+ * What the runtime this code woke up in can actually do.
+ *
+ * Answered by probing the globals, never by sniffing a platform name, and
+ * recomputed on every call so a polyfill installed after import is seen. See
+ * the table in the module note for how the three clients score.
+ */
+export interface TransportCapabilities {
+  /** `fetch` hands back a readable body that can be consumed as it arrives. */
+  readonly responseStreaming: boolean;
+  /** `XMLHttpRequest` is present, so byte-level upload progress is reachable. */
+  readonly uploadProgress: boolean;
+  /** `FormData` is React Native's, so a {@link NativeFile} can be appended. */
+  readonly nativeFormDataFiles: boolean;
+}
+
+/** All three capability probes at once. */
+export function transportCapabilities(): TransportCapabilities {
+  return {
+    responseStreaming: supportsResponseStreaming(),
+    uploadProgress: supportsUploadProgress(),
+    nativeFormDataFiles: supportsNativeFormDataFiles(),
+  };
+}
+
+/**
+ * Whether a response body can be read INCREMENTALLY on this runtime.
+ *
+ * This is the question a caller has to answer before it offers a token-by-token
+ * UI, and it has a hard "no" on React Native. RN's `fetch` is its
+ * `XMLHttpRequest` with a whatwg-fetch shim over it: the whole body is
+ * accumulated by the native layer and handed over at the end, `response.body`
+ * is `undefined`, and there is no `ReadableStream` in the runtime at all -
+ * confirmed by grep over `oms-music/src`, which mentions neither
+ * `ReadableStream` nor `getReader` anywhere.
+ *
+ * That is not a gap to polyfill. Nothing that runs in JS can make the native
+ * networking layer emit partial bodies, and the shims that claim to (RN's
+ * `textStreaming` blob response type, `react-native-fetch-api`) either need
+ * `XMLHttpRequest`'s `onprogress` plumbed by hand or a different fetch
+ * altogether. Which is why this is a capability check and not a feature.
+ *
+ * ## What a caller does with the answer
+ *
+ * Pick a PRESENTATION, not a protocol. Both paths hit the same endpoint and
+ * read the same bytes; the difference is whether they arrive in pieces:
+ *
+ * ```ts
+ * if (supportsResponseStreaming()) {
+ *   for await (const chunk of oms.http.streamText("POST", path, { body })) render(chunk);
+ * } else {
+ *   const whole = await oms.http.raw("POST", path, { body }).then((r) => r.text());
+ *   render(whole);                       // one paint, after the server is done
+ * }
+ * ```
+ *
+ * {@link ApiClient.streamText} already contains that fork, so the usual answer
+ * is to call it and use this only to decide what the UI PROMISES: a typing
+ * indicator that never types is worse than a spinner that admits it is waiting.
+ *
+ * The consumer this was designed against is the frontend's `BookChatService`,
+ * which reads an SSE-shaped body (`data: {"delta": "..."}` lines) off
+ * `POST /books/:id/chat`. Framing the lines is the domain's job; this and
+ * `streamText` only promise decoded text in order.
+ *
+ * The three probes are all needed. `ReadableStream` existing does not mean
+ * `fetch` produces one (a polyfilled global over RN's fetch is exactly that
+ * case), `Response.prototype` having `body` does not mean it is non-null on a
+ * given response - `streamText` still checks the instance - and `TextDecoder`
+ * is what turns the chunks into text on the way out.
+ */
+export function supportsResponseStreaming(): boolean {
+  if (typeof ReadableStream !== "function") return false;
+  if (typeof TextDecoder !== "function") return false;
+  if (typeof Response !== "function") return false;
+  const proto = Response.prototype as object | undefined;
+  if (!proto) return false;
+  // `body` is an accessor on the prototype in every runtime that has it, and
+  // absent entirely in RN's shim. `in` sees the accessor without invoking it.
+  return "body" in proto;
+}
+
+/**
+ * Whether `XMLHttpRequest` is available, which is the only route to byte-level
+ * UPLOAD progress in any of the three clients.
+ *
+ * True in a browser and in React Native (RN's networking is XHR underneath and
+ * `xhr.upload.onprogress` fires there); false in a Worker-class isolate and in
+ * Bun's server runtime. See {@link Progress} for the whole argument and
+ * `UploadManagerOptions.fetch` for the recipe - this only reports whether that
+ * recipe can be used here, so a UI can decide between a real bar and a
+ * per-file tick.
+ *
+ * The SDK never uses XHR itself. It cannot: the core has to load in an isolate.
+ */
+export function supportsUploadProgress(): boolean {
+  const xhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest;
+  return typeof xhr === "function";
+}
+
+/**
+ * Whether this runtime's `FormData` accepts a {@link NativeFile} descriptor.
+ *
+ * React Native's `FormData` is not the web one. `append(name, value)` stores
+ * the value as it is, and `getParts()` later reads `value.uri`, `value.name`
+ * and `value.type` off it to build a file part that the native layer streams
+ * from disk. The web `FormData` instead coerces any non-`Blob` to a string, so
+ * the same object silently becomes the literal text `"[object Object]"` in a
+ * text field - a 200 response and an upload that never happened.
+ *
+ * Detected by the presence of `getParts` on the prototype, with
+ * `navigator.product === "ReactNative"` as the second opinion. Not by a
+ * `Platform.OS` import, which would drag `react-native` into a package that has
+ * to load in a Worker.
+ */
+export function supportsNativeFormDataFiles(): boolean {
+  const product = (globalThis as { navigator?: { product?: unknown } }).navigator?.product;
+  if (product === "ReactNative") return true;
+  if (typeof FormData !== "function") return false;
+  const proto = FormData.prototype as unknown as { getParts?: unknown };
+  return typeof proto?.getParts === "function";
+}
 
 /**
  * Supplies the bearer token for each request.
@@ -85,7 +228,14 @@ export interface ApiClientOptions {
   readonly sessionCookie?: boolean;
   /** Headers merged into every request, below per-call headers. */
   readonly headers?: Record<string, string>;
-  /** Default deadline for one call, retries included. `0` disables it. */
+  /**
+   * Default deadline for ONE ATTEMPT, not for the whole call. `0` disables it.
+   *
+   * Each attempt gets a fresh one, so a call that retries can take up to
+   * `maxAttempts` times this plus the backoff. It also stops at the response
+   * headers rather than at the last byte, which is what lets `raw()` and
+   * `streamText()` hold a body open for longer. See {@link RequestOptions.timeoutMs}.
+   */
   readonly timeoutMs?: number;
   /**
    * Shape of the default backoff: how many attempts, how long between them.
@@ -107,8 +257,15 @@ export interface ApiClientOptions {
 /** Body accepted by `post`/`patch`. `undefined` sends no body at all. */
 export type JsonBody = unknown;
 
-/** One field of a multipart form. */
-export type FormFieldValue = string | number | boolean | FileInput | null | undefined;
+/**
+ * One field of a multipart form.
+ *
+ * {@link NativeFile} is here so that a React Native caller can pass the object
+ * its picker returned straight through - `form.image = picked` - without
+ * wrapping it. It is appended verbatim on RN and rejected loudly elsewhere; see
+ * {@link buildFormData}.
+ */
+export type FormFieldValue = string | number | boolean | FileInput | NativeFile | null | undefined;
 
 /**
  * Fields of a multipart form. An array value is appended once per entry with a
@@ -169,6 +326,43 @@ export interface GetOptions extends RequestOptions {
  * This is narrower than the SDK's 0.2.0 behaviour, which retried 5xx on every
  * verb. Nothing in `resources/` relied on that: every call site that mentions
  * retry is turning it OFF.
+ *
+ * ## Why this and not the mobile app's rule
+ *
+ * `oms-music/src/api/retryPolicy.ts` states the rule the app arrived at after
+ * the empty-Home bug: **retry for TIME, never for a RESPONSE**. A transport
+ * failure (a `fetch` that throws, DNS, the iOS radio still waking) is time and
+ * is worth asking again; a `4xx` is an answer and asking again does not change
+ * it; a `5xx` gets one extra go for a deploy or a blinking proxy; `429` gets
+ * none. Two attempts, `error.status >= 500` as the whole predicate.
+ *
+ * That rule is right for what it governs and wrong to copy here, for one
+ * reason: it sits under react-query, where every retried operation is a QUERY.
+ * "Repeat any transport error" is safe when the thing being repeated is a read.
+ * This SDK carries the writes too, and the app's own mutations do NOT go
+ * through that policy. Applying it verbatim would replay a `POST /songs` whose
+ * answer was lost on a lift ride and mint the record twice, which is precisely
+ * the failure the method split above exists to prevent. So the SDK keeps the
+ * axis the app does not have to think about (the METHOD) and agrees with it on
+ * the axis it does: a `4xx` is never retried anywhere.
+ *
+ * On `429` the two genuinely disagree, and the disagreement is deliberate on
+ * both sides. The app declines because its ceiling-aware screens would rather
+ * show "slow down" at once than sit on a hidden `Retry-After` sleep, and
+ * because react-query re-throws a parked error before the network is even
+ * consulted. The SDK retries because it also serves the CLI and the MCP server,
+ * where the right move on a rate limit is to wait the header out and continue,
+ * and because this backend's `429` provably precedes the write (Rack::Attack in
+ * middleware, `too_many_requests!` ahead of every guarded action). A mobile
+ * host that wants the app's behaviour asks for it per call - `retry: false` -
+ * or, at the client, gets the closest match with `new Oms({ retry: { maxAttempts: 2 } })`:
+ * one extra attempt, safe methods only, exactly the app's shape.
+ *
+ * One consequence to design around rather than discover: a retried `429` obeys
+ * `Retry-After`, this API sets it from a one-minute window, and `timeoutMs`
+ * bounds ONE attempt rather than the call. A rate-limited call can therefore
+ * take minutes of wall clock. Anything with a user watching it should pass a
+ * `signal` it can abort, or turn retrying off.
  */
 export class ApiClient {
   /** API root with no trailing slash. */
@@ -256,6 +450,12 @@ export class ApiClient {
    * media file or an SSE endpoint. Retry and auth still apply.
    *
    * The caller owns the body and must consume or cancel it.
+   *
+   * `response.body` is NOT a promise this method can make: React Native has no
+   * `ReadableStream` and leaves it undefined, so any code reaching for
+   * `.body.getReader()` here works in the browser and the CLI and throws on a
+   * phone. Test with {@link supportsResponseStreaming} first, or use
+   * {@link ApiClient.streamText}, which contains that fork already.
    */
   async raw(method: string, path: string, options: GetOptions & { body?: BodyInit } = {}): Promise<Response> {
     return this.send(method, path, {
@@ -266,8 +466,102 @@ export class ApiClient {
   }
 
   /**
+   * Reads a response body as text, in pieces where the runtime allows it and in
+   * one piece where it does not.
+   *
+   * This is the primitive a streaming endpoint is built on. It promises exactly
+   * two things - decoded text, in order, with nothing lost - and deliberately
+   * promises nothing about chunk boundaries, because they are not the same on
+   * the three clients:
+   *
+   * - browser and Bun: one yield per network chunk, as it lands;
+   * - React Native: ONE yield, containing everything, after the server has
+   *   finished. `fetch` there cannot do better - see
+   *   {@link supportsResponseStreaming} - and pretending otherwise by slicing
+   *   the finished body into fake chunks would only make a UI claim to be live.
+   *
+   * So a caller must not assume a chunk is a frame, a line, or a whole
+   * anything: a `data:` line can arrive split across two chunks, and on RN a
+   * hundred of them arrive as one string. Buffer, then split on your own
+   * delimiter. `BookChatService` in the frontend is the reference reader (SSE
+   * `data:` lines carrying `{ delta, done, error }`) and shows the shape of it;
+   * framing belongs to the domain module, not here.
+   *
+   * ## The silence limit exists because of an outage
+   *
+   * A stalled sidecar answered `200` and then said nothing for two minutes at a
+   * time, and `await reader.read()` has no deadline of its own, so the chat
+   * panel span for as long as the tab stayed open. `timeoutMs` does not help:
+   * it is disposed once the headers arrive (it has to be, or no stream could
+   * outlive it). `silenceTimeoutMs` bounds the gap BETWEEN chunks instead and
+   * raises {@link OmsTimeoutError} when nothing arrives for that long. It has
+   * to sit well clear of a cold model's first token; 45s is the number the
+   * frontend settled on and the default here.
+   *
+   * Pass `0` to disable it, and mean it: an unbounded read is a spinner with no
+   * way out. It does not apply on the buffered path, where the single `text()`
+   * read is covered by the caller's `signal`.
+   *
+   * The body is always released: the reader is cancelled on every exit,
+   * including an abandoned `for await` (a `break` runs the generator's
+   * `finally`). An abandoned reader holds the connection open.
+   *
+   * @example
+   * ```ts
+   * let buffer = "";
+   * for await (const chunk of oms.http.streamText("POST", `/books/${id}/chat`, { body })) {
+   *   buffer += chunk;
+   *   // ... pull whole lines out of `buffer`, leave the partial one behind
+   * }
+   * ```
+   */
+  async *streamText(
+    method: string,
+    path: string,
+    options: GetOptions & { body?: JsonBody; silenceTimeoutMs?: number } = {},
+  ): AsyncGenerator<string, void, undefined> {
+    const response = await this.send(method, path, { ...options, body: options.body, parse: false });
+
+    const body = (response as { body?: ReadableStream<Uint8Array> | null }).body;
+    if (!supportsResponseStreaming() || !body) {
+      // React Native, or a runtime that answered without a readable body (a
+      // cache hit, a test double). The bytes are all here already.
+      const whole = await response.text();
+      if (whole.length > 0) yield whole;
+      return;
+    }
+
+    const silenceMs = options.silenceTimeoutMs ?? DEFAULT_STREAM_SILENCE_MS;
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const { done, value } = await readWithSilenceLimit(reader, silenceMs, options.signal);
+        if (done) break;
+        if (!value) continue;
+        // `stream: true` keeps a multi-byte character split across two network
+        // chunks from decoding as two replacement characters.
+        const text = decoder.decode(value, { stream: true });
+        if (text.length > 0) yield text;
+      }
+      const tail = decoder.decode();
+      if (tail.length > 0) yield tail;
+    } finally {
+      void Promise.resolve(reader.cancel()).catch(() => {
+        // The connection is going away regardless.
+      });
+    }
+  }
+
+  /**
    * `GET` that reads the whole response as a {@link FileOutput}, taking the
    * filename from `Content-Disposition` when the server sent one.
+   *
+   * Reads the body into memory in every runtime, React Native included, where
+   * `Response#blob()` needs RN's `BlobModule` and produces a Blob whose bytes
+   * live on the native side. For a large media file on a phone that is the
+   * wrong tool: ask for a signed URL and hand it to the player or to a native
+   * downloader instead of pulling it through JavaScript.
    */
   async download(path: string, options: GetOptions = {}): Promise<FileOutput> {
     const response = await this.raw("GET", path, options);
@@ -507,6 +801,26 @@ export const NULL_SENTINEL = "\b";
  * side of the range. Bodies need no equivalent branch, because `JSON.stringify`
  * already calls `Date.prototype.toJSON` and emits the same string.
  *
+ * ## The brackets are percent-encoded, and that is load-bearing
+ *
+ * `search[title]` goes out as `search%5Btitle%5D`, never as raw `[` and `]`.
+ * Both parse identically in Rails, so this looks like the kind of noise someone
+ * tidies away on a quiet afternoon. It is not, and the reason is iOS.
+ *
+ * `[` and `]` are not legal in a URI query (RFC 3986 reserves them for the host
+ * component). Every browser tolerates them; Apple's URL stack does not. Give
+ * `NSURL`/`URLComponents` a string with a raw bracket in the query and it
+ * re-percent-encodes THE WHOLE QUERY to make it valid - including the `%` signs
+ * of anything already encoded. `search[title]=Caf%C3%A9` comes back out as
+ * `search%5Btitle%5D=Caf%25C3%25A9`, and the server dutifully searches for the
+ * literal text `Caf%C3%A9`, which matches nothing. The failure is a silent
+ * empty list on one platform, which is the most expensive kind to find.
+ *
+ * `encodeURIComponent` handles this by encoding brackets already; the point of
+ * writing it down is that nothing here may "simplify" the encoder into
+ * `encodeURI`, a template literal, or a hand-built `key[sub]=value`, all of
+ * which emit raw brackets. `test/react-native.test.ts` pins it.
+ *
  * @throws {TypeError} for an invalid `Date`. `toISOString()` would throw a bare
  *   `RangeError` from deep inside the transport; failing loudly at the boundary
  *   beats sending `Invalid Date` and getting an unfiltered page back.
@@ -591,16 +905,55 @@ export function pageModifier(page = 1, pageSize: number = DEFAULT_PAGE_SIZE): st
  * UPDATE, where absent means "leave it alone". No endpoint takes one - the SDK
  * sends multipart to the tools and to `POST /books` only - and if one appears,
  * pass {@link NULL_SENTINEL} as the field value explicitly.
+ *
+ * ## React Native files
+ *
+ * A {@link NativeFile} - the `{ uri, name, type }` a picker returns - is
+ * appended VERBATIM, as the object it is. That is the whole trick: RN's
+ * `FormData` keeps the value untouched and its `getParts()` turns an entry with
+ * a `uri` into a file part that the native layer streams off disk. Converting
+ * it to anything first is what breaks it.
+ *
+ * On a runtime whose `FormData` is the web one, the same object would be
+ * coerced to the string `"[object Object]"` and uploaded as a text field: a
+ * 200, a stored record, and no file. So it throws there instead
+ * ({@link supportsNativeFormDataFiles}), and for the same reason any other
+ * unrecognised object throws rather than being stringified - a descriptor that
+ * lost its `name` in transit is a typo, not a form value.
  */
 export async function buildFormData(fields: FormFields): Promise<FormData> {
   const form = new FormData();
 
   const append = async (key: string, value: FormFieldValue): Promise<void> => {
     if (value === undefined || value === null) return;
+    if (isNativeFile(value)) {
+      appendNativeFile(form, key, value);
+      return;
+    }
     if (isFileInput(value)) {
+      if (isNativeFile(value.data)) {
+        // Wrapped only to rename it: `filename` and `contentType` are what the
+        // caller asked the server to store, so they win over the descriptor's.
+        // An empty `type` is treated as absent, which is how a `content://`
+        // pick arrives on Android.
+        const contentType = value.contentType || value.data.type || undefined;
+        appendNativeFile(form, key, {
+          uri: value.data.uri,
+          name: value.filename,
+          ...(contentType === undefined ? {} : { type: contentType }),
+        });
+        return;
+      }
       const { blob, filename } = await readFileInput(value);
       form.append(key, blob, filename);
       return;
+    }
+    if (typeof value === "object") {
+      throw new TypeError(
+        `Form field "${key}" is an object the SDK does not recognise as a file. A React Native pick needs a ` +
+          "string `uri` and a string `name`; anything else must be a FileInput ({ data, filename }) or a " +
+          "primitive. Left alone it would go out as the literal text \"[object Object]\".",
+      );
     }
     form.append(key, String(value));
   };
@@ -616,7 +969,35 @@ export async function buildFormData(fields: FormFields): Promise<FormData> {
   return form;
 }
 
-/** Narrows an unknown form value to a {@link FileInput}. */
+/**
+ * Puts a React Native file descriptor into a `FormData` untouched.
+ *
+ * The cast is the point rather than an escape: the DOM typings say a value is a
+ * `string` or a `Blob`, and on RN it is neither. Guarded by
+ * {@link supportsNativeFormDataFiles} so the cast can only reach a `FormData`
+ * that knows what to do with it - everywhere else the object would be
+ * stringified into a field and the upload would vanish with a 200 on it.
+ */
+function appendNativeFile(form: FormData, key: string, native: NativeFile): void {
+  if (!supportsNativeFormDataFiles()) {
+    throw new TypeError(
+      `Form field "${key}" is a React Native file descriptor (${native.uri}), but this runtime's FormData is ` +
+        "the web one and would upload it as the text \"[object Object]\". Only React Native can resolve a " +
+        "file:// or content:// URI. On any other runtime, read the bytes first and pass " +
+        "{ data: <Blob | Uint8Array>, filename }.",
+    );
+  }
+  (form as unknown as { append(name: string, value: unknown): void }).append(key, native);
+}
+
+/**
+ * Narrows an unknown form value to a {@link FileInput}.
+ *
+ * A {@link NativeFile} in `data` counts: it is a legitimate `FileInput` on RN,
+ * it just cannot be turned into bytes. Callers that need bytes should test with
+ * `isNativeFile(input.data)` rather than trusting this, or let
+ * `readFileInput` throw the message that explains the way out.
+ */
 export function isFileInput(value: unknown): value is FileInput {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as { data?: unknown; filename?: unknown };
@@ -624,6 +1005,7 @@ export function isFileInput(value: unknown): value is FileInput {
   return (
     candidate.data instanceof Blob ||
     candidate.data instanceof Uint8Array ||
+    isNativeFile(candidate.data) ||
     (typeof ReadableStream !== "undefined" && candidate.data instanceof ReadableStream)
   );
 }
@@ -666,6 +1048,68 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/**
+ * How long {@link ApiClient.streamText} will wait for the NEXT chunk before it
+ * gives up: 45 seconds, the number the frontend's `BookChatService` arrived at.
+ *
+ * It is a silence limit, not a total: a stream that keeps producing runs as
+ * long as it likes. The value has to clear a cold model's first token (the
+ * weights are paged in before anything is generated) while still being shorter
+ * than a user's patience. The proxy usually drops a silent stream first; this
+ * is the backstop for when nothing else closes the connection.
+ */
+export const DEFAULT_STREAM_SILENCE_MS = 45_000;
+
+/**
+ * One `reader.read()`, bounded by a silence limit and by the caller's signal.
+ *
+ * `read()` has no timeout of its own and never rejects on its own when the
+ * server simply stops writing, which is how a stalled sidecar turns into a
+ * spinner that outlives the tab. The race gives it one.
+ *
+ * The timer is always cleared, including on the winning read, or a long stream
+ * would leave one pending handle per chunk.
+ */
+async function readWithSilenceLimit(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  silenceMs: number,
+  signal: AbortSignal | undefined,
+): Promise<{ done: boolean; value?: Uint8Array }> {
+  if (silenceMs <= 0 && !signal) return reader.read();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+
+  const interrupted = new Promise<never>((_, reject) => {
+    if (signal) {
+      if (signal.aborted) {
+        reject(new OmsTimeoutError("Aborted by caller", { aborted: true }));
+        return;
+      }
+      onAbort = (): void => reject(new OmsTimeoutError("Aborted by caller", { aborted: true }));
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (silenceMs > 0) {
+      timer = setTimeout(() => {
+        reject(
+          new OmsTimeoutError(
+            `The response stream went quiet for ${silenceMs}ms. The server accepted the request and then stopped ` +
+              "producing, which is not something the connection reports on its own.",
+            { timeoutMs: silenceMs },
+          ),
+        );
+      }, silenceMs);
+    }
+  });
+
+  try {
+    return await Promise.race([reader.read(), interrupted]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort && signal) signal.removeEventListener("abort", onAbort);
+  }
 }
 
 /**
