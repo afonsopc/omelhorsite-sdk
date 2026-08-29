@@ -1,6 +1,7 @@
 /**
  * The `music.artists` namespace: the artist roster, the Artists page header,
- * artist artwork, and the Spotify-backed "import a whole artist" flow.
+ * artist artwork, the Spotify-backed "import a whole artist" flow, and the
+ * daily release watch that follows an artist for what it puts out NEXT.
  *
  * ## An artist row belongs to ONE user
  *
@@ -27,8 +28,9 @@
  * normalised before it is matched, so `GET /artists` (the roster index) does
  * NOT match and falls back to the general authenticated ceiling of 600/min.
  * `/artists/overview`, `/artists/:id`, both uploads, `PATCH` and `DELETE` all
- * DO match. The `/artist_imports*` routes do not (`artist_imports` is not
- * `artists/`) and are on the general ceiling as well.
+ * DO match. The `/artist_imports*` and `/artist_syncs*` routes do not (neither
+ * `artist_imports` nor `artist_syncs` is `artists/`) and are on the general
+ * ceiling as well.
  *
  * Every method below states which of the two it lands in.
  *
@@ -216,7 +218,9 @@ export interface Artist {
   readonly songs_count: number;
   /**
    * Artwork of one of this artist's own lead songs, for a card that has no
-   * picture at all. A media id, resolvable through `/fs_nodes/:id/data`.
+   * picture at all. A media id, resolvable through `oms.media` (the canonical
+   * `/media/:id/data`); `/fs_nodes/:id/data` is the alias kept for the web
+   * frontend and reaches the same bytes.
    *
    * NON-NULL ONLY ON `GET /artists` AND `GET /artists/:id`, where the
    * controller precomputes the whole page with a single `DISTINCT ON` query.
@@ -709,14 +713,272 @@ export class MusicArtistImportsNamespace extends Resource {
   }
 }
 
+
+/**
+ * Primary key of an artist sync. An integer, like {@link ArtistId} and
+ * {@link ArtistImportId}, and interchangeable with NEITHER: a sync is keyed on
+ * a SPOTIFY artist id and never references a local `Artist` row at all. Three
+ * integer id spaces meet in this file and only the field name tells them apart.
+ */
+export type ArtistSyncId = number;
+
+/**
+ * A followed artist, as `/artist_syncs` renders it.
+ *
+ * ## This payload is hand-built, so the base fields you expect are MISSING
+ *
+ * There is no `ArtistSyncBlueprint`. `ArtistSyncsController#serialize` writes
+ * the hash literally, which is why this is the one music record with no
+ * `created_at` and no `updated_at` - the convention that every payload carries
+ * them holds everywhere a Blueprinter view is involved and stops here. Do not
+ * sort a list of these by `created_at` client-side; the server already returns
+ * them newest-first and that ordering is the only one available.
+ *
+ * `known_album_ids` is likewise not exposed. The row stores the full array of
+ * Spotify album ids (a `jsonb` column) and only its SIZE crosses the wire, so
+ * the SDK cannot tell you WHICH albums are already known - only how many.
+ */
+export interface ArtistSync {
+  readonly id: ArtistSyncId;
+  /** Spotify's artist id. The join key, and the natural key of the row. */
+  readonly spotify_artist_id: string;
+  /**
+   * Display name captured when the sync was created or last re-POSTed.
+   *
+   * `null` when the very first {@link MusicArtistSyncsNamespace.create} omitted
+   * it. It is never refreshed from Spotify, and it cannot be CLEARED: a create
+   * with a blank name keeps whatever the row already had (see
+   * {@link CreateArtistSyncInput.spotifyArtistName}).
+   */
+  readonly artist_name: string | null;
+  /**
+   * Whether `ArtistDailySyncDispatcherJob` will pick this row up (its scope is
+   * `where(enabled: true)`).
+   *
+   * Always `true` on anything this SDK can produce: `create` sets it, and there
+   * is no update route to turn it off. A `false` here can only have been
+   * written by the console, and the only way a client can stop a sync is
+   * {@link MusicArtistSyncsNamespace.delete}. Render it, do not offer a toggle.
+   */
+  readonly enabled: boolean;
+  /**
+   * When the daily check last ran, ISO-8601, or `null` in the vanishingly
+   * short window before `create` saves the row.
+   *
+   * A TOUCH, not a success marker. `ArtistSyncCheckJob` writes it on the happy
+   * path AND in both of its rescue arms (dead refresh token, Spotify upstream
+   * error), so a fresh timestamp proves the job ran, never that Spotify
+   * answered. There is no field that records the last failure - it is a
+   * `Rails.logger.warn` and nothing else - so a UI cannot honestly say "last
+   * checked, all good".
+   */
+  readonly last_checked_at: Timestamp | null;
+  /**
+   * How many Spotify album ids the snapshot holds. `Array(known_album_ids).size`.
+   *
+   * This is the baseline the daily diff runs against, not a count of songs
+   * imported. It GROWS and never shrinks, because the job stores the union
+   * (`known | current_ids`) precisely so an album Spotify hides and later shows
+   * again cannot re-import as new.
+   */
+  readonly known_album_count: number;
+}
+
+/** Arguments for {@link MusicArtistSyncsNamespace.create}. */
+export interface CreateArtistSyncInput {
+  /**
+   * Spotify's artist id - the same string
+   * {@link MusicArtistImportsNamespace.search} returns on its `spotify` side,
+   * NOT a local {@link ArtistId}.
+   */
+  readonly spotifyArtistId: string;
+  /**
+   * Display name to store. Optional, and asymmetric: omitted on a FIRST create
+   * it lands as `null`, omitted on a re-create it leaves the existing name
+   * alone. Blank and absent behave identically, so there is no way to erase a
+   * name once written - only to overwrite it with another.
+   */
+  readonly spotifyArtistName?: string;
+}
+
+/**
+ * Daily release watch for a Spotify artist, reachable as
+ * `oms.music.artists.syncs`.
+ *
+ * ## `syncs` versus `imports`: a subscription versus a backfill
+ *
+ * They share a Spotify artist id and nothing else, and picking the wrong one
+ * is the mistake this namespace exists to make hard:
+ *
+ * | | {@link MusicArtistImportsNamespace} | this |
+ * | --- | --- | --- |
+ * | what it does | imports the albums you CHOSE, now | watches for albums released LATER |
+ * | back catalogue | yes, that is the point | never |
+ * | when work happens | immediately, `ArtistImportJob` | daily, 05:00 server time |
+ * | you pick albums | yes, `albumIds` is required | no, there is no album argument |
+ * | repeating the call | duplicates the whole import | idempotent, one row per artist |
+ *
+ * "Follow" here means FROM NOW ON. {@link create} takes a snapshot of the
+ * artist's current catalogue and stores the album ids; the discography that
+ * already exists is deliberately excluded from everything the sync will ever
+ * do. A user who wants both has to do both - follow for the future, and run an
+ * import for the past.
+ *
+ * ## What the sync produces is an ArtistImport, so watch it there
+ *
+ * `ArtistDailySyncDispatcherJob` runs at 05:00, walks every enabled row and
+ * schedules each check at a random offset inside a 30-minute window (the same
+ * anti-stampede discipline as the Spotify sync). Each `ArtistSyncCheckJob`
+ * re-walks the artist's catalogue, diffs it against the snapshot and, when
+ * something is new, creates an ordinary `ArtistImport` holding ONLY the new
+ * album ids - `last_message` starts as `"Novo lançamento detectado pelo sync
+ * diário…"`, which is the marker that tells an automatic import from one a
+ * person asked for.
+ *
+ * So there is no progress on this namespace and nothing to poll here. Progress
+ * lives in {@link MusicArtistImportsNamespace.list}, mixed in with manual
+ * imports. Nothing pushes either over the cable.
+ *
+ * ## A LINKED SPOTIFY IDENTITY is required to write, not to read
+ *
+ * {@link create} is gated on `Current.user.identities.find_by(provider:
+ * "spotify")` and answers `400 "Connect Spotify first."` without one. {@link
+ * list} and {@link delete} are not gated, which matters after an unlink: the
+ * rows survive, they still list, they can still be deleted, and the daily job
+ * quietly skips them (`return unless identity`) without recording that it did.
+ *
+ * ## Ceilings and cost
+ *
+ * Every route here is on the GENERAL authenticated ceiling of 600/min.
+ * `/artist_syncs` does not match the 60/min `\A/(lyrics|artists/|...)` bucket -
+ * the underscore breaks the `artists/` prefix - and it is not in
+ * `EXPENSIVE_TOOL_PATHS` either, even though {@link create} is by far the
+ * slowest call in this file.
+ *
+ * ## An OAuth access token cannot reach any of this
+ *
+ * `ArtistSyncsController` declares no `oauth_scope`, and the gate denies by
+ * default, so a Doorkeeper token gets `403 {"error":"insufficient_scope"}`
+ * here as it does everywhere else in `music`. Session token or cookie only.
+ */
+export class MusicArtistSyncsNamespace extends Resource {
+  /**
+   * `GET /artist_syncs` - every artist this account follows, newest first.
+   *
+   * Not the List DSL and not a paginated index: no `search`, no
+   * `exact_search`, no `modifiers`, no `limit`, and NO `ETag`, so this cannot
+   * answer `304` and every poll pays for the full body. The server orders by
+   * `created_at DESC` and hands back everything; a user following two hundred
+   * artists gets two hundred rows.
+   *
+   * The array is wrapped in `{ items: [...] }` on the wire - the same envelope
+   * `/artist_imports` uses and the opposite of the bare arrays the rest of the
+   * API returns - and is unwrapped here.
+   *
+   * Safe to retry, and scoped to the caller: `ArtistSync.viewable_by` is
+   * `where(user:)`, so there is no way to read anyone else's follows.
+   */
+  async list(options: RequestOptions = {}): Promise<ArtistSync[]> {
+    const body = await this.http.get<{ items: ArtistSync[] }>("/artist_syncs", options);
+    return body.items ?? [];
+  }
+
+  /**
+   * `POST /artist_syncs` - follow an artist, and snapshot what it has today.
+   *
+   * Answers `201` with the stored row. The response is worth reading rather
+   * than discarding: `known_album_count` is the size of the snapshot that was
+   * just taken, and it is the only confirmation that the catalogue walk
+   * actually happened.
+   *
+   * ## Idempotent, unlike its neighbour
+   *
+   * `find_or_initialize_by(user:, spotify_artist_id:)` behind a unique index,
+   * so calling this twice for one artist updates a single row instead of
+   * creating a second - it re-enables the sync, overwrites the name if one was
+   * sent, and touches `last_checked_at`. It does NOT re-snapshot: the Spotify
+   * walk is guarded by `if sync.known_album_ids.blank?`, so a second create is
+   * cheap and, more importantly, cannot silently widen the baseline and swallow
+   * releases that arrived in between.
+   *
+   * That is why this one opts INTO retries (`retry: {}`) while
+   * {@link MusicArtistImportsNamespace.create} refuses them: a replayed follow
+   * converges on the same row, a replayed import runs a whole discography
+   * twice. Pass `retry: false` to opt back out.
+   *
+   * ## It is slow, because it walks the discography on the request thread
+   *
+   * `SpotifyClient#each_artist_album` pages through every album before the
+   * response is written, exactly like
+   * {@link MusicArtistImportsNamespace.albums}. Sixty seconds by default. The
+   * one case that is instant is a re-create over a row that already has a
+   * snapshot.
+   *
+   * An artist with a genuinely EMPTY catalogue never stops paying that cost:
+   * `[]` is `blank?`, so every create for it walks Spotify again.
+   *
+   * @throws {OmsError} `invalid_request` when `spotifyArtistId` is blank. The
+   *   server would answer `400` for it too - `params.require` raises
+   *   `ParameterMissing` and this controller, unlike the import one, RESCUES it
+   *   into a normal bad request, so it does not page the owner - but the round
+   *   trip buys nothing.
+   * @throws {OmsApiError} 400 `"Connect Spotify first."` with no linked
+   *   identity, `"Spotify connection needs to be relinked."` on a dead refresh
+   *   token, or `"Spotify upstream error: ..."` (truncated to 200 characters).
+   *   All three are bare JSON strings and only the text separates them.
+   */
+  async create(input: CreateArtistSyncInput, options: RequestOptions = {}): Promise<ArtistSync> {
+    assertPresent("spotifyArtistId", input.spotifyArtistId);
+    return this.http.post<ArtistSync>(
+      "/artist_syncs",
+      {
+        spotify_artist_id: input.spotifyArtistId,
+        spotify_artist_name: input.spotifyArtistName ?? "",
+      },
+      { timeoutMs: 60_000, retry: {}, ...options },
+    );
+  }
+
+  /**
+   * `DELETE /artist_syncs/:id` - unfollow.
+   *
+   * Takes the {@link ArtistSyncId}, NOT the Spotify artist id: the only place
+   * to get one is {@link list} or the record {@link create} returned.
+   *
+   * Destroys the row and its snapshot outright. Nothing already imported is
+   * touched, and re-following later starts from a FRESH snapshot of the
+   * catalogue as it stands then - which means anything released during the gap
+   * is now part of the baseline and will never be picked up. That gap is
+   * silent; if it matters, run an import for the missing albums.
+   *
+   * The server answers `200 {"ok": true}` here rather than the `204` the rest
+   * of the API uses for a destroy. This resolves to `undefined` either way -
+   * the body carries no information - but a caller reading `response.status`
+   * through {@link ApiClient.raw} should not expect 204.
+   *
+   * Not retried, by the transport's default for `DELETE`: the second attempt
+   * would find nothing and report `404` for a row it had just removed.
+   *
+   * @throws {OmsApiError} 404 `"Artist sync not found"` for an id that is not
+   *   yours or no longer exists. A non-numeric id lands here too, cast to `0`
+   *   by the column type rather than rejected.
+   */
+  async delete(id: ArtistSyncId, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/artist_syncs/${id}`, options);
+  }
+}
+
 /** The `music.artists` namespace, reachable as `oms.music.artists`. */
 export class MusicArtistsNamespace extends Resource {
   /** Bulk import of a Spotify artist's catalogue. */
   readonly imports: MusicArtistImportsNamespace;
+  /** Daily watch for FUTURE releases. Not a backfill - see the class. */
+  readonly syncs: MusicArtistSyncsNamespace;
 
   constructor(http: ApiClient) {
     super(http);
     this.imports = new MusicArtistImportsNamespace(http);
+    this.syncs = new MusicArtistSyncsNamespace(http);
   }
 
   /**

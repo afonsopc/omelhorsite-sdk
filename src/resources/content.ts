@@ -47,9 +47,13 @@
  *    per IP, after a bot pushed roughly 200 notification emails through it in
  *    one burst, plus a three-minute de-duplication window inside the
  *    controller. See {@link FeedbacksNamespace.create}.
- * 9. **The intel routes are a generic proxy, not an API.** The SDK refuses to
- *    invent types for a service whose responses it cannot see. See
- *    {@link IntelProxyNamespace}.
+ * 9. **"Intel" is two unrelated things sharing a prefix.** `GET /intel/*path`
+ *    is a generic forwarder to a sidecar whose routes are not in the backend
+ *    repository, so it stays untyped on purpose ({@link IntelProxyNamespace}).
+ *    The `/intel_articles`, `/intel_reports`, `/intel_sources`,
+ *    `/intel_scripts`, `/intel_items`, `/intel_config` and `/intel_stats`
+ *    routes are ordinary Rails controllers with blueprints, and they are fully
+ *    typed ({@link IntelNamespace}). Reach for the second set.
  * 10. **Two blog routes are private by accident.** `allow_unauthenticated_access`
  *    lists `index` and `show` on both blog controllers and nothing else, so the
  *    public PERMALINK (`GET /blogs/:blog/posts/:slug`) rejects anonymous
@@ -84,6 +88,7 @@ import { ApiClient, Resource, pageModifier } from "../http";
 import type {
   FileOutput,
   Id,
+  Json,
   PageParams,
   Paginated,
   QueryParams,
@@ -1948,11 +1953,11 @@ export const INTEL_UPSTREAM_READ_TIMEOUT_MS = 60_000;
  * this namespace offers exactly what the endpoint offers: a path, a query bag,
  * and a caller-supplied result type it is the CALLER's job to justify.
  *
- * If you want typed intel data, use the native Rails endpoints instead
- * (`/intel_articles`, `/intel_reports`, `/intel_sources`, `/intel_scripts`,
- * `/intel_stats`, `/intel_config`) - those are real controllers with real
- * blueprints. The web frontend moved onto them and left this proxy behind.
- * They are outside this namespace's scope and are not wrapped here.
+ * If you want typed intel data, use the native Rails endpoints instead -
+ * they are real controllers with real blueprints, the web frontend moved onto
+ * them and left this proxy behind, and they ARE wrapped, one family per
+ * sub-namespace under {@link IntelNamespace}. This class is only for the
+ * embedded hub the old page still renders and for its image bytes.
  *
  * ## Access
  *
@@ -2059,6 +2064,1512 @@ function intelPath(path: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Intel: the native Rails endpoints
+// ---------------------------------------------------------------------------
+
+/**
+ * ## Why these ARE typed, when the proxy above is not
+ *
+ * The two halves of "intel" look alike and are nothing alike.
+ * {@link IntelProxyNamespace} forwards `GET /intel/*path` to a service whose
+ * routes are not in the backend repository, so its answers are genuinely
+ * unknowable. Everything below is the opposite: seven ordinary Rails
+ * controllers over eight of the backend's own tables, each with a Blueprinter
+ * blueprint that names every key it emits. `IntelArticleBlueprint`,
+ * `IntelReportBlueprint`, `IntelSourceBlueprint`, `IntelScriptBlueprint`,
+ * `IntelItemBlueprint` and `IntelConfigBlueprint` are the contract, and
+ * `IntelStatsController#show` hand-writes its hash literally. Nothing here is
+ * forwarded, nothing here is opaque, and the SDK types it the way it types any
+ * other resource.
+ *
+ * Where the two meet: the sidecar behind the proxy is the OLD, separate intel
+ * product embedded in the web app's `/intel` page. The routes below are the one
+ * that replaced it. Reach for these first; the proxy is for the embedded hub
+ * and for image bytes.
+ *
+ * ## Access: this is effectively a one-user feature
+ *
+ * `IntelAccess` runs `before_action :require_intel_access` on all seven
+ * controllers, and `Intel::Access.allowed?` is `user.admin? ||
+ * ALLOWED_HANDLES.include?(user.handle)` with `ALLOWED_HANDLES` frozen to a
+ * single handle in the source. So: anonymous is `401`, any other signed-in
+ * account is `403 "Intel access is restricted."`, and no amount of correct
+ * request shaping changes that. Do not build a shared feature on it, and do not
+ * treat a 403 here as a bug in the caller.
+ *
+ * As with everything else in this file, no controller declares an
+ * `oauth_scope`, so an OAuth access token is `403 {"error":"insufficient_scope"}`
+ * on every route below. Session credential only.
+ *
+ * ## Ids are STRINGS here, unlike the rest of this file
+ *
+ * Both intel migrations create every table with `id: :string`, so articles,
+ * reports, sources, scripts, items and the config row all carry opaque string
+ * ids - while blogs, notifications, jokes and Space Invaders games two hundred
+ * lines up are integers. Nothing in intel is ever a number you can compare or
+ * sort by.
+ *
+ * ## Ceilings
+ *
+ * None of their own. Every route rides the general bucket: 600 requests per
+ * minute for an authenticated caller. Two of them are still expensive and are
+ * documented as such - {@link IntelStatsNamespace.get} and
+ * {@link IntelSourcesNamespace.run}.
+ */
+
+/** Categories `IntelArticle::CATEGORIES` allows. `null` when the classifier declined to pick one. */
+export const INTEL_ARTICLE_CATEGORIES = [
+  "incidente",
+  "politica",
+  "comunidade",
+  "sociedade",
+  "internacional",
+  "economia",
+  "outro",
+] as const;
+
+/**
+ * A story's category.
+ *
+ * Widened with `string & {}` deliberately: the list is a Ruby constant that a
+ * migration can extend without the SDK noticing, and a `switch` that fails to
+ * compile on a new category is worse than one that falls through to a default.
+ * The backend DOES validate inclusion, so a value outside the list can only
+ * mean the constant moved.
+ */
+export type IntelArticleCategory = (typeof INTEL_ARTICLE_CATEGORIES)[number] | (string & {});
+
+/** Report windows `IntelReport::KINDS` allows. */
+export const INTEL_REPORT_KINDS = ["6h", "day", "week", "month"] as const;
+
+/** Which window a report covers. */
+export type IntelReportKind = (typeof INTEL_REPORT_KINDS)[number] | (string & {});
+
+/** The three values `IntelSource::HEALTHS` allows. */
+export const INTEL_SOURCE_HEALTHS = ["unknown", "ok", "error"] as const;
+
+/** Health of a source's last run. `"unknown"` until it has ever run. */
+export type IntelSourceHealth = (typeof INTEL_SOURCE_HEALTHS)[number];
+
+/**
+ * The only keys {@link IntelConfig.prompts} accepts, from
+ * `IntelConfig::PROMPT_KEYS`.
+ *
+ * Any other key fails the whole `PATCH` with
+ * `400 "Prompts unknown keys: <the offenders>"`. A key that is present but
+ * empty is not the same as an absent one: absent means "use the platform
+ * default", present-and-empty means the pipeline gets an empty prompt.
+ */
+export const INTEL_PROMPT_KEYS = ["build", "enrich_plan", "enrich_actors", "enrich_synth", "report"] as const;
+
+/** One overridable prompt in the analysis pipeline. */
+export type IntelPromptKey = (typeof INTEL_PROMPT_KEYS)[number];
+
+/**
+ * Consecutive failures after which `IntelSource#register_failure!` flips
+ * `enabled` to `false` by itself. Mirrors `IntelSource::DISABLE_AFTER_FAILURES`.
+ *
+ * Nothing turns it back on: a source that hit this stays off until someone
+ * `update()`s `enabled` back to `true`. That is what
+ * {@link IntelSource.consecutive_failures} is for - watch it, do not wait for
+ * an alert.
+ */
+export const INTEL_SOURCE_DISABLE_AFTER_FAILURES = 20;
+
+/** Largest script body `IntelScript` will store, from `IntelScript::MAX_CODE_BYTES`. */
+export const INTEL_SCRIPT_MAX_CODE_BYTES = 64 * 1024;
+
+/**
+ * A story: several raw items about the same event, grouped, scored and
+ * categorised by the analysis pipeline.
+ *
+ * This is the shape an INDEX row has. `GET /intel_articles/:id` renders
+ * `:extended`, which is this plus four more keys - see
+ * {@link IntelArticleDetail}. Blueprinter views inherit, so the detail is
+ * always a superset, never a different record.
+ */
+export interface IntelArticle {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  /** Headline the model wrote. Nullable: the column has no `NOT NULL`. */
+  readonly title: string | null;
+  /** One-paragraph summary. Nullable for the same reason. */
+  readonly summary: string | null;
+  /**
+   * 0-10, validated `only_integer, in: 0..10`. The buckets the dashboard uses
+   * are in {@link IntelStats.by_importance} and they are NOT evenly spaced:
+   * >=9 critical, 7-8 high, 5-6 medium, 3-4 low, <3 noise.
+   */
+  readonly importance: number;
+  /** See {@link IntelArticleCategory}. `null` when unclassified. */
+  readonly category: IntelArticleCategory | null;
+  /**
+   * Free-form tags. The column defaults to `[]`, but it is nullable, so a row
+   * written before the default landed can still hand you `null`. Do not map
+   * over it without a guard.
+   */
+  readonly tags: string[] | null;
+  /**
+   * The `og:image` of one of the story's sources, stored RAW and uncompressed
+   * - it points at whatever news site published it, not at this API. Render it
+   * through {@link intelArticleImageUrl} rather than directly; that helper
+   * explains the trade it makes.
+   */
+  readonly image_url: string | null;
+  /**
+   * Whether the web-search enrichment pass has run on this story.
+   *
+   * `false` is not a failure, it is a queue position: `AnalyzeUserJob` enriches
+   * at most three stories per run, only those at or above
+   * {@link IntelConfig.enrich_min_importance}, and only while
+   * {@link IntelConfig.web_search} is on. A low-importance story stays `false`
+   * for ever, by design.
+   */
+  readonly enriched: boolean;
+  /** When the story was first built. */
+  readonly first_seen_at: Timestamp;
+  /** Touched every time a new item joins the story. This is the "recency" clock. */
+  readonly last_seen_at: Timestamp;
+  /**
+   * How many raw items back this story.
+   *
+   * Computed in the blueprint as `article.intel_article_sources.size`, which
+   * means one COUNT query per row unless the association is already loaded -
+   * and the index does not preload it. A page of 500 stories is 500 extra
+   * queries. This is the reason to keep `pageSize` modest on
+   * {@link IntelArticlesNamespace.list}.
+   */
+  readonly n_sources: number;
+}
+
+/** One raw item cited by a story, as `:extended` inlines it. */
+export interface IntelArticleSourceRef {
+  /** Id of the {@link IntelItem}. Fetch the full row with `items.get(id)`. */
+  readonly id: Id;
+  /** Name of the {@link IntelSource} the item came from, or `null` if it was deleted. */
+  readonly source_name: string | null;
+  readonly title: string | null;
+  readonly url: string | null;
+  readonly published_at: Timestamp | null;
+}
+
+/**
+ * A story related to this one, as `:extended` inlines it.
+ *
+ * "Related" is not "duplicate": duplicates are merged during dedup and never
+ * become two rows. `IntelArticleLink` is an undirected edge between two
+ * DISTINCT stories, which is why {@link relation} is one label describing the
+ * pair rather than a direction.
+ */
+export interface IntelRelatedArticleRef {
+  readonly id: Id;
+  readonly title: string | null;
+  readonly importance: number;
+  readonly category: IntelArticleCategory | null;
+  /** Free text the model wrote for the edge, e.g. a pattern name. Nullable. */
+  readonly relation: string | null;
+}
+
+/** A report this story appears in, as `:extended` inlines it. Newest period first. */
+export interface IntelArticleReportRef {
+  readonly id: Id;
+  readonly kind: IntelReportKind;
+  readonly title: string | null;
+  readonly period_end: Timestamp;
+}
+
+/**
+ * `GET /intel_articles/:id` - the `:extended` view.
+ *
+ * Four keys the listing does not carry, and all four are joins the blueprint
+ * runs inline: `sources` walks `intel_items`, `related` walks the link table in
+ * BOTH directions, `reports` orders the report join by `period_end`. There is
+ * no paging on any of them, so a story that has been running for a week can
+ * inline a lot of rows.
+ */
+export interface IntelArticleDetail extends IntelArticle {
+  /** The long body. `null` until the enrichment pass writes one. */
+  readonly details: string | null;
+  /** Every raw item behind the story. Length matches {@link IntelArticle.n_sources}. */
+  readonly sources: IntelArticleSourceRef[];
+  /** Stories linked to this one. `[]` when the linker found nothing. */
+  readonly related: IntelRelatedArticleRef[];
+  /** Reports that cited this story, newest period first. */
+  readonly reports: IntelArticleReportRef[];
+}
+
+/** A story as a report inlines it. Four keys, no summary and no body. */
+export interface IntelReportArticleRef {
+  readonly id: Id;
+  readonly title: string | null;
+  readonly importance: number;
+  readonly category: IntelArticleCategory | null;
+}
+
+/**
+ * A generated report over one closed time window.
+ *
+ * The index shape. `GET /intel_reports/:id` adds three keys - see
+ * {@link IntelReportDetail}.
+ *
+ * There is at most ONE report per `(user, kind, period_end)`: the migration
+ * puts a unique index on that triple precisely so a re-run of
+ * `GenerateReportJob` cannot mint a duplicate. Windows are the last CLOSED
+ * period, computed by `IntelReport.last_window`, so a `"day"` report covers
+ * yesterday and never the day in progress.
+ */
+export interface IntelReport {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  /** Which window: see {@link INTEL_REPORT_KINDS}. */
+  readonly kind: IntelReportKind;
+  /** Title the model wrote. Nullable. */
+  readonly title: string | null;
+  /** Start of the window, inclusive. */
+  readonly period_start: Timestamp;
+  /** End of the window, exclusive. Also the sort key of the listing. */
+  readonly period_end: Timestamp;
+  /** LLM that wrote it, as configured at generation time. Nullable. */
+  readonly model: string | null;
+}
+
+/** `GET /intel_reports/:id` - the `:extended` view. */
+export interface IntelReportDetail extends IntelReport {
+  /** The report body, usually Markdown. `null` if generation failed halfway. */
+  readonly content: string | null;
+  /**
+   * Whatever the generator chose to record about the run. A free-form JSON
+   * object with no schema on either side, defaulting to `{}` - which is why it
+   * is typed as a bag rather than as fields. Read it defensively.
+   */
+  readonly stats: Record<string, Json> | null;
+  /** The stories the report covered, most important first. */
+  readonly articles: IntelReportArticleRef[];
+}
+
+/**
+ * A configured feed: a script plus the settings that script needs.
+ *
+ * A source is polled by `PollDispatcherJob` once every
+ * {@link poll_interval_minutes}, and each poll writes {@link IntelItem} rows
+ * that the analysis pipeline later turns into stories.
+ */
+export interface IntelSource {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  /** Up to 200 characters, whitespace-trimmed by the model, unique per user. */
+  readonly name: string;
+  /**
+   * The script's own settings - a URL, a channel, a CSS selector. There is no
+   * schema: the backend permits `config: {}`, meaning an arbitrary object, and
+   * the SCRIPT decides what it reads out of it. What belongs in here is
+   * documented by the script, not by this API.
+   */
+  readonly config: Record<string, Json>;
+  /** Which {@link IntelScript} fetches this source. */
+  readonly intel_script_id: Id;
+  /** Minutes between polls. Validated `in: 5..1440`. */
+  readonly poll_interval_minutes: number;
+  /**
+   * Whether the dispatcher will poll it.
+   *
+   * Can flip to `false` WITHOUT anyone asking: see
+   * {@link INTEL_SOURCE_DISABLE_AFTER_FAILURES}.
+   */
+  readonly enabled: boolean;
+  /**
+   * Incremental cursor the script returned last time - a timestamp, an etag, a
+   * last-seen id, whatever that script uses. Opaque to everything but the
+   * script. Writable, so clearing it is how you force a full re-fetch.
+   */
+  readonly cursor: string | null;
+  /** Result of the last run. `"unknown"` until it has run once. */
+  readonly health: IntelSourceHealth;
+  /** Failure message from the last failed run, truncated to 1000 characters. */
+  readonly last_error: string | null;
+  /** When the source last ran, successfully or not. */
+  readonly last_run_at: Timestamp | null;
+  /** When it last SUCCEEDED. A gap between the two is the thing to alert on. */
+  readonly last_success_at: Timestamp | null;
+  /** Reset to 0 on any success. See {@link INTEL_SOURCE_DISABLE_AFTER_FAILURES}. */
+  readonly consecutive_failures: number;
+}
+
+/**
+ * A TypeScript fetcher that knows how to pull items out of one kind of feed.
+ *
+ * Runs in the `intel-runner` sidecar, inside a V8 isolate with nothing but the
+ * injected `ctx`. Two populations share this table:
+ *
+ * - **built-ins** (`builtin: true`, `user_id: null`, `slug` set) are managed by
+ *   `Intel::BuiltinScripts`, visible to everyone, and immutable over HTTP;
+ * - **user scripts** (`builtin: false`, `user_id` set, `slug: null`) are yours.
+ *
+ * `viewable_by` is `builtin OR mine`, so a listing mixes the two. Check
+ * {@link builtin} before offering an edit affordance - see
+ * {@link IntelScriptsNamespace.update} for what happens if you do not.
+ */
+export interface IntelScript {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  /** Up to 120 characters, whitespace-trimmed by the model. */
+  readonly name: string;
+  /** Stable handle, e.g. `"rss"`. Non-null for built-ins ONLY; always `null` for yours. */
+  readonly slug: string | null;
+  readonly description: string | null;
+  /** `true` for a platform script. Immutable, and not yours to delete. */
+  readonly builtin: boolean;
+  /** Owner. `null` exactly when {@link builtin} is `true`. */
+  readonly user_id: Id | null;
+  /**
+   * The source code - **only on the `:extended` view**.
+   *
+   * `IntelScriptBlueprint` puts `code` inside `view :extended`, so `get()`,
+   * `create()` and `update()` carry it and `list()` does not. That is a
+   * deliberate weight decision (a listing of 64 KiB bodies), not an oversight,
+   * and it is why this key is optional. A row from `list()` has it `undefined`;
+   * fetch the script by id when you actually need the body.
+   */
+  readonly code?: string;
+}
+
+/**
+ * A raw item, exactly as a script returned it.
+ *
+ * Written only by `Intel::FetchSourceJob`; over HTTP it is read-only plus a
+ * delete. Items are the substrate the stories are built from - the story never
+ * copies the body, it points here.
+ */
+export interface IntelItem {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  /** Which source produced it. */
+  readonly intel_source_id: Id;
+  /**
+   * The script's own id for this item, unique per source. This is the
+   * de-duplication key: a second poll that returns the same `external_id` does
+   * not create a second row.
+   */
+  readonly external_id: string;
+  readonly title: string | null;
+  /** The body the script extracted. Can be large; a listing carries all of it. */
+  readonly content: string | null;
+  readonly url: string | null;
+  readonly author: string | null;
+  /** Publication time as the feed reported it, not as we saw it. */
+  readonly published_at: Timestamp | null;
+  /** When the poll that produced this item ran. Never null. */
+  readonly fetched_at: Timestamp;
+}
+
+/**
+ * The per-user knobs on the analysis pipeline. One row per user, created on
+ * demand - see {@link IntelConfigNamespace.get}.
+ */
+export interface IntelConfig {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  /**
+   * Free text telling the classifier what "important" means for you. `null`
+   * falls back to the platform default. This is the single highest-leverage
+   * field here: everything else is a threshold applied to the score this
+   * produces.
+   */
+  readonly rubric: string | null;
+  /**
+   * Prompt overrides, keyed by {@link IntelPromptKey}. `{}` means "platform
+   * defaults everywhere"; a key present means that one stage is overridden.
+   *
+   * Nullable at the database level even though it defaults to `{}`.
+   */
+  readonly prompts: Partial<Record<IntelPromptKey, string>> | null;
+  /** LLM for the story-building pass. `null` uses the platform default. */
+  readonly build_model: string | null;
+  /** LLM for report generation. `null` uses the platform default. */
+  readonly report_model: string | null;
+  /** Stories below this importance are left out of reports. 0-10, default 4. */
+  readonly report_min_importance: number;
+  /**
+   * Stories below this importance are never web-enriched. 0-10, default 6.
+   *
+   * Lowering it does not enrich the backlog quickly: the job does three
+   * stories per run, highest importance first.
+   */
+  readonly enrich_min_importance: number;
+  /**
+   * Master switch for the enrichment pass. `false` leaves every story at
+   * `enriched: false` and `details: null` for ever.
+   */
+  readonly web_search: boolean;
+  /**
+   * How many {@link IntelSource} rows you may own. 1-500, default 50.
+   *
+   * Enforced on CREATE only (`validate :within_source_quota, on: :create`), so
+   * lowering it below your current count does not delete anything - it just
+   * stops the next create with `400 "Source limit reached (N)"`.
+   */
+  readonly max_sources: number;
+}
+
+/** One category bucket of {@link IntelStats}. */
+export interface IntelCategoryCount {
+  readonly category: string;
+  /** Named `c`, not `count` - the controller builds this hash by hand. */
+  readonly c: number;
+}
+
+/** One day of the {@link IntelStats} histogram. */
+export interface IntelDayCount {
+  /** `YYYY-MM-DD`, from Postgres `DATE(last_seen_at)`. Not a full timestamp. */
+  readonly day: string;
+  readonly c: number;
+}
+
+/**
+ * The importance histogram, with the backend's own Portuguese bucket names.
+ *
+ * The boundaries are hard-coded in `IntelStatsController` and are not
+ * configurable: `critico` >=9, `alta` 7-8, `media` 5-6, `baixa` 3-4, `ruido`
+ * <3. Note they are NOT the same thresholds as
+ * {@link IntelConfig.report_min_importance} or
+ * {@link IntelConfig.enrich_min_importance} - those are yours, these are the
+ * dashboard's.
+ */
+export interface IntelImportanceBuckets {
+  readonly critico: number;
+  readonly alta: number;
+  readonly media: number;
+  readonly baixa: number;
+  readonly ruido: number;
+}
+
+/** Row counts on the {@link IntelStats} answer. */
+export interface IntelStatsTotals {
+  /** Stories you own. */
+  readonly articles: number;
+  /**
+   * **Not the number of feeds you have configured.** The controller counts
+   * `IntelArticleSource`, the story-to-item POINTER table, so this is "how
+   * many citations exist across all my stories" and it grows without bound as
+   * stories accumulate. If you want the number of configured sources, read the
+   * length of {@link IntelSourcesNamespace.list}. The name is the backend's and
+   * the SDK does not rename it, but do not put it under a "Sources" label.
+   */
+  readonly sources: number;
+  readonly reports: number;
+  /** Raw items you own, processed or not. */
+  readonly items: number;
+  /**
+   * Items the analysis pipeline has not consumed yet (`processed_at IS NULL`).
+   *
+   * The one number worth watching: a figure that climbs and never falls means
+   * the pipeline is not running - most often because `Intel::LlmClient` is
+   * disabled for want of an API key, in which case `AnalysisDispatcherJob`
+   * returns immediately and silently.
+   */
+  readonly pending_items: number;
+}
+
+/**
+ * `GET /intel_stats` - counters for the intel dashboard.
+ *
+ * Hand-built in the controller rather than rendered by a blueprint, so it has
+ * no `id`, no timestamps and no `:extended` view.
+ */
+export interface IntelStats {
+  readonly totals: IntelStatsTotals;
+  /**
+   * Categories by story count, descending. Stories with a `null` category are
+   * EXCLUDED, so these do not sum to `totals.articles`.
+   */
+  readonly by_category: IntelCategoryCount[];
+  /**
+   * The last 30 days by `last_seen_at`, ascending.
+   *
+   * Sparse: a day with no activity is simply ABSENT, not present with zero.
+   * Fill the gaps before plotting or the line will lie about its own x-axis.
+   */
+  readonly by_day: IntelDayCount[];
+  readonly by_importance: IntelImportanceBuckets;
+  /** Stories touched in the last 24 hours. */
+  readonly last24h: number;
+}
+
+/** Filters for {@link IntelArticlesNamespace.list}. */
+export interface ListIntelArticlesParams extends ContentListParams {
+  /**
+   * Free-text search over `title`, `summary` AND `details`.
+   *
+   * A TOP-LEVEL parameter, not a `search` key: the controller reads
+   * `params[:q]` itself, which is why it can reach `details` (a column that is
+   * not in `search_params` at all) and why an unknown-filter 400 cannot
+   * happen for it.
+   *
+   * Three ways it differs from {@link ContentListParams.search}:
+   *
+   * - it is **accent-SENSITIVE**. The controller does `LOWER(col) LIKE
+   *   LOWER(term)`, with no unaccenting, while the list DSL's `search` strips
+   *   accents on both sides. `"policia"` will not find `"polícia"` here.
+   * - `%` and `_` in your term are **not escaped**. The controller wraps the
+   *   term as `"%#{q}%"` and binds it, so a term containing `%` is a wildcard,
+   *   not a literal percent sign. Not an injection - it is a bound parameter -
+   *   but a surprise. Strip them if you are passing user input through.
+   * - it is an unanchored `LIKE` over three text columns with no index, so it
+   *   is a sequential scan of your stories. Fine for thousands, not for
+   *   millions.
+   */
+  readonly q?: string;
+  /**
+   * Keep only stories at or above this importance. Also top-level.
+   *
+   * Sent through Ruby's `String#to_i`, which does NOT raise: `"high"` becomes
+   * `0` and the filter silently matches everything. Pass a number and let the
+   * SDK stringify it.
+   */
+  readonly minImportance?: number;
+  /**
+   * `"recent"` orders by `last_seen_at` descending. Anything else - including
+   * omitting it - orders by `importance` descending, then `last_seen_at`
+   * descending. There is no third value and no ascending variant.
+   *
+   * If you ALSO pass {@link PageParams.order}, both apply and yours wins: the
+   * controller appends its ordering after the list DSL has applied
+   * `modifiers[order]`, so your column becomes the primary sort key and the
+   * controller's becomes the tie-breaker. That is the opposite of what the
+   * parameter names suggest.
+   */
+  readonly sort?: "recent" | "importance";
+}
+
+/** Filters for {@link IntelReportsNamespace.list}. */
+export interface ListIntelReportsParams extends ContentListParams {
+  /**
+   * Narrow to one window, e.g. `"day"`. Sent as `exact_search[kind]`, so it is
+   * equality rather than a prefix match - `"6h"` will not also match `"6hx"`.
+   *
+   * Passing it through {@link ContentListParams.search} instead would be a
+   * partial match and would work too; `kind` is on this controller's
+   * `search_params` allowlist. Equality is what you want.
+   */
+  readonly kind?: IntelReportKind;
+}
+
+/** Filters for {@link IntelSourcesNamespace.list}. */
+export interface ListIntelSourcesParams extends ContentListParams {
+  /** Only healthy / only broken feeds. Sent as `exact_search[health]`. */
+  readonly health?: IntelSourceHealth;
+  /** Only enabled, or only the ones that switched themselves off. */
+  readonly enabled?: boolean;
+  /** Every source driven by one script. */
+  readonly scriptId?: Id;
+}
+
+/** Filters for {@link IntelScriptsNamespace.list}. */
+export interface ListIntelScriptsParams extends ContentListParams {
+  /**
+   * `true` for the platform scripts, `false` for yours. Omit for both - the
+   * listing scope is `builtin OR mine`, so both populations are mixed by
+   * default.
+   */
+  readonly builtin?: boolean;
+}
+
+/** Filters for {@link IntelItemsNamespace.list}. */
+export interface ListIntelItemsParams extends ContentListParams {
+  /** Only items produced by one source. Sent as `exact_search[intel_source_id]`. */
+  readonly sourceId?: Id;
+}
+
+/** Arguments for {@link IntelSourcesNamespace.create}. */
+export interface CreateIntelSourceInput {
+  /** Up to 200 characters, and unique among YOUR sources - a clash is a 400. */
+  readonly name: string;
+  /**
+   * The script that fetches it. Must be a built-in or one of yours;
+   * `script_visible_to_owner` rejects anything else with
+   * `400 "Intel script is not accessible"` rather than a 404, so this also
+   * tells you the id exists. Do not use it as an existence oracle.
+   */
+  readonly intelScriptId: Id;
+  /** Whatever that script reads. Free-form; the API validates nothing in it. */
+  readonly config?: Record<string, Json>;
+  /** 5-1440. Defaults to 15 server-side. */
+  readonly pollIntervalMinutes?: number;
+  /** Defaults to `true`. Create it disabled if you want to configure first. */
+  readonly enabled?: boolean;
+}
+
+/**
+ * Arguments for {@link IntelSourcesNamespace.update}.
+ *
+ * One key wider than the create form: `cursor` is updatable and not creatable.
+ */
+export interface UpdateIntelSourceInput {
+  readonly name?: string;
+  readonly intelScriptId?: Id;
+  /**
+   * REPLACES the whole object; there is no merge. `assign_attributes` writes
+   * the JSON column wholesale, so sending `{ url: "..." }` to a source that
+   * also had a `selector` drops the selector. Read the source, spread, write.
+   */
+  readonly config?: Record<string, Json>;
+  readonly pollIntervalMinutes?: number;
+  /** Set back to `true` to revive a source that disabled itself. */
+  readonly enabled?: boolean;
+  /**
+   * The incremental cursor. Set it to `null` to force the next poll to start
+   * from the beginning - which for most scripts means re-fetching everything.
+   *
+   * `null` here is a JSON body `null`, not the query-string sentinel: bodies
+   * never carry `\b`.
+   */
+  readonly cursor?: string | null;
+}
+
+/** Arguments for {@link IntelScriptsNamespace.create}. */
+export interface CreateIntelScriptInput {
+  /** Up to 120 characters. */
+  readonly name: string;
+  /** The body. Up to {@link INTEL_SCRIPT_MAX_CODE_BYTES}. */
+  readonly code: string;
+  readonly description?: string;
+}
+
+/** Arguments for {@link IntelScriptsNamespace.update}. */
+export interface UpdateIntelScriptInput {
+  readonly name?: string;
+  readonly code?: string;
+  readonly description?: string;
+}
+
+/**
+ * Arguments for {@link IntelConfigNamespace.update}.
+ *
+ * Every key is optional and only the keys you send are written -
+ * `assign_attributes` over a permitted hash - so this is a genuine partial
+ * update, unlike {@link UpdateIntelSourceInput.config}.
+ */
+export interface UpdateIntelConfigInput {
+  readonly rubric?: string | null;
+  /**
+   * REPLACES the whole prompts object. Same trap as
+   * {@link UpdateIntelSourceInput.config}: it is one JSON column, so a partial
+   * object drops the keys you left out. Spread the current value.
+   *
+   * Only {@link INTEL_PROMPT_KEYS} are accepted; anything else fails the whole
+   * request with a 400 naming the offenders.
+   */
+  readonly prompts?: Partial<Record<IntelPromptKey, string>>;
+  readonly buildModel?: string | null;
+  readonly reportModel?: string | null;
+  /** 0-10. Outside the range is a 400, not a clamp. */
+  readonly reportMinImportance?: number;
+  /** 0-10. Outside the range is a 400, not a clamp. */
+  readonly enrichMinImportance?: number;
+  readonly webSearch?: boolean;
+  /** 1-500. Outside the range is a 400, not a clamp. */
+  readonly maxSources?: number;
+}
+
+/** What `POST /intel_sources/:id/run` answers with. The whole body. */
+export interface IntelSourceRunAccepted {
+  /** Always `true`. The job was enqueued; nothing has been fetched yet. */
+  readonly queued: boolean;
+}
+
+/**
+ * `GET /intel_articles` and friends: the stories the pipeline built.
+ *
+ * Read-only plus a delete. There is no create and no update route -
+ * `IntelArticle#creatable_by?` and `#updatable_by?` both return `false`
+ * unconditionally, and the route is `only: [:index, :show, :destroy]`. Stories
+ * come from `Intel::ArticleBuilder`, never from a client.
+ */
+export class IntelArticlesNamespace extends Resource {
+  /**
+   * `GET /intel_articles` - your stories, most important first.
+   *
+   * Ordering is the controller's, not yours by default: `importance DESC,
+   * last_seen_at DESC`, or `last_seen_at DESC` alone with `sort: "recent"`.
+   * See {@link ListIntelArticlesParams.sort} for what happens when you pass
+   * `order` as well - it is not what the names imply.
+   *
+   * Filter keys this controller declares for `search` / `exactSearch`:
+   * `title`, `summary`, `category`, `importance`, `enriched`, plus the
+   * inherited `id`, `created_at`, `updated_at`. Anything else is
+   * `400 "Unknown search filter: x"` - fail-closed, never a wider result. The
+   * free-text and importance filters are top-level instead: `q` and
+   * `minImportance`.
+   *
+   * **Cost.** Every row runs its own `COUNT` for
+   * {@link IntelArticle.n_sources}, because the blueprint calls
+   * `intel_article_sources.size` and the index preloads nothing. Keep
+   * `pageSize` in the tens, not at 500.
+   *
+   * The response carries an `ETag` and can answer `304` - except when
+   * `random` is set, which short-circuits `resources_stale?`.
+   *
+   * @throws {OmsAuthError} 401 when anonymous.
+   * @throws {OmsApiError} 403 `"Intel access is restricted."` for a signed-in
+   *   account outside the allowlist; 400 for an unrecognised filter key.
+   */
+  async list(params: ListIntelArticlesParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelArticle>> {
+    const page = params.page ?? 1;
+    const pageSize = params.pageSize ?? 50;
+
+    const load = (at: { page: number; pageSize: number }): Promise<IntelArticle[]> => {
+      const query = listQuery(params, at.page, at.pageSize);
+      if (params.q !== undefined) query.q = params.q;
+      if (params.minImportance !== undefined) query.min_importance = params.minImportance;
+      if (params.sort !== undefined) query.sort = params.sort;
+      return this.http.get<IntelArticle[]>("/intel_articles", { ...options, query });
+    };
+
+    return createPage(await load({ page, pageSize }), page, pageSize, load);
+  }
+
+  /**
+   * `GET /intel_articles/:id` - one story with its body, its sources, its
+   * related stories and the reports that cited it.
+   *
+   * The `:extended` view, so it is a strict superset of the listing row. All
+   * four extras are inlined without paging; see {@link IntelArticleDetail}.
+   *
+   * @throws {OmsApiError} 404 `"Resource not found"` when the id is not one of
+   *   yours - the lookup is `viewable_by(Current.user).find_by(id:)`, so
+   *   somebody else's story is indistinguishable from a typo, which is the
+   *   point.
+   */
+  async get(id: Id, options: RequestOptions = {}): Promise<IntelArticleDetail> {
+    return this.http.get<IntelArticleDetail>(`/intel_articles/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `DELETE /intel_articles/:id` - drops a story. `204`, empty body.
+   *
+   * The story's links to items are removed with it (`dependent: :destroy` on
+   * `intel_article_sources`), but the {@link IntelItem} rows themselves SURVIVE
+   * - they belong to the source, not to the story. They are also still marked
+   * `processed_at`, so deleting a story does not make the pipeline rebuild it.
+   * This is a hide, not an undo.
+   *
+   * @throws {OmsApiError} 404 when the story is not yours. 401
+   *   `"You are not authorized to destroy this resource"` cannot happen here -
+   *   `destroyable_by?` is `user == self.user` and the lookup already scoped it
+   *   - but note the API's habit of answering 401 rather than 403 for a failed
+   *   authorisation check, which the scripts routes DO hit.
+   */
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/intel_articles/${encodeURIComponent(id)}`, options);
+  }
+}
+
+/**
+ * `GET /intel_reports` - the generated digests.
+ *
+ * Read-only plus a delete, for the same reason as the stories: reports come
+ * from `Intel::GenerateReportJob`. There is no way to ask for one to be
+ * generated over HTTP.
+ */
+export class IntelReportsNamespace extends Resource {
+  /**
+   * `GET /intel_reports` - your reports, newest window first.
+   *
+   * `period_end DESC` is applied by the controller; as with the stories, a
+   * `order` of your own becomes the PRIMARY key and this becomes the
+   * tie-breaker.
+   *
+   * `kind` is the only declared filter beyond the inherited three. Use
+   * {@link ListIntelReportsParams.kind}, which sends it as an exact match.
+   *
+   * @throws {OmsApiError} 403 `"Intel access is restricted."` outside the
+   *   allowlist.
+   */
+  async list(params: ListIntelReportsParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelReport>> {
+    const page = params.page ?? 1;
+    const pageSize = params.pageSize ?? 50;
+    const exactSearch = {
+      ...params.exactSearch,
+      ...(params.kind === undefined ? {} : { kind: params.kind }),
+    };
+
+    const load = (at: { page: number; pageSize: number }): Promise<IntelReport[]> =>
+      this.http.get<IntelReport[]>("/intel_reports", {
+        ...options,
+        query: listQuery(
+          { ...params, ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }) },
+          at.page,
+          at.pageSize,
+        ),
+      });
+
+    return createPage(await load({ page, pageSize }), page, pageSize, load);
+  }
+
+  /**
+   * `GET /intel_reports/:id` - the report with its body and its stories.
+   *
+   * @throws {OmsApiError} 404 when the report is not yours.
+   */
+  async get(id: Id, options: RequestOptions = {}): Promise<IntelReportDetail> {
+    return this.http.get<IntelReportDetail>(`/intel_reports/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `DELETE /intel_reports/:id`. `204`, empty body.
+   *
+   * The stories it cited are untouched - only the join rows go.
+   *
+   * A deleted report can come back: `GenerateReportJob` is keyed by the unique
+   * `(user, kind, period_end)` index, and deleting the row frees that key, so
+   * the next dispatcher pass over the same window will regenerate it. Delete a
+   * report to re-run it, not to suppress it.
+   *
+   * @throws {OmsApiError} 404 when the report is not yours.
+   */
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/intel_reports/${encodeURIComponent(id)}`, options);
+  }
+}
+
+/**
+ * `/intel_sources` - the feeds you have configured. Full CRUD, plus a manual
+ * run.
+ */
+export class IntelSourcesNamespace extends Resource {
+  /**
+   * `GET /intel_sources` - your feeds.
+   *
+   * Declared filters: `name`, `health`, `enabled`, `intel_script_id`, plus the
+   * inherited `id`, `created_at`, `updated_at`. The controller sets NO ordering
+   * of its own, so a listing with no `order` is in whatever order Postgres
+   * returns rows - which is not stable across pages. The SDK therefore sends
+   * `created_at:desc` unless you say otherwise.
+   *
+   * A good health check in one call: `list({ health: "error" })`.
+   *
+   * @throws {OmsApiError} 403 outside the allowlist.
+   */
+  async list(params: ListIntelSourcesParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelSource>> {
+    const page = params.page ?? 1;
+    const pageSize = params.pageSize ?? 100;
+    const exactSearch = {
+      ...params.exactSearch,
+      ...(params.health === undefined ? {} : { health: params.health }),
+      ...(params.enabled === undefined ? {} : { enabled: params.enabled }),
+      ...(params.scriptId === undefined ? {} : { intel_script_id: params.scriptId }),
+    };
+
+    const load = (at: { page: number; pageSize: number }): Promise<IntelSource[]> =>
+      this.http.get<IntelSource[]>("/intel_sources", {
+        ...options,
+        query: listQuery(
+          {
+            ...params,
+            // Explicitly, not by spread order: an `order: undefined` present on
+            // the caller's object would otherwise overwrite the default with
+            // undefined and leave the listing unordered again.
+            order: params.order ?? "created_at:desc",
+            ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }),
+          },
+          at.page,
+          at.pageSize,
+        ),
+      });
+
+    return createPage(await load({ page, pageSize }), page, pageSize, load);
+  }
+
+  /**
+   * `GET /intel_sources/:id`.
+   *
+   * `IntelSourceBlueprint` declares no `:extended` extras, so this is exactly
+   * the shape a listing row has. Fetching one adds nothing but a round trip;
+   * prefer finding it in {@link list} when you already have the page.
+   *
+   * @throws {OmsApiError} 404 when the source is not yours.
+   */
+  async get(id: Id, options: RequestOptions = {}): Promise<IntelSource> {
+    return this.http.get<IntelSource>(`/intel_sources/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `POST /intel_sources` - configures a feed. `201`.
+   *
+   * The source starts `health: "unknown"` and is not polled immediately: the
+   * dispatcher picks it up on its next pass, or you can force it with
+   * {@link run}.
+   *
+   * Three ways this fails with a 400 and a bare-string body:
+   *
+   * - `"Name has already been taken"` - names are unique per user;
+   * - `"Intel script is not accessible"` - the script is neither a built-in nor
+   *   yours. This is a 400 rather than a 404, so it does not tell you whether
+   *   the id exists;
+   * - `"Source limit reached (N)"` - you are at
+   *   {@link IntelConfig.max_sources}. Raise it with
+   *   {@link IntelConfigNamespace.update} if the ceiling is yours to raise.
+   *
+   * Not retried by default: a replayed `POST` after a lost response would fail
+   * the uniqueness check rather than duplicate the row, but it would report
+   * that failure as if the first attempt had never worked.
+   */
+  async create(input: CreateIntelSourceInput, options: RequestOptions = {}): Promise<IntelSource> {
+    return this.http.post<IntelSource>(
+      "/intel_sources",
+      {
+        name: input.name,
+        intel_script_id: input.intelScriptId,
+        ...(input.config === undefined ? {} : { config: input.config }),
+        ...(input.pollIntervalMinutes === undefined ? {} : { poll_interval_minutes: input.pollIntervalMinutes }),
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      },
+      { retry: false, ...options },
+    );
+  }
+
+  /**
+   * `PATCH /intel_sources/:id`.
+   *
+   * Note what is NOT writable: `health`, `last_error`, `last_run_at`,
+   * `last_success_at` and `consecutive_failures` are not on `update_params`, so
+   * you cannot clear a source's failure history by hand. Only a successful run
+   * resets it (`register_success!`). Re-enabling a source that disabled itself
+   * therefore leaves `consecutive_failures` at 20 until the next success - do
+   * not read that field as "currently failing".
+   *
+   * {@link UpdateIntelSourceInput.config} replaces the whole object.
+   *
+   * @throws {OmsApiError} 404 when the source is not yours; 400 with the
+   *   validation sentence otherwise.
+   */
+  async update(id: Id, input: UpdateIntelSourceInput, options: RequestOptions = {}): Promise<IntelSource> {
+    return this.http.patch<IntelSource>(
+      `/intel_sources/${encodeURIComponent(id)}`,
+      {
+        ...(input.name === undefined ? {} : { name: input.name }),
+        ...(input.intelScriptId === undefined ? {} : { intel_script_id: input.intelScriptId }),
+        ...(input.config === undefined ? {} : { config: input.config }),
+        ...(input.pollIntervalMinutes === undefined ? {} : { poll_interval_minutes: input.pollIntervalMinutes }),
+        ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      },
+      options,
+    );
+  }
+
+  /**
+   * `DELETE /intel_sources/:id`. `204`, empty body.
+   *
+   * Destructive well beyond the row: `has_many :intel_items, dependent:
+   * :destroy` takes every raw item this source ever produced, and the stories
+   * built from them lose their citations
+   * ({@link IntelArticleDetail.sources} shrinks, {@link IntelArticle.n_sources}
+   * with it) while the stories themselves stay. Disabling is almost always what
+   * you meant: `update(id, { enabled: false })`.
+   *
+   * @throws {OmsApiError} 404 when the source is not yours.
+   */
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/intel_sources/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `POST /intel_sources/:id/run` - polls the source now instead of waiting
+   * for its interval. `202 {"queued":true}`.
+   *
+   * **It enqueues; it does not fetch.** The answer arrives before anything has
+   * happened, and it says nothing about whether the poll will succeed. To see
+   * the outcome, re-read the source and watch {@link IntelSource.last_run_at},
+   * {@link IntelSource.health} and {@link IntelSource.last_error}. There is no
+   * job id and nothing to wait on.
+   *
+   * Three sharp edges:
+   *
+   * - it runs a source even when {@link IntelSource.enabled} is `false`. The
+   *   action does not look at the flag, so this is also how you test a feed you
+   *   have deliberately switched off;
+   * - it is authorised by VISIBILITY only. The action does its own `find_by`
+   *   inside `viewable_by` and never calls `updatable_by?` - which happens to
+   *   be the same set here, since sources are only ever visible to their owner;
+   * - it has **no bucket of its own**. It rides the general 600-per-minute
+   *   ceiling, so a loop can enqueue hundreds of `FetchSourceJob`s into the
+   *   `syncs` queue in seconds and starve everything else on it. Call it on a
+   *   user gesture; never in a poll loop.
+   *
+   * Not retried by default: a replay enqueues a second fetch.
+   *
+   * @throws {OmsApiError} 404 `"Resource not found"` when the source is not
+   *   yours.
+   */
+  async run(id: Id, options: RequestOptions = {}): Promise<IntelSourceRunAccepted> {
+    return this.http.post<IntelSourceRunAccepted>(
+      `/intel_sources/${encodeURIComponent(id)}/run`,
+      undefined,
+      { retry: false, ...options },
+    );
+  }
+}
+
+/**
+ * `/intel_scripts` - the fetchers. Full CRUD over YOUR scripts, read-only over
+ * the platform's.
+ */
+export class IntelScriptsNamespace extends Resource {
+  /**
+   * `GET /intel_scripts` - the built-ins plus yours, mixed.
+   *
+   * **No `code`.** The body is on the `:extended` view only, so every row here
+   * has `code: undefined`. See {@link IntelScript.code}.
+   *
+   * Declared filters: `name`, `builtin`, `slug`, plus the inherited three.
+   * The controller sets no ordering, so the SDK sends `created_at:desc`.
+   *
+   * @throws {OmsApiError} 403 outside the allowlist.
+   */
+  async list(params: ListIntelScriptsParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelScript>> {
+    const page = params.page ?? 1;
+    const pageSize = params.pageSize ?? 100;
+    const exactSearch = {
+      ...params.exactSearch,
+      ...(params.builtin === undefined ? {} : { builtin: params.builtin }),
+    };
+
+    const load = (at: { page: number; pageSize: number }): Promise<IntelScript[]> =>
+      this.http.get<IntelScript[]>("/intel_scripts", {
+        ...options,
+        query: listQuery(
+          {
+            ...params,
+            // Explicitly, not by spread order: an `order: undefined` present on
+            // the caller's object would otherwise overwrite the default with
+            // undefined and leave the listing unordered again.
+            order: params.order ?? "created_at:desc",
+            ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }),
+          },
+          at.page,
+          at.pageSize,
+        ),
+      });
+
+    return createPage(await load({ page, pageSize }), page, pageSize, load);
+  }
+
+  /**
+   * `GET /intel_scripts/:id` - the script WITH its body.
+   *
+   * This is the only read that carries {@link IntelScript.code}. Works for a
+   * built-in too: they are visible to everyone, so this is how you read one
+   * before forking it.
+   *
+   * @throws {OmsApiError} 404 when the id is neither a built-in nor yours.
+   */
+  async get(id: Id, options: RequestOptions = {}): Promise<IntelScript> {
+    return this.http.get<IntelScript>(`/intel_scripts/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `POST /intel_scripts` - saves a fetcher. `201`, with `code`.
+   *
+   * The controller transpiles the body in the `intel-runner` sidecar BEFORE
+   * saving, so a syntax error surfaces here rather than at the first poll:
+   * `400 "Invalid script: <the compiler's message>"`.
+   *
+   * **The check is best-effort and fails OPEN.** `check_script!` rescues
+   * `Intel::RunnerClient::Error` and returns `nil`, so when the runner is down
+   * or unreachable the script saves unchecked and a `201` means only "stored".
+   * There is nothing on the response that distinguishes a checked save from an
+   * unchecked one. Treat a successful create as "it parses, probably", and
+   * confirm with {@link IntelSourcesNamespace.run} on a throwaway source.
+   *
+   * The check is a transpile, not an execution: it proves the code parses, not
+   * that it fetches anything.
+   *
+   * The created script is always yours - `builtin` is not on `create_params`,
+   * so it cannot be set - and up to
+   * {@link INTEL_SCRIPT_MAX_CODE_BYTES} long.
+   *
+   * Not retried by default: a replay creates a second script.
+   */
+  async create(input: CreateIntelScriptInput, options: RequestOptions = {}): Promise<IntelScript> {
+    return this.http.post<IntelScript>(
+      "/intel_scripts",
+      {
+        name: input.name,
+        code: input.code,
+        ...(input.description === undefined ? {} : { description: input.description }),
+      },
+      { retry: false, ...options },
+    );
+  }
+
+  /**
+   * `PATCH /intel_scripts/:id` - edits one of YOUR scripts. Answers with `code`.
+   *
+   * Same best-effort transpile check as {@link create}, and only when `code` is
+   * present in the body.
+   *
+   * **A built-in answers `401`, not `403`.** `IntelScript#updatable_by?`
+   * requires `!builtin?`, and `CrudActions#update` reports a failed
+   * authorisation with `unauthorized!` - so the body is
+   * `"You are not authorized to update this resource"` under a 401 status. That
+   * is an authorisation refusal wearing an authentication status code: do NOT
+   * let a generic 401 handler log the user out over it. Check
+   * {@link IntelScript.builtin} first and fork instead of editing.
+   *
+   * A live edit takes effect on the next poll of every source using this
+   * script; there is no versioning and no rollback.
+   *
+   * @throws {OmsApiError} 404 when the id is not visible to you; 401 for a
+   *   built-in; 400 for a syntax error or an over-long body.
+   */
+  async update(id: Id, input: UpdateIntelScriptInput, options: RequestOptions = {}): Promise<IntelScript> {
+    return this.http.patch<IntelScript>(
+      `/intel_scripts/${encodeURIComponent(id)}`,
+      {
+        ...(input.name === undefined ? {} : { name: input.name }),
+        ...(input.code === undefined ? {} : { code: input.code }),
+        ...(input.description === undefined ? {} : { description: input.description }),
+      },
+      options,
+    );
+  }
+
+  /**
+   * `DELETE /intel_scripts/:id`. `204`, empty body.
+   *
+   * Refuses while any source still uses it: `has_many :intel_sources,
+   * dependent: :restrict_with_error` turns the destroy into a validation
+   * failure, which `CrudActions#destroy` reports as
+   * `400 "Cannot delete record because dependent intel sources exist"`. Delete
+   * or repoint the sources first - {@link IntelSourcesNamespace.list} with
+   * `scriptId` finds them in one call.
+   *
+   * A built-in answers `401` with `"You are not authorized to destroy this
+   * resource"`, for the reason spelled out on {@link update}.
+   */
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/intel_scripts/${encodeURIComponent(id)}`, options);
+  }
+}
+
+/**
+ * `/intel_items` - the raw material.
+ *
+ * Read-only plus a delete: `creatable_by?` and `updatable_by?` are hard `false`
+ * and the route is `only: [:index, :show, :destroy]`. Items are written by
+ * `Intel::FetchSourceJob` and by nothing else.
+ *
+ * The web frontend never touches this family. It is here because the stories
+ * only carry a citation stub ({@link IntelArticleSourceRef}) and this is the
+ * only way to read the body behind one.
+ */
+export class IntelItemsNamespace extends Resource {
+  /**
+   * `GET /intel_items` - raw items, newest first.
+   *
+   * **Heavy.** Every row carries {@link IntelItem.content} in full - the whole
+   * article text a script scraped - and there is no lighter view. The SDK
+   * defaults to a page of 25 for that reason; raising it is how you get a
+   * multi-megabyte response.
+   *
+   * Declared filters: `intel_source_id`, `external_id`, `title`, `content`,
+   * `url`, plus the inherited three. Note `processed_at` is NOT among them and
+   * is not on the blueprint either, so there is no way to list only the
+   * unprocessed items - {@link IntelStats.totals.pending_items} is the only
+   * window onto that backlog.
+   *
+   * The controller sets no ordering; the SDK sends `created_at:desc`.
+   */
+  async list(params: ListIntelItemsParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelItem>> {
+    const page = params.page ?? 1;
+    const pageSize = params.pageSize ?? 25;
+    const exactSearch = {
+      ...params.exactSearch,
+      ...(params.sourceId === undefined ? {} : { intel_source_id: params.sourceId }),
+    };
+
+    const load = (at: { page: number; pageSize: number }): Promise<IntelItem[]> =>
+      this.http.get<IntelItem[]>("/intel_items", {
+        ...options,
+        query: listQuery(
+          {
+            ...params,
+            // Explicitly, not by spread order: an `order: undefined` present on
+            // the caller's object would otherwise overwrite the default with
+            // undefined and leave the listing unordered again.
+            order: params.order ?? "created_at:desc",
+            ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }),
+          },
+          at.page,
+          at.pageSize,
+        ),
+      });
+
+    return createPage(await load({ page, pageSize }), page, pageSize, load);
+  }
+
+  /**
+   * `GET /intel_items/:id` - one raw item.
+   *
+   * The blueprint has no `:extended` extras, so this is the same shape a
+   * listing row has. Use it to expand one {@link IntelArticleSourceRef} without
+   * pulling a page of bodies.
+   *
+   * @throws {OmsApiError} 404 when the item is not yours.
+   */
+  async get(id: Id, options: RequestOptions = {}): Promise<IntelItem> {
+    return this.http.get<IntelItem>(`/intel_items/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `DELETE /intel_items/:id`. `204`, empty body.
+   *
+   * Rarely what you want. The item's `external_id` uniqueness is what stops the
+   * next poll re-fetching it, so deleting one invites it straight back on the
+   * following run - and if the story built from it survives, you get a second
+   * citation of the same thing. Delete the SOURCE, or leave items alone.
+   *
+   * @throws {OmsApiError} 404 when the item is not yours.
+   */
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/intel_items/${encodeURIComponent(id)}`, options);
+  }
+}
+
+/**
+ * `/intel_config` - the per-user pipeline settings.
+ *
+ * A Rails SINGULAR resource (`resource :intel_config`), so the path has no id
+ * and there is no listing: `GET /intel_config` and `PATCH /intel_config` are
+ * the whole surface. Both act on the caller's own row and there is no way to
+ * address anybody else's.
+ */
+export class IntelConfigNamespace extends Resource {
+  /**
+   * `GET /intel_config` - your settings.
+   *
+   * **This read WRITES.** The controller calls `IntelConfig.for(Current.user)`,
+   * which is `find_or_create_by!`, so a first call inserts the row with the
+   * column defaults and returns it. Consequences worth knowing: it is not safe
+   * to fire at high frequency (two concurrent first calls race on the unique
+   * index and one raises), the response is a `200` even when it just created
+   * something, and `created_at` on a "read" can be now.
+   *
+   * @throws {OmsApiError} 403 `"Intel access is restricted."` outside the
+   *   allowlist - checked before the row is created, so a refused caller does
+   *   not leave a row behind.
+   */
+  async get(options: RequestOptions = {}): Promise<IntelConfig> {
+    return this.http.get<IntelConfig>("/intel_config", options);
+  }
+
+  /**
+   * `PATCH /intel_config` - changes settings. Answers with the whole row.
+   *
+   * A genuine partial update for the scalar fields, and a whole-object replace
+   * for `prompts` - see {@link UpdateIntelConfigInput.prompts}.
+   *
+   * The route also accepts `PUT`, and it means exactly the same thing: Rails
+   * maps both onto `update` and the controller does not read the verb. There is
+   * no "replace the whole config" call.
+   *
+   * Failures are a `400` whose body is ONE sentence, not a field map:
+   * `ApplicationRecord#error_messages` is `errors.full_messages.to_sentence`,
+   * so several violations arrive joined by commas and "and". Parse it for
+   * humans, not for code.
+   *
+   * @throws {OmsApiError} 400 for a threshold outside `0..10`, a `max_sources`
+   *   outside `1..500`, or a `prompts` key outside {@link INTEL_PROMPT_KEYS}.
+   */
+  async update(input: UpdateIntelConfigInput, options: RequestOptions = {}): Promise<IntelConfig> {
+    return this.http.patch<IntelConfig>(
+      "/intel_config",
+      {
+        ...(input.rubric === undefined ? {} : { rubric: input.rubric }),
+        ...(input.prompts === undefined ? {} : { prompts: input.prompts }),
+        ...(input.buildModel === undefined ? {} : { build_model: input.buildModel }),
+        ...(input.reportModel === undefined ? {} : { report_model: input.reportModel }),
+        ...(input.reportMinImportance === undefined ? {} : { report_min_importance: input.reportMinImportance }),
+        ...(input.enrichMinImportance === undefined ? {} : { enrich_min_importance: input.enrichMinImportance }),
+        ...(input.webSearch === undefined ? {} : { web_search: input.webSearch }),
+        ...(input.maxSources === undefined ? {} : { max_sources: input.maxSources }),
+      },
+      options,
+    );
+  }
+}
+
+/** `/intel_stats` - the dashboard counters. One route, one verb. */
+export class IntelStatsNamespace extends Resource {
+  /**
+   * `GET /intel_stats` - every counter the intel dashboard shows, in one call.
+   *
+   * Also a Rails singular resource, so the path is `/intel_stats` with no id
+   * despite the plural spelling.
+   *
+   * **Cost, and the reason not to poll this.** The controller does
+   * `articles.pluck(:importance)` - it loads the importance of EVERY story you
+   * own into Ruby memory to build {@link IntelStats.by_importance} - and then
+   * runs five more aggregate queries beside it. There is no cache, no `ETag`
+   * (the hand-written action never calls `stale?`, unlike every list in this
+   * file) and therefore no `304`. Cost grows linearly with your story count for
+   * ever. Fetch it on a dashboard open, not on a timer.
+   *
+   * Read {@link IntelStatsTotals.sources} before you label it: it does not
+   * count your feeds.
+   *
+   * @throws {OmsApiError} 403 `"Intel access is restricted."` outside the
+   *   allowlist.
+   */
+  async get(options: RequestOptions = {}): Promise<IntelStats> {
+    return this.http.get<IntelStats>("/intel_stats", options);
+  }
+}
+
+/**
+ * Base of the third-party image proxy {@link intelArticleImageUrl} builds on.
+ *
+ * `wsrv.nl` is a free public image CDN. It is NOT this API and NOT our
+ * infrastructure.
+ */
+export const INTEL_IMAGE_PROXY_BASE_URL = "https://wsrv.nl/";
+
+/** Knobs for {@link intelArticleImageUrl}. The defaults are the web app's. */
+export interface IntelImageOptions {
+  /** Target width in pixels. Default 480. Height follows the aspect ratio. */
+  readonly width?: number;
+  /** Quality, 1-100. Default 45 - low on purpose; these are thumbnails. */
+  readonly quality?: number;
+}
+
+/**
+ * Builds a resized, re-compressed URL for {@link IntelArticle.image_url}.
+ *
+ * Pure string building, no request, isolate-safe. Returns `""` for a story with
+ * no image so it can be dropped straight into an `<img src>` without a
+ * conditional - though a real client should test the field and render nothing.
+ *
+ * ## What this actually does, and why you might not want it
+ *
+ * `image_url` is the raw `og:image` of a news site: full size, arbitrary
+ * format, arbitrary weight, and served from that site's own host. Nothing in
+ * this API resizes it. The web frontend's answer is to route it through
+ * `wsrv.nl`, a free public image CDN, which fetches the origin image and hands
+ * back a width-limited WebP.
+ *
+ * The trade is explicit and it is not the SDK's to make silently:
+ *
+ * - the ORIGIN URL is sent to a third party in a query string, so wsrv.nl
+ *   learns which article your user is looking at, and so does anyone reading
+ *   the request. There is no credential involved - the images are public - but
+ *   it is still a referrer-shaped leak;
+ * - availability is theirs, not ours. A wsrv.nl outage is a page of broken
+ *   images, and there is no fallback in the URL;
+ * - `&we` asks it not to enlarge images smaller than `width`.
+ *
+ * If neither trade suits you, use {@link IntelArticle.image_url} directly and
+ * size it in CSS. This helper exists because the web app cannot drop its own
+ * intel service without it, and it is ported here rather than reinvented.
+ */
+export function intelArticleImageUrl(
+  imageUrl: string | null | undefined,
+  options: IntelImageOptions = {},
+): string {
+  if (!imageUrl) return "";
+  const width = options.width ?? 480;
+  const quality = options.quality ?? 45;
+  return `${INTEL_IMAGE_PROXY_BASE_URL}?url=${encodeURIComponent(imageUrl)}&w=${width}&q=${quality}&output=webp&we`;
+}
+
+/**
+ * The `intel` namespace, reachable as `oms.content.intel`.
+ *
+ * Seven typed families over the backend's own tables, plus {@link proxy} for
+ * the untyped passthrough to the old sidecar. The three proxy methods are also
+ * mirrored on this class so that code written against 0.3.0's
+ * `oms.content.intel.get(path)` keeps working; new code should say
+ * `oms.content.intel.proxy.get(path)`, which cannot be confused with
+ * {@link IntelArticlesNamespace.get}.
+ *
+ * A tour of the data model, because the names do not give it away:
+ *
+ * 1. a {@link IntelScript} knows HOW to fetch one kind of feed;
+ * 2. an {@link IntelSource} is that script plus its settings - a feed you
+ *    actually follow;
+ * 3. polling a source writes {@link IntelItem} rows: raw, unprocessed, one per
+ *    thing the feed published;
+ * 4. the analysis pipeline groups items into {@link IntelArticle} stories,
+ *    scores them against your {@link IntelConfig} rubric, enriches the
+ *    important ones and links related ones together;
+ * 5. {@link IntelReport} digests summarise a closed time window of stories.
+ *
+ * Only steps 1 and 2 are yours to write. Everything from step 3 on is produced
+ * by background jobs and is read-only over HTTP - a delete is the only mutation
+ * you get, and it is a hide, not an undo.
+ */
+export class IntelNamespace extends Resource {
+  /** Stories: the analysed, grouped, scored output. Read plus delete. */
+  readonly articles: IntelArticlesNamespace;
+  /** Generated digests over closed time windows. Read plus delete. */
+  readonly reports: IntelReportsNamespace;
+  /** The feeds you follow. Full CRUD, plus a manual run. */
+  readonly sources: IntelSourcesNamespace;
+  /** The fetchers. Full CRUD over yours; the built-ins are read-only. */
+  readonly scripts: IntelScriptsNamespace;
+  /** The raw material behind the stories. Read plus delete. */
+  readonly items: IntelItemsNamespace;
+  /** Your rubric, thresholds and prompt overrides. */
+  readonly config: IntelConfigNamespace;
+  /** Dashboard counters, in one expensive call. */
+  readonly stats: IntelStatsNamespace;
+  /** The untyped passthrough to the old intel sidecar. See {@link IntelProxyNamespace}. */
+  readonly proxy: IntelProxyNamespace;
+
+  constructor(http: ApiClient) {
+    super(http);
+    this.articles = new IntelArticlesNamespace(http);
+    this.reports = new IntelReportsNamespace(http);
+    this.sources = new IntelSourcesNamespace(http);
+    this.scripts = new IntelScriptsNamespace(http);
+    this.items = new IntelItemsNamespace(http);
+    this.config = new IntelConfigNamespace(http);
+    this.stats = new IntelStatsNamespace(http);
+    this.proxy = new IntelProxyNamespace(http);
+  }
+
+  /**
+   * Alias for {@link IntelProxyNamespace.get}. Kept so 0.3.0 call sites still
+   * compile; prefer `oms.content.intel.proxy.get(path)`.
+   */
+  async get<T = unknown>(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<T> {
+    return this.proxy.get<T>(path, query, options);
+  }
+
+  /**
+   * Alias for {@link IntelProxyNamespace.fetch}. Kept so 0.3.0 call sites still
+   * compile; prefer `oms.content.intel.proxy.fetch(path)`.
+   */
+  async fetch(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<FileOutput> {
+    return this.proxy.fetch(path, query, options);
+  }
+
+  /**
+   * Alias for {@link IntelProxyNamespace.url}. Kept so 0.3.0 call sites still
+   * compile; prefer `oms.content.intel.proxy.url(path)`.
+   */
+  url(path: string, query?: QueryParams): string {
+    return this.proxy.url(path, query);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -2088,8 +3599,11 @@ export class ContentNamespace extends Resource {
   readonly analysis: AnalysisNamespace;
   /** The Space Invaders leaderboard. */
   readonly spaceInvaders: SpaceInvadersNamespace;
-  /** Read-only passthrough to the intel sidecar. Untyped on purpose. */
-  readonly intel: IntelProxyNamespace;
+  /**
+   * Intel: seven typed families over the backend's own tables, with the
+   * untyped sidecar passthrough kept on `.proxy`. See {@link IntelNamespace}.
+   */
+  readonly intel: IntelNamespace;
 
   constructor(http: ApiClient) {
     super(http);
@@ -2102,6 +3616,6 @@ export class ContentNamespace extends Resource {
     this.serviceUsages = new ServiceUsagesNamespace(http);
     this.analysis = new AnalysisNamespace(http);
     this.spaceInvaders = new SpaceInvadersNamespace(http);
-    this.intel = new IntelProxyNamespace(http);
+    this.intel = new IntelNamespace(http);
   }
 }

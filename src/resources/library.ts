@@ -1107,12 +1107,21 @@ export class LibraryBooksNamespace extends Resource {
    *   or `withCredentials: true` on a cookie client. Both, on a client that has
    *   both, would be a request the API refuses to disambiguate.
    *
-   * Do NOT append `?token=...`. The API does accept a query token
+   * Prefer NOT to append `?token=...`. The API does accept a query token
    * (`Session.candidate_tokens` reads `params[:token]`) and the web frontend
    * uses it for `cover` and `download`, but it puts a live session credential
-   * into access logs and into anything that copies the URL, and rack-attack
-   * keys a query-token request as ANONYMOUS - so it is counted against the
-   * 120/hour anonymous file budget rather than against the signed-in caller's.
+   * into access logs and into anything that copies the URL - a pasted link
+   * hands over the account, and the token never expires on its own.
+   *
+   * The rate-limit half of that warning used to be stated here and was wrong:
+   * a query token is NOT counted as anonymous. `Rack::Attack.authed_session`
+   * resolves through `Session.find_by_request_readonly`, which calls
+   * `resolve_from_request` with `allow_query_param: true` by default, so a
+   * valid `?token=` resolves to a live session and the request is keyed
+   * `sess:<id>` in the authenticated 600/min bucket. Only
+   * `find_by_browser_request` drops the query param, and it is used solely by
+   * the HTML consent and device pages. The leak is the reason to avoid it; the
+   * budget is not.
    */
   fileUrl(id: BookId): string {
     return this.http.url(`/books/${idSegment(id)}/file`);

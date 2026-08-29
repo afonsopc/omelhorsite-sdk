@@ -27,6 +27,7 @@ import { IpLookupNamespace } from "./resources/ipLookup";
 import { JobsNamespace } from "./resources/jobs";
 import { LibraryNamespace } from "./resources/library";
 import { LinkTreesNamespace } from "./resources/linkTrees";
+import { MediaNamespace } from "./resources/media";
 import { MoviesNamespace } from "./resources/movies";
 import { MusicNamespace } from "./resources/music/index";
 import { NotepadsNamespace } from "./resources/notepads";
@@ -170,6 +171,8 @@ export class Oms {
   readonly tools: ToolsNamespace;
   /** Songs, artists, playlists, imports, jams and the music assistant. */
   readonly music: MusicNamespace;
+  /** The canonical bytes of the music library, by media id. */
+  readonly media: MediaNamespace;
   /** Direct messages, friendships and blocks, group chats. */
   readonly social: SocialNamespace;
   /** The book library: uploads, shelves, annotations, the study assistant. */
@@ -233,6 +236,7 @@ export class Oms {
     this.quotas = new QuotasNamespace(this.http);
     this.tools = new ToolsNamespace(this.http);
     this.music = new MusicNamespace(this.http);
+    this.media = new MediaNamespace(this.http);
     this.social = new SocialNamespace(this.http);
     this.library = new LibraryNamespace(this.http);
     this.movies = new MoviesNamespace(this.http);

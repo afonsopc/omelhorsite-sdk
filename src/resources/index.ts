@@ -29,6 +29,7 @@ export * from "./ipLookup";
 export * from "./jobs";
 export * from "./library";
 export * from "./linkTrees";
+export * from "./media";
 export * from "./movies";
 export * from "./music/index";
 export * from "./notepads";

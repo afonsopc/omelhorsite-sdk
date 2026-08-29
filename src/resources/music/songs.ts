@@ -19,9 +19,12 @@
  * will ever match.
  *
  * **Media never travels inline.** A song carries ids of storage nodes, not
- * bytes and not URLs. Resolve one with `oms.storage` (`GET
- * /fs_nodes/:id/data_url` hands back a short-lived signed URL, which is what
- * you give a player) and prefer the compressed twin: `compressed_audio_media_id`
+ * bytes and not URLs. Resolve one with `oms.media` (`GET /media/:id/data_url`
+ * hands back a short-lived signed URL, which is what you give a player). The
+ * `oms.storage` route `GET /fs_nodes/:id/data_url` reaches the same bytes and
+ * the web frontend still uses it, but the backend calls it a temporary alias
+ * for that frontend, so new code should ask `oms.media`. Prefer the compressed
+ * twin either way: `compressed_audio_media_id`
  * before `audio_media_id`, `compressed_artwork_media_id` before
  * `artwork_media_id`. The originals are lossless files on a Raspberry Pi and an
  * album grid that reaches for them takes seconds per tile.

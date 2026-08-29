@@ -234,6 +234,7 @@ describe("namespace registry", () => {
       "jobs",
       "library",
       "linkTrees",
+      "media",
       "movies",
       "music",
       "notepads",
