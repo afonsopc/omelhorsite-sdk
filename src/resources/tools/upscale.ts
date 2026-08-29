@@ -32,11 +32,31 @@ import {
  */
 export type UpscaleScale = "2" | "3" | "4";
 
-/** An upscale run. */
+/**
+ * An upscale run.
+ *
+ * Both routes that answer with one - `POST /upscales` and `GET /upscales/:id` -
+ * render the `:extended` view, so `result_url` is always PRESENT and simply
+ * `null` until the run completes. There is no default-view variant of this
+ * record reachable through the API.
+ *
+ * `progress_percent`, inherited from {@link ToolRecord}, is never sent for this
+ * tool: `UpscaleBlueprint` has no such field. Progress for an upscale lives on
+ * the {@link Job} row that {@link UpscaleCreated.job_id} names.
+ */
 export interface Upscale extends ToolRecord {
+  /**
+   * One of `"2"`, `"3"`, `"4"` - a string, because the column is a string and
+   * the allow-list is `%w[2 3 4]`. Never `null`: `NOT NULL DEFAULT '4'`.
+   */
   readonly scale: string;
-  /** URL of the enlarged image, once the status is `"complete"`. */
-  readonly result_url?: string | null;
+  /**
+   * Signed URL of the enlarged PNG, or `null`. `null` covers three different
+   * situations - the run has not finished, it failed, or the 24-hour sweep
+   * took the attachment - which is why {@link UpscaleNamespace.resultUrl}
+   * exists rather than a bare read of this field.
+   */
+  readonly result_url: string | null;
 }
 
 /** What `POST /upscales` answers with. */

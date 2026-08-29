@@ -9,6 +9,13 @@
  * Creating a link works anonymously; listing, editing and statistics need a
  * credential. Creation is the most tightly throttled write in the whole API -
  * see {@link ShortLinksNamespace.create} before you spend one.
+ *
+ * There is deliberately no `get(id)` here, and its absence is the API's, not
+ * an omission: the route file declares `resources :short_links, only: [:create,
+ * :index, :update, :destroy]`, so `GET /short_links/:id` is not routed at all
+ * and answers 404 for every id, including your own links. To read one link,
+ * find it in {@link ShortLinksNamespace.list} - or by endpoint with
+ * {@link ShortLinksNamespace.resolve}, which explains what that costs.
  */
 
 import { OmsError } from "../errors";
@@ -17,7 +24,7 @@ import {
   createPage,
   type BaseRecord,
   type Id,
-  type JsonObject,
+  type Json,
   type PageParams,
   type Paginated,
   type QueryParams,
@@ -50,10 +57,39 @@ export interface ShortLinkClick {
 }
 
 /**
+ * The owner of a link, rendered inline by `UserBlueprint`'s default view.
+ *
+ * Only the keys that view declares unconditionally are named. `UserBlueprint`
+ * also renders `group`, `email`, `gender`, `last_seen_at`, `sessions_count`,
+ * `deactivated_at`, `allowed_to_use_spotify` and `share_listening` behind `if:`
+ * predicates that test who is ASKING, so whether they appear depends on the
+ * caller's own privileges rather than on the record. That is why they are
+ * reached through the index signature instead of being declared here as
+ * optionals: an optional would suggest the server decides, and it does not.
+ */
+export interface ShortLinkOwner {
+  readonly id: Id;
+  readonly handle: string;
+  readonly name: string;
+  readonly bio: string | null;
+  readonly country_code: string;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  readonly [key: string]: Json | undefined;
+}
+
+/**
  * A short link.
  *
  * `Omit<BaseRecord, "id">` rather than a plain `extends BaseRecord`: see
  * {@link ShortLinkId} for why the identifier is a number on this one table.
+ *
+ * Every key below is present on every response this namespace can produce.
+ * `ShortLinkBlueprint` does declare a second, narrower `:admin` view - it drops
+ * `updated_at`, both associations, and adds `owner`, `click_count` and
+ * `last_click_at` - but that view is only ever rendered by the admin
+ * shortlinks tool under `/admin/short_links`, which is not this resource. A
+ * record that arrived here has the full default shape.
  */
 export interface ShortLink extends Omit<BaseRecord, "id"> {
   /** Integer primary key. See {@link ShortLinkId}. */
@@ -68,6 +104,9 @@ export interface ShortLink extends Omit<BaseRecord, "id"> {
    * shares), `"qr"` (dynamic QR), `"f"` (forms) and `"t"` (link trees). That
    * is why {@link ShortLink} and `DynamicQr` are separate resources even
    * though both are rows in the same table.
+   *
+   * A link that reached you through {@link ShortLinksNamespace.list} always
+   * holds `null` or `""`, because the listing scope is `user_managed`.
    */
   readonly namespace: string | null;
   /** Owner, or `null` for a link created anonymously. */
@@ -77,10 +116,13 @@ export interface ShortLink extends Omit<BaseRecord, "id"> {
    * page. A link with 50 000 visits sends 50 000 objects here. Use
    * {@link ShortLinksNamespace.stats} for anything analytical and treat this
    * field as a payload hazard, not as a feature.
+   *
+   * Always present, and `[]` rather than `null` for a link nobody has clicked:
+   * a Blueprinter association over an empty `has_many` renders an empty array.
    */
-  readonly short_link_clicks?: ShortLinkClick[];
-  /** The owner rendered inline (the same shape `oms.account` returns), or `null`. */
-  readonly user?: JsonObject | null;
+  readonly short_link_clicks: ShortLinkClick[];
+  /** The owner rendered inline, or `null` for a link created anonymously. */
+  readonly user: ShortLinkOwner | null;
 }
 
 /** One day of the click histogram. */

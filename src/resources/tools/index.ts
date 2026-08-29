@@ -72,31 +72,73 @@ export type ToolStatus = "pending" | "processing" | "complete" | "failed";
 /** Terminal states. A row in one of these will never change again. */
 export const TOOL_TERMINAL_STATUSES: readonly ToolStatus[] = Object.freeze(["complete", "failed"] as const);
 
-/** Fields every tool row carries. */
+/**
+ * Fields every tool row carries.
+ *
+ * All six blueprints in the family declare `status`, `error`, `finished_at`,
+ * `user_id` and `ip_address` in their DEFAULT view, and every route that
+ * answers with a tool row renders `:extended`, which inherits the default
+ * view's fields. So those five keys are always present; four of them hold a
+ * nullable column and are `null` rather than missing.
+ *
+ * `progress_percent` is the exception and is optional on purpose: it is an
+ * `:extended`-only field on FOUR of the six - transcription, vocal separation,
+ * captions and jumpstyle, the ones with a sidecar to ask - and does not exist
+ * at all on upscale or background removal, whose progress lives on the {@link
+ * Job} row instead. `toolProgress` reads it defensively for exactly that
+ * reason.
+ */
 export interface ToolRecord extends BaseRecord {
   readonly status: ToolStatus | string;
-  /** Failure message, set once the status is `"failed"`. */
-  readonly error?: string | null;
-  readonly finished_at?: Timestamp | null;
-  readonly user_id?: string | null;
-  /** Set instead of `user_id` for an anonymous run. */
-  readonly ip_address?: string | null;
-  /** Percentage the sidecar reports while running. `null` when idle or done. */
+  /** Failure message, set once the status is `"failed"`. `null` otherwise. */
+  readonly error: string | null;
+  /** Set when the run reached a terminal state; `null` before that. */
+  readonly finished_at: Timestamp | null;
+  /** The owner, or `null` for an anonymous run. */
+  readonly user_id: string | null;
+  /**
+   * The address an anonymous run was started from, and `null` for a run with
+   * an owner - the controllers write one or the other, never both, and the
+   * models validate that at least one is set.
+   *
+   * It is also the credential for an anonymous run: `accessible_by?` matches
+   * this against the reader's own address, which is why picking up an
+   * anonymous run from a different network is a 401.
+   */
+  readonly ip_address: string | null;
+  /**
+   * Percentage the sidecar reports while running, `null` when idle or done -
+   * and absent entirely on upscale and background removal, which have no such
+   * field. See the note on this interface.
+   */
   readonly progress_percent?: number | null;
 }
 
 /**
  * Handle for polling an enqueued run.
  *
- * `job_id` and `watch_token` come back from the tools that enqueue through the
- * generic job table (upscale, background removal). The token is what lets an
- * anonymous caller poll `GET /jobs/:id`; the other tools are polled by reading
- * their own row instead.
+ * Both keys come back from the two tools that enqueue through the generic job
+ * table (upscale, background removal), and BOTH are always present on their
+ * create response: the controllers merge them onto the rendered row
+ * unconditionally. `watch_token` is nullable rather than absent, because
+ * `signed_id` is called on a tracking row that may not have been found.
+ *
+ * The token is what lets an anonymous caller poll `GET /jobs/:id`. The other
+ * five tools are polled by reading their own row and answer neither key, which
+ * is why this is a separate interface mixed into their `Created` types rather
+ * than part of {@link ToolRecord}.
  */
 export interface ToolJobHandle {
-  readonly job_id?: string;
-  /** Signed, scoped to this one job. Required when anonymous. */
-  readonly watch_token?: string;
+  readonly job_id: string;
+  /**
+   * Signed and scoped to this one job, and expiring with the tool's retention
+   * window. Required when anonymous.
+   *
+   * `null` when the tracking row could not be read back after enqueue, which
+   * leaves an anonymous caller with no way to poll at all - the job id alone
+   * is a 404 without a credential.
+   */
+  readonly watch_token: string | null;
 }
 
 /** Mixed into every create input: the anonymous caller's captcha. */
@@ -300,10 +342,15 @@ export async function awaitToolJob<T extends ToolRecord>(
     });
   }
 
+  // `watch_token` is null - not undefined - when the tracking row could not be
+  // read back, so the guard tests for a usable string rather than for
+  // presence. Handing `null` through as a `watch_token=` query parameter would
+  // turn an authenticated poll that would have worked into a 404.
+  const watchToken = created.watch_token;
   const job = await jobs.wait(
     {
       id: created.job_id,
-      ...(created.watch_token === undefined ? {} : { watchToken: created.watch_token }),
+      ...(typeof watchToken === "string" && watchToken.length > 0 ? { watchToken } : {}),
     },
     options,
   );

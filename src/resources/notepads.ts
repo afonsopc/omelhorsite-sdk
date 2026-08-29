@@ -29,7 +29,10 @@ import type { RequestOptions, Timestamp } from "../types";
 export interface Notepad {
   /** Word-shaped capability, e.g. `"quick-brown-fox"`. Treat it as a secret. */
   readonly slug: string;
-  /** The whole document. Empty string, never `null`, for a fresh pad. */
+  /**
+   * The whole document. Empty string, never `null`, for a fresh pad: the
+   * column is `NOT NULL DEFAULT ''`.
+   */
   readonly content: string;
   readonly created_at: Timestamp;
   readonly updated_at: Timestamp;

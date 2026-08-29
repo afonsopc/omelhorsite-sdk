@@ -15,6 +15,7 @@ import {
   toOmsError,
 } from "./errors";
 import {
+  DEFAULT_PAGE_SIZE,
   DEFAULT_RETRY,
   type FetchLike,
   type FileInput,
@@ -25,6 +26,8 @@ import {
   type ResolvedRetry,
   type RetryOptions,
   readFileInput,
+  resolvePageNumber,
+  resolvePageSize,
 } from "./types";
 
 /** Production API root. Override only for a local backend or a test double. */
@@ -84,7 +87,14 @@ export interface ApiClientOptions {
   readonly headers?: Record<string, string>;
   /** Default deadline for one call, retries included. `0` disables it. */
   readonly timeoutMs?: number;
-  /** Default backoff policy, or `false` to never retry. */
+  /**
+   * Shape of the default backoff: how many attempts, how long between them.
+   *
+   * It does not widen WHICH requests are eligible - that stays "safe methods,
+   * plus a 429 on anything". Only a per-call `retry` can put a mutator in
+   * scope. `false` turns retrying off completely, for every method and every
+   * status. See the retry policy on {@link ApiClient}.
+   */
   readonly retry?: RetryOptions | false;
   /**
    * Value for the `X-Oms-Client` header, e.g. `"oms-cli/0.3.1"`. The SDK does
@@ -114,16 +124,51 @@ export interface GetOptions extends RequestOptions {
 /**
  * HTTP client for the omelhorsite API.
  *
- * Retry policy, deliberately narrow:
- * - a `fetch` rejection (DNS, TLS, reset) is retried;
- * - `5xx` is retried;
- * - `429` is retried, waiting exactly what `Retry-After` asked for;
- * - every other `4xx` fails immediately, on any method.
+ * ## Retry policy
  *
- * The policy applies to all verbs, `POST` included. That is the documented
- * behaviour, and it means a `POST` that the server processed before dying with
- * a 502 can be replayed. Pass `retry: false` on any create where a duplicate
- * is worse than a failure.
+ * What may be retried depends on WHY the attempt failed and on WHICH method
+ * made it, because those two together decide whether a replay can duplicate
+ * work the server already did:
+ *
+ * | outcome                              | GET / HEAD | POST / PATCH / PUT / DELETE |
+ * | ------------------------------------ | ---------- | --------------------------- |
+ * | `fetch` rejection (DNS, TLS, reset)  | retried    | **not** retried             |
+ * | `5xx`                                | retried    | **not** retried             |
+ * | `429`                                | retried    | retried                     |
+ * | every other `4xx`                    | fails      | fails                       |
+ *
+ * The first two rows are ambiguous: a reset connection and a 502 from a proxy
+ * both mean "no usable answer", never "nothing happened". A `POST` that the
+ * server committed before the response was lost is indistinguishable from one
+ * it never saw, so replaying it is how one `create` call becomes two records.
+ * Safe methods carry no such risk, which is the whole reason the split exists.
+ *
+ * `429` is the exception, and it is safe on every method because of how this
+ * particular backend produces one. It comes either from `Rack::Attack`, which
+ * answers from middleware before the router is reached, or from a
+ * `too_many_requests!` guard that every controller places BEFORE the write it
+ * protects. A 429 is therefore proof the request was refused rather than
+ * performed, and waiting out `Retry-After` and trying again is exactly right.
+ *
+ * ## Opting a mutator back in
+ *
+ * Pass a `retry` object AT THE CALL SITE and it applies whatever the method:
+ *
+ * ```ts
+ * await oms.tools.downloader.create(input, { retry: {} });  // POST, retried
+ * ```
+ *
+ * A client-wide `new Oms({ retry })` deliberately does NOT do this. It sets the
+ * SHAPE of the backoff (attempts, delays, jitter) for whatever is eligible; it
+ * is not a statement about any one endpoint, and "every POST in this process
+ * may be replayed" is not a decision anybody makes correctly in a constructor.
+ * `retry: false` still disables everything, `429` included, and stays the right
+ * answer for a call whose failure mode is minting something (a short link, a
+ * notepad) under a fresh random identifier on each attempt.
+ *
+ * This is narrower than the SDK's 0.2.0 behaviour, which retried 5xx on every
+ * verb. Nothing in `resources/` relied on that: every call site that mentions
+ * retry is turning it OFF.
  */
 export class ApiClient {
   /** API root with no trailing slash. */
@@ -262,6 +307,13 @@ export class ApiClient {
     const maxAttempts = retry === false ? 1 : Math.max(1, retry.maxAttempts);
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
 
+    // May this attempt be repeated after an outcome that might ALREADY have
+    // changed something server side (a torn connection, a 5xx)? Only if the
+    // method changes nothing, or if the caller asked for retries on this
+    // specific call and thereby accepted the duplicate. A client-wide default
+    // does not count: see the retry policy on the class.
+    const replayable = isSafeMethod(method) || (options.retry !== undefined && options.retry !== false);
+
     let refreshed = false;
     let attempt = 0;
 
@@ -275,7 +327,11 @@ export class ApiClient {
       } catch (thrown) {
         deadline.dispose();
         const failure = classifyFetchFailure(thrown, { method, url, attempts: attempt, timeoutMs, options });
-        if (failure instanceof OmsNetworkError && attempt < maxAttempts && retry !== false) {
+        // A rejected fetch says the ANSWER was lost, not that the request was.
+        // The server may well have run it, so only a replayable method tries
+        // again; everything else surfaces the network error and lets the caller
+        // decide whether a duplicate is acceptable.
+        if (failure instanceof OmsNetworkError && attempt < maxAttempts && retry !== false && replayable) {
           await sleep(backoffDelay(attempt, retry), options.signal);
           continue;
         }
@@ -296,10 +352,14 @@ export class ApiClient {
       }
 
       const headers = headerRecord(response.headers);
+      // 429 needs no `replayable`: this API only ever produces one from
+      // Rack::Attack (middleware, before the router) or from a
+      // `too_many_requests!` guard placed ahead of the write, so the request
+      // provably did not happen. A 5xx carries no such promise.
       const shouldRetry =
         retry !== false &&
         attempt < maxAttempts &&
-        (response.status >= 500 || response.status === 429);
+        (response.status === 429 || (response.status >= 500 && replayable));
 
       if (!shouldRetry) {
         const body = await readErrorBody(response);
@@ -379,19 +439,95 @@ export abstract class Resource {
 }
 
 /**
+ * The backend's null sentinel: a single backspace character, `U+0008`.
+ *
+ * A query string has no way to say `null`. `?parent_id=` is the empty string,
+ * `?parent_id=null` is the four-letter word "null", and omitting the key
+ * entirely says something else again. So the API picked a character no real
+ * value ever contains and decodes it back to `nil` on arrival:
+ * `CrudActions#define_option_param_getter` runs
+ * `value.transform_values! { |v| v == "\b" ? nil : v }` over every filter
+ * bucket, and `GroupChatsController`, `GroupChatMessagesController` and
+ * `BookServices::Creator` each repeat the same test on the fields they read by
+ * hand.
+ *
+ * Where that `nil` lands is what makes it worth having. `Searchable.exact_search`
+ * is `where(params)`, so `exact_search[parent_id]` set to the sentinel becomes
+ * `WHERE parent_id IS NULL` - the only way to ask for the storage root nodes,
+ * for a comment with no parent, for anything unassigned.
+ *
+ * Exported because it is part of the wire format, not because you should need
+ * it: {@link encodeQuery} writes it for you whenever a query value is `null`.
+ */
+export const NULL_SENTINEL = "\b";
+
+/**
  * Encodes query parameters the way Rails parses them.
  *
  * - `{ page: 2 }`                     -> `page=2`
  * - `{ ids: ["a", "b"] }`             -> `ids%5B%5D=a&ids%5B%5D=b`
  * - `{ search: { status: "open" } }`  -> `search%5Bstatus%5D=open`
- * - `undefined` / `null` values are dropped, never sent as an empty string.
+ * - `{ since: new Date(...) }`        -> `since=2026-08-29T09%3A00%3A00.000Z`
+ * - `{ parent_id: null }`             -> `parent_id=%08`, the null sentinel
+ * - `undefined` values are dropped entirely.
+ *
+ * ## Why `null` and `undefined` are not the same thing here
+ *
+ * They are the two answers to two different questions, and a query string can
+ * only express one of them without help:
+ *
+ * - `undefined` means "I am not filtering on this column". Dropping the key is
+ *   the correct encoding.
+ * - `null` means "filter where this column IS NULL". There is no literal for
+ *   that in a URL, so it goes out as {@link NULL_SENTINEL} and the backend
+ *   turns it back into `nil`.
+ *
+ * Encoding `null` as "drop the key" - which this function used to do - is the
+ * dangerous direction. The filter simply vanishes and `Searchable.exact_search`
+ * returns early (`return self unless params.present?`), so the endpoint answers
+ * with the UNFILTERED set: a request for the root of somebody's drive comes
+ * back as their entire tree. That failure has bitten this API before, from the
+ * other end, and is why `CrudActions#reject_unknown_filter_keys!` now 400s on a
+ * key it does not recognise rather than quietly widening the query.
+ *
+ * The sentinel is written at every depth, even though the server only decodes
+ * it one level inside a filter bucket (`search`, `exact_search`, `modifiers`,
+ * `extra_options`). Anywhere else it stays the literal character and matches no
+ * row - an empty result, which is the safe way to be wrong. Compare that with
+ * dropping the key, which is an over-broad result nobody notices.
+ *
+ * ## Dates
+ *
+ * A `Date` reaches `typeof value === "object"` like anything else, and
+ * `Object.entries(new Date())` is `[]`, so before this branch existed a date
+ * filter did not merely arrive malformed - the key disappeared and the listing
+ * came back unfiltered. ISO-8601 is what the server reads:
+ * `QuerySearcher#date_search` runs `String#to_date_safe` (`Date.parse`) over
+ * the value and turns an unparseable one into `nil`, which silently drops that
+ * side of the range. Bodies need no equivalent branch, because `JSON.stringify`
+ * already calls `Date.prototype.toJSON` and emits the same string.
+ *
+ * @throws {TypeError} for an invalid `Date`. `toISOString()` would throw a bare
+ *   `RangeError` from deep inside the transport; failing loudly at the boundary
+ *   beats sending `Invalid Date` and getting an unfiltered page back.
  */
 export function encodeQuery(params: QueryParams): string {
   const parts: string[] = [];
   const push = (key: string, value: QueryValue): void => {
-    if (value === undefined || value === null) return;
+    if (value === undefined) return;
+    if (value === null) {
+      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(NULL_SENTINEL)}`);
+      return;
+    }
     if (Array.isArray(value)) {
       for (const entry of value) push(`${key}[]`, entry);
+      return;
+    }
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) {
+        throw new TypeError(`Query parameter "${key}" is an invalid Date. Check what produced it before sending it.`);
+      }
+      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value.toISOString())}`);
       return;
     }
     if (typeof value === "object") {
@@ -406,17 +542,56 @@ export function encodeQuery(params: QueryParams): string {
 }
 
 /**
- * Builds the `modifiers[page]` string the backend expects (`"2:100"`).
- * Page size is clamped to the server maximum so a caller cannot silently ask
- * for more and get 500 back without knowing.
+ * Methods whose replay cannot duplicate work, so a lost answer may simply be
+ * asked for again.
+ *
+ * `PUT` and `DELETE` are idempotent by RFC 9110 and are still absent, because
+ * idempotent is not the same as harmless to replay HERE. Rails' `destroy` is
+ * behind a `find_by` that answers `404` the second time, so a `DELETE` retried
+ * after a torn connection reports "not found" for a row it deleted perfectly
+ * well - a success turned into an error the caller then acts on.
  */
-export function pageModifier(page = 1, pageSize = 100): string {
-  const number = Math.max(1, Math.trunc(page));
-  const size = Math.min(500, Math.max(1, Math.trunc(pageSize)));
-  return `${number}:${size}`;
+export const SAFE_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/** True when {@link SAFE_METHODS} contains `method`, case-insensitively. */
+export function isSafeMethod(method: string): boolean {
+  return SAFE_METHODS.has(method.toUpperCase());
 }
 
-/** Turns a {@link FormFields} bag into a `FormData`, buffering any streams. */
+/**
+ * Builds the `modifiers[page]` string the backend expects (`"2:100"`).
+ *
+ * Both halves go through `resolvePageSize` / `resolvePageNumber`, which is the
+ * same pair `createPage` uses. That is the point: the size on the wire and the
+ * size `Paginated.pageSize` reports have to be one number, or a caller who asks
+ * for 1200 gets the server's 500 rows measured against their own 1200 and is
+ * told `hasMore: false` while 700 rows sit behind it.
+ *
+ * @throws {TypeError} for a page size that is not a finite number of at least
+ *   1. `"1:NaN"` on the wire reads as size `0` in
+ *   `QueryModifier#apply_pagination`, which skips `limit`/`offset` altogether
+ *   and returns the entire table.
+ */
+export function pageModifier(page = 1, pageSize: number = DEFAULT_PAGE_SIZE): string {
+  return `${resolvePageNumber(page)}:${resolvePageSize(pageSize)}`;
+}
+
+/**
+ * Turns a {@link FormFields} bag into a `FormData`, buffering any streams.
+ *
+ * `null` and `undefined` fields are OMITTED, which is the opposite of what
+ * {@link encodeQuery} does with `null` and is right for the same reason it is
+ * right there: what the receiver reads from an absent field. A multipart body
+ * only ever feeds a create here, and an absent field means `params[:x]` is
+ * `nil` - already the value a sentinel would decode to, so writing one would
+ * add a step that changes nothing. In a query the absent key means "no filter",
+ * which is a different answer entirely.
+ *
+ * The one thing this cannot express is clearing a column through a multipart
+ * UPDATE, where absent means "leave it alone". No endpoint takes one - the SDK
+ * sends multipart to the tools and to `POST /books` only - and if one appears,
+ * pass {@link NULL_SENTINEL} as the field value explicitly.
+ */
 export async function buildFormData(fields: FormFields): Promise<FormData> {
   const form = new FormData();
 

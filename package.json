@@ -1,6 +1,6 @@
 {
   "name": "@omelhorsite/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeScript SDK for the omelhorsite API. Isolate-safe: no node builtins, no environment access, no stdout.",
   "type": "module",
   "license": "UNLICENSED",
@@ -25,6 +25,7 @@
     "typecheck:tests": "tsc --noEmit -p tsconfig.test.json"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {

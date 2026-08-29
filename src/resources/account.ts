@@ -7,7 +7,9 @@
  * that a stored credential is still alive.
  */
 
+import { OmsApiError } from "../errors";
 import { type ApiClient, Resource, buildFormData, pageModifier, readJson } from "../http";
+import { objectStoreFetch } from "./storage/upload";
 import type {
   BaseRecord,
   FileInput,
@@ -19,7 +21,7 @@ import type {
   RequestOptions,
   Timestamp,
 } from "../types";
-import { createPage } from "../types";
+import { createPage, resolvePageNumber, resolvePageSize } from "../types";
 
 /**
  * A user as the API renders them.
@@ -358,13 +360,94 @@ export class AccountNamespace extends Resource {
   /**
    * `GET /users/:id/picture` - the avatar bytes.
    *
-   * Answers 302 towards object storage and `fetch` follows it; the platform
-   * drops `Authorization` on the cross-origin hop, so the credential never
-   * reaches the storage host. Answers 404 when the user has no avatar.
+   * SENT WITH NO CREDENTIAL AT ALL, and that is the point of this method rather
+   * than an oversight.
+   *
+   * The endpoint is anonymous by design: `UsersController` lists `picture` in
+   * `allow_unauthenticated_access`, and `User.viewable_by` is `->(user) { all }`,
+   * so a signed-in caller and a stranger resolve the same row and get the same
+   * bytes. Sending a credential buys nothing, and it is what breaks the call.
+   *
+   * Why it breaks. The action answers `302` to `minio.omelhorsite.pt` with a
+   * presigned URL, and `fetch` follows that hop. Per the Fetch standard, when a
+   * CORS request is redirected cross-origin and the request's origin already
+   * differs from the current URL's origin, the origin is replaced by an opaque
+   * one - so the second hop reaches the store with `Origin: null`. MinIO
+   * answers a null origin with `Access-Control-Allow-Origin: *`. A wildcard is
+   * illegal for a credentialed request no matter what
+   * `Access-Control-Allow-Credentials` says, so a client built with
+   * `sessionCookie: true` - the production web app - would have the browser
+   * reject the response before any JavaScript saw it. Every avatar on the page
+   * would fail, and fail as an opaque "Failed to fetch".
+   *
+   * Dropping the credential removes the wildcard problem entirely: an
+   * uncredentialed request accepts `*`, so this behaves identically in a
+   * browser, in Bun and in a Worker, in cookie mode and in token mode.
+   *
+   * Going around the transport costs the usual thing, the same trade
+   * `storage.download` makes: no retry, no per-call deadline, and only the
+   * caller's `signal` is honoured.
+   *
+   * Prefer {@link pictureUrl} when the avatar is going into an `<img>`. This
+   * method is for when the bytes themselves are wanted - a re-upload, a cache,
+   * a file written to disk.
+   *
+   * @throws {OmsApiError} 404 when the user does not exist OR has no avatar
+   *   attached. The two are not distinguishable from the status alone.
    */
   async picture(id: Id, options: RequestOptions = {}): Promise<Blob> {
-    const response = await this.http.raw("GET", `/users/${encodeURIComponent(id)}/picture`, options);
+    const url = this.pictureUrl(id);
+    const response = await objectStoreFetch(this.http)(url, {
+      method: "GET",
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      // Not "include", and not a bearer header either. See the note above.
+      credentials: "omit",
+      redirect: "follow",
+    });
+    if (!response.ok) {
+      throw new OmsApiError(
+        response.status === 404
+          ? "No avatar for that user: either the id is unknown or nothing is attached."
+          : `Could not read the avatar (${response.status}).`,
+        { status: response.status, method: "GET", url, attempts: 1 },
+      );
+    }
     return response.blob();
+  }
+
+  /**
+   * Absolute URL of a user's avatar, for an `<img>`, a CSS `background-image`,
+   * or anywhere else the platform fetches the bytes for you.
+   *
+   * Synchronous, and it has to stay that way. This gets called once per row
+   * while rendering a friends list, a member picker or a message thread; an
+   * async URL would turn every avatar into a state update and a second paint.
+   *
+   * It can be synchronous because the route carries no credential: `picture` is
+   * in `allow_unauthenticated_access` and `User.viewable_by` is `all`, so there
+   * is nothing to resolve and nothing to leak. The URL is safe to put in
+   * markup, to log, and to hand to someone else.
+   *
+   * ```tsx
+   * <img src={oms.account.pictureUrl(user.id)} alt={user.handle} />
+   * ```
+   *
+   * Do NOT add a `crossorigin` attribute. Without one the element makes a
+   * no-cors request and the `302` to the object store is followed with no CORS
+   * check at all, which is why this path has always worked in the web app.
+   * `crossorigin="use-credentials"` re-creates exactly the failure
+   * {@link picture} documents, and `crossorigin="anonymous"` only buys the
+   * ability to read the pixels back out of a canvas.
+   *
+   * A user with no avatar answers 404, so give the element an `onError` that
+   * falls back to initials rather than assuming every id has an image.
+   *
+   * The `302` itself carries `Cache-Control: private, max-age=300` while the
+   * presigned target is good for six hours, so a re-render inside five minutes
+   * costs nothing and a cached redirect can never outlive its signature.
+   */
+  pictureUrl(id: Id): string {
+    return this.http.url(`/users/${encodeURIComponent(id)}/picture`);
   }
 
   /** `POST /users/:id/follow` - returns the followed user's updated profile. */
@@ -412,10 +495,3 @@ function sessionQuery(params: ListAccountSessionsParams, page: number, pageSize:
   };
 }
 
-function resolvePageNumber(page: number | undefined): number {
-  return Math.max(1, Math.trunc(page ?? 1));
-}
-
-function resolvePageSize(pageSize: number | undefined): number {
-  return Math.min(500, Math.max(1, Math.trunc(pageSize ?? 100)));
-}

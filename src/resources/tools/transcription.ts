@@ -50,22 +50,44 @@ import {
   type ToolRunOptions,
 } from "./index";
 
-/** A transcription run. */
+/**
+ * A transcription run.
+ *
+ * Both routes that answer with one - `POST /transcriptions` and
+ * `GET /transcriptions/:id` - render the `:extended` view, so every key below
+ * is present on every response, the five `:extended` ones included. What
+ * changes as the run progresses is the VALUE, not the key set: polling a
+ * pending run and polling a finished one return the same shape.
+ */
 export interface Transcription extends ToolRecord {
+  /** Never `null`: the column is `NOT NULL` and the controller rejects an
+   * unknown model with a 400 before the row is built. */
   readonly model_id: string;
-  /** Audio duration charged against the quota. */
+  /**
+   * Audio duration charged against the quota, rounded UP at create time. Never
+   * `null` (`NOT NULL DEFAULT 0`), and it is what was spent even if the run
+   * later fails.
+   */
   readonly duration_seconds: number;
-  /** Language that was requested, or `null` when it was auto-detected. */
-  readonly language?: string | null;
-  /** Language the model actually detected. */
-  readonly detected_language?: string | null;
-  readonly has_original?: boolean;
-  /** The transcript. Only shipped once the status is `"complete"`. */
-  readonly text?: string | null;
-  /** SubRip subtitles, once complete. */
-  readonly srt_url?: string | null;
-  /** WebVTT subtitles, once complete. */
-  readonly vtt_url?: string | null;
+  /** Language that was requested, or `null` when it was left to detection. */
+  readonly language: string | null;
+  /** Language the model actually detected, or `null` before it has. */
+  readonly detected_language: string | null;
+  /**
+   * Whether the uploaded audio is still attached. A real boolean, never
+   * `null`: the field is computed as `original_audio.attached?`.
+   */
+  readonly has_original: boolean;
+  /**
+   * The transcript, or `null`. Shipped ONLY once the status is `"complete"` -
+   * deliberately, so that polling a long run does not drag the whole text
+   * across the wire every few seconds.
+   */
+  readonly text: string | null;
+  /** Signed SubRip URL once complete and attached, `null` otherwise. */
+  readonly srt_url: string | null;
+  /** Signed WebVTT URL once complete and attached, `null` otherwise. */
+  readonly vtt_url: string | null;
 }
 
 /** Arguments for starting a transcription. */

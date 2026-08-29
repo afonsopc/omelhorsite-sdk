@@ -487,6 +487,30 @@ export class DownloaderNamespace extends Resource {
       retry: options.retry ?? false,
     });
   }
+
+  /**
+   * The unauthenticated URL of the file endpoint. Pure string building, no
+   * request.
+   *
+   * Deliberately does NOT carry a credential, which makes it useless for
+   * handing to an `<a download>` or a `<video src>`: the route needs one, and
+   * an anonymous request to it is a 401. It is here so a caller can log or
+   * display the address, and so the shape of the endpoint is documented
+   * somewhere other than inside {@link downloadFile}.
+   *
+   * The web app builds a *usable* browser URL by appending its session token
+   * as a `?token=` query parameter. The SDK will not do that: the transport
+   * holds the token so it can put it in an `Authorization` header, and copying
+   * it into a URL puts it in browser history, in the Referer, and in every
+   * proxy log between here and the API. A host that genuinely needs a
+   * browser-followable link should call {@link downloadFile} and hand the
+   * blob to a local object URL instead.
+   *
+   * Remember the endpoint is ONE SHOT whichever way it is reached.
+   */
+  fileUrl(id: Id): string {
+    return this.http.url(`/tools_downloader/jobs/${encodeURIComponent(id)}/file`);
+  }
 }
 
 /** Reads the sidecar's `request_id` off a create answer. */

@@ -26,10 +26,25 @@ import {
   type ToolRunOptions,
 } from "./index";
 
-/** A background removal run. */
+/**
+ * A background removal run.
+ *
+ * Both routes that answer with one - `POST /background_removals` and
+ * `GET /background_removals/:id` - render the `:extended` view, so `result_url`
+ * is always PRESENT and simply `null` until the run completes.
+ *
+ * `progress_percent`, inherited from {@link ToolRecord}, is never sent for this
+ * tool: `BackgroundRemovalBlueprint` has no such field. Progress lives on the
+ * {@link Job} row that {@link BackgroundRemovalCreated.job_id} names.
+ */
 export interface BackgroundRemoval extends ToolRecord {
-  /** URL of the cut-out PNG, once the status is `"complete"`. */
-  readonly result_url?: string | null;
+  /**
+   * Signed URL of the cut-out PNG, or `null` - for the run not having
+   * finished, for it having failed, or for the 24-hour sweep having taken the
+   * attachment. {@link BackgroundRemovalNamespace.resultUrl} tells the three
+   * apart.
+   */
+  readonly result_url: string | null;
 }
 
 /** What `POST /background_removals` answers with. */

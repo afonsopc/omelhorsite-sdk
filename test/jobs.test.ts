@@ -108,7 +108,12 @@ describe("the status constants", () => {
       total: 100,
       status: "processing",
     });
-    expect(jobProgress(job({ progress: null })).loaded).toBe(0);
+    // `jobs.progress` is `integer NOT NULL DEFAULT 0`, so a null cannot come
+    // off the wire and the type rightly forbids one. The cast is here to reach
+    // the guard in `jobProgress` anyway: it defends against a malformed
+    // payload (a proxy rewriting the body, a future column made nullable), and
+    // a guard nothing exercises is a guard nobody knows is broken.
+    expect(jobProgress(job({ progress: null as unknown as number })).loaded).toBe(0);
   });
 });
 

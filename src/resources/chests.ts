@@ -14,9 +14,9 @@
  * to five an hour per IP and gated by a captcha.
  */
 
-import { OmsError } from "../errors";
+import { OmsApiError, OmsError } from "../errors";
 import { type ApiClient, Resource, readJson } from "../http";
-import { UploadManager, type DirectUploadTarget, md5Base64 } from "./storage/upload";
+import { UploadManager, type DirectUploadTarget, md5Base64, objectStoreFetch } from "./storage/upload";
 import type { BaseRecord, FileInput, Id, OperationOptions, RequestOptions, Timestamp } from "../types";
 import { readFileInput } from "../types";
 
@@ -239,13 +239,82 @@ export class ChestEntriesNamespace extends Resource {
   /**
    * `GET /chest_entries/:id/data` - the entry's bytes.
    *
-   * Answers 302 towards object storage and `fetch` follows it. Note that this
-   * endpoint checks nothing at all: the entry id alone is enough to download
-   * it, with or without the chest name or token.
+   * SENT WITH NO CREDENTIAL, deliberately. `ChestEntriesController` lists
+   * `data` in `allow_unauthenticated_access`, and the action itself is three
+   * lines: find the entry by id, check that something is attached, redirect.
+   * It never looks at the chest name, the chest token, or who is asking. The
+   * ENTRY ID IS THE WHOLE CAPABILITY - which is worth knowing for its own sake,
+   * and which also means a credential on this request could not possibly change
+   * the answer.
+   *
+   * That matters because sending one breaks the call in a browser. The action
+   * answers `302` to `minio.omelhorsite.pt`, and following that hop replaces the
+   * request's origin with an opaque one (Fetch standard: a cross-origin
+   * redirect of a CORS request whose origin already differs from the current
+   * URL's origin), so the store sees `Origin: null` and answers
+   * `Access-Control-Allow-Origin: *`. Wildcard plus credentials is illegal, so a
+   * client built with `sessionCookie: true` - the production web app - would
+   * have the browser reject the bytes with an opaque "Failed to fetch". Asking
+   * anonymously sidesteps it: `*` is fine for an uncredentialed request.
+   *
+   * Two shapes come back and both are handled here. Against MinIO it is the
+   * `302`. Against a Disk service (dev, test) presigning raises `ArgumentError`
+   * and the controller falls back to `send_data`, so the bytes arrive inline
+   * from Rails with a `Content-Disposition`. Either way this returns the bytes.
+   *
+   * Going around the transport costs the usual thing: no retry, no per-call
+   * deadline, only the caller's `signal`. Use {@link downloadUrl} when the
+   * destination is an `<a download>` or a media element rather than memory.
+   *
+   * @throws {OmsApiError} 404 when the entry is unknown, its bytes never
+   *   landed, or the chest has passed its two-hour expiry and been swept.
    */
   async download(id: Id, options: RequestOptions = {}): Promise<Blob> {
-    const response = await this.http.raw("GET", `/chest_entries/${encodeURIComponent(id)}/data`, options);
+    const url = this.downloadUrl(id);
+    const response = await objectStoreFetch(this.http)(url, {
+      method: "GET",
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      // Never "include": see the note above.
+      credentials: "omit",
+      redirect: "follow",
+    });
+    if (!response.ok) {
+      throw new OmsApiError(
+        response.status === 404
+          ? "No bytes for that entry: it is unknown, its upload never completed, or the chest expired. Chests live two hours."
+          : `The chest entry download failed (${response.status}).`,
+        { status: response.status, method: "GET", url, attempts: 1 },
+      );
+    }
     return response.blob();
+  }
+
+  /**
+   * Absolute URL for an entry's bytes, for an `<a download>`, a `<video>`, or a
+   * new tab.
+   *
+   * Synchronous and credential-free, because the endpoint is: the entry id is
+   * the only thing it checks. The frontend's older helper appended a `?token=`
+   * here; this deliberately does not, because a session token in a URL that
+   * ends up in markup, in a shared link and in an access log buys precisely
+   * nothing on a route that never reads it.
+   *
+   * Treat the URL as a bearer capability all the same. Anyone holding it can
+   * pull the file until the chest expires, so it is exactly as shareable as the
+   * chest name and no more.
+   *
+   * ```tsx
+   * <a href={oms.chests.entries.downloadUrl(entry.id)} download={entry.name}>
+   *   {entry.name}
+   * </a>
+   * ```
+   *
+   * A link is also the better answer for a large entry: the browser streams it
+   * straight to disk, where {@link download} would buffer the whole file in
+   * memory first.
+   */
+  downloadUrl(id: Id): string {
+    return this.http.url(`/chest_entries/${encodeURIComponent(id)}/data`);
   }
 
   /**

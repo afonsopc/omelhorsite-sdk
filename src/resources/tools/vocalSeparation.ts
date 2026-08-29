@@ -51,28 +51,45 @@ import {
 /** Which stem to fetch. */
 export type VocalStem = "vocals" | "instrumental";
 
-/** A vocal separation run. */
+/**
+ * A vocal separation run.
+ *
+ * Both routes that answer with one - `POST /vocal_separations` and
+ * `GET /vocal_separations/:id` - render the `:extended` view, so every key
+ * below is present on every response. Only the values move.
+ */
 export interface VocalSeparation extends ToolRecord {
+  /** Never `null`: `NOT NULL`, and an unknown model is a 400 before the row exists. */
   readonly model_id: string;
-  /** Audio duration charged against the quota. */
+  /** Audio duration charged against the quota, rounded up at create time. */
   readonly duration_seconds: number;
-  /** Set when the run came from the music library rather than an upload. */
-  readonly song_id?: Id | null;
-  readonly song_title?: string | null;
-  readonly has_original?: boolean;
-  readonly has_vocals?: boolean;
-  readonly has_instrumental?: boolean;
+  /**
+   * Set when the run came from the music library rather than an upload.
+   *
+   * A **number**, not a string. `vocal_separations.song_id` is a `bigint`
+   * pointing at `songs`, which is one of the few tables in this API that kept
+   * an integer primary key - so this is the one id in the tools family that is
+   * not an {@link Id}. Comparing it against a string never matches.
+   */
+  readonly song_id: number | null;
+  /** Title of that song, or `null` for an uploaded run. */
+  readonly song_title: string | null;
+  /** Real booleans, never `null`: each is an `attached?` call on the record. */
+  readonly has_original: boolean;
+  readonly has_vocals: boolean;
+  readonly has_instrumental: boolean;
   /**
    * Live runs queued ahead of this one; `0` means next up. `null` once the run
    * is processing or terminal.
    */
-  readonly queue_position?: number | null;
+  readonly queue_position: number | null;
   /**
-   * Stem URLs, once complete. Both stay `null` for a song-owned separation,
-   * whose stems live on the song as filesystem nodes instead.
+   * Signed stem URLs once complete, `null` otherwise - and permanently `null`
+   * for a song-owned separation, whose stems are written onto the song as
+   * filesystem nodes and never attached to this row.
    */
-  readonly vocals_url?: string | null;
-  readonly instrumental_url?: string | null;
+  readonly vocals_url: string | null;
+  readonly instrumental_url: string | null;
 }
 
 /** Arguments for starting a separation. */
@@ -244,7 +261,7 @@ export class VocalSeparationNamespace extends Resource {
    * @throws {OmsError} explaining which of the four reasons there is no URL.
    */
   stemUrl(record: VocalSeparation, stem: VocalStem): string {
-    if (typeof record.song_id === "string" && record.song_id.length > 0) {
+    if (isSongOwned(record)) {
       throw new OmsError(
         `This separation belongs to song ${record.song_id}, so its stems live on the song as filesystem nodes, ` +
           `not as downloadable attachments. Read them through the music library instead.`,
@@ -253,4 +270,26 @@ export class VocalSeparationNamespace extends Resource {
     }
     return requireToolArtifact(record, stem === "vocals" ? record.vocals_url : record.instrumental_url, stem);
   }
+}
+
+/**
+ * Whether this run came from the music library rather than from an upload.
+ *
+ * Tests for a present, non-empty id and NOT for a particular JavaScript type,
+ * which is the whole point of extracting it. `vocal_separations.song_id` is a
+ * bigint, so the wire value is a NUMBER - and this check used to be
+ * `typeof record.song_id === "string"`, which meant it never fired for a real
+ * row. Every song-owned separation fell through to `requireToolArtifact`,
+ * which saw a complete run with no URL and blamed the 24-hour retention sweep
+ * for stems that were never attachments in the first place.
+ *
+ * The string branch is kept because this predicate is also handed rows a host
+ * deserialised itself, and a JSON parser that widened a bigint to a string is
+ * a wrong TYPE, not a run that suddenly has no song. Answering the wrong
+ * question loudly is worse than accepting both spellings of the right one.
+ */
+function isSongOwned(record: VocalSeparation): boolean {
+  const songId: unknown = record.song_id;
+  if (typeof songId === "number") return Number.isFinite(songId);
+  return typeof songId === "string" && songId.length > 0;
 }

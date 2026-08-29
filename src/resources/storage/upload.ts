@@ -33,6 +33,41 @@
  * Multipart is not an optimisation. The object store sits behind Cloudflare on
  * a plan that caps a request body at roughly 100 MB, so anything larger has no
  * other way in.
+ *
+ * ## Progress, and why it ticks per transfer rather than per byte
+ *
+ * The bytes go to a presigned MinIO URL. Rails is never in the data path, and
+ * neither is rack-attack - so a progress bar here is a pure client-side
+ * problem, and the SDK solves it as far as `fetch` allows and no further.
+ *
+ * `fetch` has no upload-progress event. The two ways out were weighed and both
+ * were rejected for the core:
+ *
+ * - **XHR**, which is what the web frontend's axios uses today, is the only API
+ *   that reports request bytes as they leave. It does not exist in a
+ *   Cloudflare-Worker-class isolate, and this package must load there.
+ * - **A counting `ReadableStream` request body** would run in an isolate, and
+ *   still does not work HERE. A stream body forces chunked transfer encoding,
+ *   while a presigned PUT is signed over a fixed `Content-Length` (and, on the
+ *   direct tier, over a `Content-MD5` covering the whole body), so the store
+ *   answers a signature error. It also needs `duplex: "half"` and HTTP/2, which
+ *   Safari and Firefox do not have. And it would count bytes handed to the
+ *   runtime rather than bytes the store acknowledged - the lie that makes a bar
+ *   sit at 100% for a minute.
+ *
+ * So: every `onProgress` in this module reports a COMPLETED transfer. On the
+ * multipart tier that is one tick per part, which the server sizes at 32 MiB,
+ * so a 1 GB file moves the bar 32 times. On the direct tier it is one tick for
+ * the whole file, which is at most 32 MiB by construction.
+ *
+ * A host that wants true byte-level granularity does not have to give up the
+ * driver: {@link UploadManagerOptions.fetch} takes the transport used for the
+ * presigned PUTs, so a browser can hand in an XHR-backed {@link FetchLike} and
+ * keep everything else. See the note there for the recipe. Building the whole
+ * flow by hand is also supported - {@link UploadManager.createBatch},
+ * {@link UploadManager.putDirect}, {@link UploadManager.attachBlobs} and the
+ * `multipart*` methods are public precisely so that a caller can drive the
+ * three phases itself and count bytes however it likes.
  */
 
 import { Resource, backoffDelay, resolveRetry, sleep, type ApiClient } from "../../http";
@@ -48,7 +83,37 @@ import {
 } from "../../types";
 import type { FsNode } from "../storage";
 
-/** Files at or above this size take the multipart path. Mirrors the backend. */
+/**
+ * Files at or above this size take the multipart path: 32 MiB, exactly.
+ *
+ * This is a PROTOCOL constant, not a tuning knob, and it is the SDK's public
+ * copy of it. Import this rather than writing `32 * 1024 * 1024` again:
+ *
+ * ```ts
+ * import { MULTIPART_THRESHOLD } from "@omelhorsite/sdk";
+ * ```
+ *
+ * The number was verified in all three places it is currently written down, and
+ * as of this writing they agree:
+ *
+ * - `FsServices::NodeBatchCreator::MULTIPART_THRESHOLD = 32.megabytes`, which
+ *   is the only one that decides anything. The server compares
+ *   `entry[:size] >= MULTIPART_THRESHOLD` and puts `strategy` in the plan.
+ * - the web frontend's `lib/upload_core.ts`, which keeps its own literal.
+ * - here.
+ *
+ * The client-side copies exist because the CHECKSUM has to be in the manifest
+ * before the server has decided anything: below the threshold the digest is
+ * mandatory (it is Content-MD5-bound into the presigned signature), at or above
+ * it is pointless (multipart verifies per-part ETags). So the comparison is
+ * made twice, and {@link manifestEntryFor} uses `<` against exactly the
+ * server's `>=`.
+ *
+ * Drift is expensive and silent in one direction: a client that thinks the
+ * threshold is HIGHER than the server's omits the checksum on a file the server
+ * still plans as direct, and the upload dies at MinIO with a signature error
+ * that never mentions checksums. That is the whole reason this is exported.
+ */
 export const MULTIPART_THRESHOLD = 32 * 1024 * 1024;
 
 /**
@@ -219,6 +284,12 @@ export interface UploadInput {
    * Read the finished nodes back with one extra listing per batch. On by
    * default, and worth it: a normal listing hides nodes whose bytes never
    * landed, so a node coming back at all is proof the blob is bound.
+   *
+   * Turning it off costs more than the listing. `UploadResult.node` is then
+   * `null` for every file, and `oms.storage.upload()` - which returns exactly
+   * the nodes it read back - answers with an EMPTY array on a run where every
+   * byte landed. Use {@link UploadManager.upload} directly if you switch this
+   * off, and read `fs_node_id` instead.
    */
   readonly verify?: boolean;
   /** Replacement for the built-in MD5. See {@link Md5Base64Fn}. */
@@ -284,11 +355,40 @@ export class StorageRateGate {
 /** Constructor options for {@link UploadManager}. */
 export interface UploadManagerOptions {
   /**
-   * The fetch used for the presigned PUTs.
+   * The fetch used for the presigned PUTs at the object store.
    *
    * Defaults to the one the {@link ApiClient} was built with, so bytes travel
-   * on the same transport as everything else. Pass one only to send the object
-   * store's traffic somewhere different from the API's.
+   * on the same transport as everything else. Only the PUTs go through it; the
+   * control plane always uses the client's own transport.
+   *
+   * This is also the supported way to get BYTE-LEVEL upload progress in a
+   * browser, which `fetch` cannot give (see the module note). Wrap XHR in a
+   * {@link FetchLike}, hand it in here, and keep the rest of the driver:
+   *
+   * ```ts
+   * const uploads = new UploadManager(oms.http, {
+   *   fetch: (url, init) =>
+   *     new Promise((resolve, reject) => {
+   *       const xhr = new XMLHttpRequest();
+   *       xhr.open(init?.method ?? "PUT", url);
+   *       for (const [k, v] of Object.entries(init?.headers ?? {})) xhr.setRequestHeader(k, v as string);
+   *       xhr.upload.onprogress = (event) => onBytes(url, event.loaded, event.total);
+   *       xhr.onload = () =>
+   *         resolve(new Response(xhr.response, { status: xhr.status, headers: parseXhrHeaders(xhr) }));
+   *       xhr.onerror = () => reject(new Error("network"));
+   *       xhr.send(init?.body as XMLHttpRequestBodyInit);
+   *     }),
+   * });
+   * await uploads.upload({ parentId, files });
+   * ```
+   *
+   * Two things the wrapper MUST get right, both of which the SDK's own
+   * transport already does. It must not add an `Authorization` header or a
+   * cookie: the presigned signature is the credential and MinIO rejects a
+   * request carrying two authentication schemes. And it must expose `ETag` on
+   * the `Response` it builds, or the multipart tier has nothing to complete
+   * with - in a browser that additionally needs `ETag` in the bucket's
+   * `Access-Control-Expose-Headers`.
    */
   readonly fetch?: FetchLike;
   /** Replacement for the built-in MD5. See {@link Md5Base64Fn}. */
@@ -328,10 +428,16 @@ export class UploadManager extends Resource {
    * the server reports them. Only a structural failure (bad parent, empty or
    * oversized batch) throws.
    *
-   * Progress granularity is a whole direct PUT or a whole multipart part, not
-   * a byte counter. `fetch` has no upload-progress event and a streamed request
-   * body is neither universally supported nor usable against a presigned PUT,
-   * which needs a `Content-Length`.
+   * `options.onProgress` reports the WHOLE RUN: `loaded` counts bytes across
+   * every file and `total` is their sum, so the number only ever climbs. It
+   * ticks once per finished direct PUT and once per finished multipart part -
+   * never per byte, for the reasons in the module note - and it fires once with
+   * `loaded: 0` before anything is sent, so a bar can render immediately.
+   *
+   * That callback is deliberately NOT forwarded to the per-file drivers. They
+   * take an `onProgress` of their own that talks about ONE file, and letting
+   * the run-level callback reach them would interleave "3 MB of 3 MB" with
+   * "12 MB of 40 MB" on the same bar.
    *
    * Every multipart session this call opened is aborted before the error
    * leaves, so a torn run does not strand parts (and reserved quota) on the
@@ -368,6 +474,13 @@ export class UploadManager extends Resource {
     };
     report(0);
 
+    // The run-level callback is stripped here, once, so that nothing below can
+    // hand it to a per-file driver: putDirect and uploadMultipart both accept
+    // an onProgress that reports a SINGLE file, and firing the run's callback
+    // with one file's loaded/total makes the aggregate bar jump backwards.
+    // `report` above is the only thing that may call it.
+    const { onProgress: _runProgress, ...transfer } = options;
+
     const batchSize = Math.min(MAX_BATCH, Math.max(1, Math.trunc(input.batchSize ?? DEFAULT_BATCH_SIZE)));
     const concurrency = Math.max(1, Math.trunc(input.concurrency ?? DEFAULT_UPLOAD_CONCURRENCY));
     const md5 = input.md5 ?? this.md5;
@@ -394,7 +507,7 @@ export class UploadManager extends Resource {
           );
         }
 
-        const batch = await this.createBatch({ parentId: input.parentId, files: manifest }, options);
+        const batch = await this.createBatch({ parentId: input.parentId, files: manifest }, transfer);
         const planFor = new Map(batch.results.map((plan) => [plan.client_id, plan]));
         const errorFor = new Map(batch.errors.map((error) => [error.client_id, error]));
 
@@ -408,8 +521,12 @@ export class UploadManager extends Resource {
             const plan = planFor.get(entry.clientId) as UploadPlan;
             try {
               if (plan.strategy === "multipart") {
+                // `concurrency` deliberately does NOT reach the part pool: it
+                // already bounds how many FILES run at once, and forwarding it
+                // would square the number of PUTs in flight at a store that is
+                // a Raspberry Pi behind Cloudflare.
                 await this.uploadMultipart(plan.fs_node_id, entry.blob, {
-                  ...options,
+                  ...transfer,
                   onPart: (bytes) => report(bytes),
                   onSession: (token) => open.set(plan.fs_node_id, token),
                 });
@@ -421,7 +538,7 @@ export class UploadManager extends Resource {
                     "api_error",
                   );
                 }
-                await this.putDirect(plan.upload, entry.blob, options);
+                await this.putDirect(plan.upload, entry.blob, transfer);
                 attachments.push({ fs_node_id: plan.fs_node_id, blob_signed_id: plan.upload.blob_signed_id });
                 report(entry.blob.size);
               }
@@ -439,7 +556,7 @@ export class UploadManager extends Resource {
         );
 
         if (attachments.length > 0) {
-          const attached = await this.attachBlobs(attachments, options);
+          const attached = await this.attachBlobs(attachments, transfer);
           for (const result of attached) {
             if (result.attached) continue;
             const plan = batch.results.find((candidate) => candidate.fs_node_id === result.fs_node_id);
@@ -455,7 +572,7 @@ export class UploadManager extends Resource {
         const landed = batch.results
           .filter((plan) => !failed.has(plan.client_id))
           .map((plan) => plan.fs_node_id);
-        const nodes = input.verify === false ? new Map<Id, FsNode>() : await this.readBack(landed, options);
+        const nodes = input.verify === false ? new Map<Id, FsNode>() : await this.readBack(landed, transfer);
 
         for (const entry of slice) {
           const plan = planFor.get(entry.clientId);
@@ -487,6 +604,14 @@ export class UploadManager extends Resource {
    * rejections come back in `errors` with a 200; only a structural problem
    * (invalid parent, empty batch, over {@link MAX_BATCH}, a `..` segment)
    * is a 400.
+   *
+   * Public because it is phase 1 of the protocol: a caller that wants its own
+   * progress accounting drives `createBatch` -> {@link putDirect} /
+   * {@link uploadMultipart} -> {@link attachBlobs} itself, and this is where it
+   * learns the per-file strategy and the byte counts it will be reporting
+   * against. Whatever it does, it must pace itself against `fs_upload` (300
+   * requests a minute, shared by every call in this class) - {@link gate} is
+   * exposed for exactly that.
    *
    * @throws {OmsApiError} 400 on a structural problem, 404 when the parent is
    *   not a directory the caller may write to.
@@ -532,6 +657,16 @@ export class UploadManager extends Resource {
    * expired signature or a checksum mismatch is deterministic and a retry only
    * costs the bytes again.
    *
+   * Phase 2 of the protocol for a file below {@link MULTIPART_THRESHOLD}, and
+   * public so a caller can drive its own flow. `onProgress` fires EXACTLY ONCE
+   * here, after the store has accepted the body, with `loaded === total`. It is
+   * not a byte counter and cannot be one: see the module note, and
+   * {@link UploadManagerOptions.fetch} for the XHR escape hatch that can.
+   *
+   * Between this and {@link attachBlobs} the node exists with no bytes bound and
+   * is hidden from every listing, so a caller that stops here leaves a pending
+   * node behind.
+   *
    * @returns The ETag the store reported, or `null` when it was not readable -
    *   which happens in a browser whose bucket CORS policy does not expose
    *   `ETag`. The direct tier does not need it; multipart does.
@@ -551,8 +686,11 @@ export class UploadManager extends Resource {
    * their nodes. Until this lands the node exists with no bytes and is hidden
    * from every listing.
    *
-   * Answers 200 with per-item results even when every item failed. Read
-   * `attached` on each one; do not infer success from the status.
+   * Phase 3 of the protocol, and the last one for the direct tier. Answers 200
+   * with per-item results even when every item failed: read `attached` on each
+   * one, and never infer success from the status. A caller driving the flow by
+   * hand must not skip this - a node with no blob is invisible in listings and
+   * is eventually swept by `FsNodeUploadReaperJob`.
    */
   async attachBlobs(
     attachments: Array<{ fs_node_id: Id; blob_signed_id: string }>,
@@ -670,11 +808,30 @@ export class UploadManager extends Resource {
    * {@link MULTIPART_PART_SIZE}, so a change on the backend does not silently
    * corrupt an upload here.
    *
+   * Phases 2 and 3 at once for a file at or above {@link MULTIPART_THRESHOLD}:
+   * `multipart/complete` creates the blob row itself, so there is no
+   * {@link attachBlobs} call on this tier.
+   *
+   * This is the tier where a progress bar is actually useful, because the parts
+   * are 32 MiB and each one that lands is a real tick. `onProgress` reports
+   * THIS file cumulatively - `loaded` climbing towards `total === body.size` -
+   * and fires once up front so a bar can render before the first part is sent.
+   * On a resumed session it starts at the bytes already stored rather than at
+   * zero, which is the difference between "resuming at 60%" and a bar that
+   * appears to lose an hour of work. `onPart` is the lower-level twin: one call
+   * per part, with that part's byte count and its ETag.
+   *
+   * NOTHING here is per-byte; see the module note for why, and
+   * {@link UploadManagerOptions.fetch} for the way around it.
+   *
    * @param options.resume A session from a previous attempt plus the parts that
    *   already landed. The matching parts are skipped.
    * @param options.onSession Called with the upload token as soon as there is
-   *   one, so a caller can persist it and abort later.
+   *   one, so a caller can persist it and abort later. A failed run MUST reach
+   *   {@link multipartAbort} with that token or the parts stay charged against
+   *   the quota until a reaper notices.
    * @param options.onPart Called with the byte count of each finished part.
+   * @param options.onProgress Called with this file's cumulative byte count.
    */
   async uploadMultipart(
     fsNodeId: Id,
@@ -684,6 +841,7 @@ export class UploadManager extends Resource {
       resume?: { uploadToken: string; partSize: number; parts: MultipartPart[] };
       onSession?: (uploadToken: string, partSize: number) => void;
       onPart?: (bytes: number, part: MultipartPart) => void;
+      onProgress?: ProgressCallback;
     } = {},
   ): Promise<MultipartCompletion> {
     let uploadToken = options.resume?.uploadToken;
@@ -701,6 +859,17 @@ export class UploadManager extends Resource {
     options.onSession?.(uploadToken, partSize);
 
     const partCount = Math.max(1, Math.ceil(body.size / partSize));
+
+    // Bytes already on the store. A resumed run that reported zero here would
+    // show the user losing everything the previous attempt uploaded. The last
+    // part is short, so each one is measured against the body rather than
+    // assumed to be a full partSize.
+    const bytesOfPart = (partNumber: number): number =>
+      Math.max(0, Math.min(partNumber * partSize, body.size) - (partNumber - 1) * partSize);
+    let loaded = 0;
+    for (const partNumber of done.keys()) loaded += bytesOfPart(partNumber);
+    options.onProgress?.({ phase: "upload", loaded, total: body.size });
+
     if (partCount > MAX_PARTS) {
       throw new OmsError(
         `storage: ${body.size} bytes needs ${partCount} parts of ${partSize}, over the server's limit of ${MAX_PARTS}.`,
@@ -739,6 +908,10 @@ export class UploadManager extends Resource {
         const part: MultipartPart = { part_number: partNumber, etag: etag.replaceAll('"', "") };
         done.set(partNumber, part);
         options.onPart?.(chunk.size, part);
+        // Safe to accumulate from inside the pool: the lanes interleave only at
+        // an await, so no two of these ever run at the same time.
+        loaded += chunk.size;
+        options.onProgress?.({ phase: "upload", loaded, total: body.size });
       });
     }
 

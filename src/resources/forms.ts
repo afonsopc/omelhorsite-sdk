@@ -14,6 +14,19 @@
 
 import { type ApiClient, Resource } from "../http";
 import type { BaseRecord, FileInput, Id, Json, RequestOptions, Timestamp } from "../types";
+import { SHORT_LINK_BASE_URL } from "./shortLinks";
+
+/**
+ * The reserved short-link namespace a published form is served under.
+ * `Form::NAMESPACE` / `ShortLink::FORM_NAMESPACE`.
+ */
+export const FORM_NAMESPACE = "f";
+
+/**
+ * Public prefix a published form resolves under, and the prefix
+ * {@link Form.published_url} is built from server-side.
+ */
+export const FORM_BASE_URL = `${SHORT_LINK_BASE_URL}/${FORM_NAMESPACE}`;
 
 /**
  * Publication state. Only `"published"` answers on the public side; `"draft"`
@@ -33,42 +46,100 @@ export type FormSchemaFieldType =
   | "statement"
   | "image";
 
-/** One choice of a `single_choice`, `multi_choice` or `dropdown` field. */
+/**
+ * One choice of a `single_choice`, `multi_choice` or `dropdown` field, AS
+ * READ back off a form.
+ *
+ * `id` is not optional here even though it is optional when writing: the
+ * sanitiser mints `SecureRandom.uuid` for any option that arrives without one,
+ * so a stored option always has one. Write with
+ * {@link FormSchemaFieldOptionInput}.
+ */
 export interface FormSchemaFieldOption {
-  /** Stable within the form. The server mints one when you leave it out. */
+  /** Stable within the form. */
+  readonly id: string;
+  readonly label: string;
+}
+
+/** One choice as WRITTEN. Omit `id` and the server mints a UUID. */
+export interface FormSchemaFieldOptionInput {
   readonly id?: string;
   readonly label: string;
 }
 
 /**
- * One field of a form.
+ * One field of a form, AS READ back.
  *
- * `id` is the key answers are filed under - NOT the label. Leave it out on
- * create and the server mints a UUID, which you then have to read back before
- * you can submit anything.
+ * `id` is the key answers are filed under - NOT the label.
+ *
+ * Four of these keys are non-optional because `Forms::InputSanitizer#field`
+ * writes them on EVERY field it keeps, whatever arrived: `id` (minted when
+ * absent), `type`, `label` and `description` (both coerced with `.to_s`, so an
+ * absent one is stored as `""`, not dropped) and `required` (cast to a real
+ * boolean). The three that stay optional are genuinely absent from the stored
+ * object when unused: `placeholder` is only kept when present, `options` only
+ * for the three choice types, and `min`/`max` only for `number`.
+ *
+ * Write with {@link FormSchemaFieldInput}, where all of that is optional.
  */
 export interface FormSchemaField {
-  readonly id?: string;
+  readonly id: string;
   readonly type: FormSchemaFieldType;
+  /** Never `null`; `""` for a field saved without one. */
   readonly label: string;
-  readonly description?: string;
-  readonly required?: boolean;
+  /** Never `null`; `""` for a field saved without one. */
+  readonly description: string;
+  readonly required: boolean;
   readonly placeholder?: string;
-  /** Only meaningful on the three choice types. */
+  /** Only on the three choice types. */
   readonly options?: FormSchemaFieldOption[];
-  /** Only meaningful on `number`. */
+  /** Only on `number`, and only when one was set. */
   readonly min?: number;
-  /** Only meaningful on `number`. */
+  /** Only on `number`, and only when one was set. */
   readonly max?: number;
 }
 
 /**
- * The field definition of a form. The server rebuilds this from scratch on
- * every write, keeping only the keys above, so anything extra is lost without
- * a word.
+ * One field as WRITTEN.
+ *
+ * Every key but `type` may be omitted. `type` may not: a field whose type is
+ * not one of `Form::FIELD_TYPES` is dropped from the schema in silence, which
+ * looks exactly like a field that was never sent.
+ *
+ * A {@link FormSchemaField} read off a form is assignable here, so the
+ * read-edit-write round trip needs no mapping.
+ */
+export interface FormSchemaFieldInput {
+  /** Omit and the server mints a UUID - which you then have to read back
+   * before you can file an answer under it. */
+  readonly id?: string;
+  readonly type: FormSchemaFieldType;
+  readonly label?: string;
+  readonly description?: string;
+  readonly required?: boolean;
+  readonly placeholder?: string;
+  readonly options?: FormSchemaFieldOptionInput[];
+  readonly min?: number;
+  readonly max?: number;
+}
+
+/**
+ * The field definition of a form, as read. Always `{ fields: [...] }`, never
+ * `null` and never a bare array: the column is `NOT NULL DEFAULT
+ * '{"fields":[]}'` and the sanitiser rebuilds the envelope on every write.
  */
 export interface FormSchema {
   readonly fields: FormSchemaField[];
+}
+
+/**
+ * The field definition as written. The server rebuilds it from scratch keeping
+ * only the keys {@link FormSchemaFieldInput} names, so anything extra is lost
+ * without a word - and a write that is not a Hash at all is silently read as
+ * `{ fields: [] }`, which empties the form rather than failing.
+ */
+export interface FormSchemaInput {
+  readonly fields: FormSchemaFieldInput[];
 }
 
 /**
@@ -103,9 +174,17 @@ export interface FormSettings {
   readonly thank_you_subtitle?: string;
 }
 
-/** A hosted form, owner view. */
+/**
+ * A hosted form, owner view.
+ *
+ * One shape, not two: `FormsController` renders `form.render` with no view on
+ * index, show, create AND update, so the `:extended` view `ApplicationBlueprint`
+ * declares is never reached here and there is no richer variant to ask for.
+ * Every key below is therefore on every response.
+ */
 export interface Form extends BaseRecord {
   readonly user_id: Id;
+  /** Never `null`; `""` for a form saved without one. Capped at 200 characters. */
   readonly title: string;
   readonly status: FormStatus;
   readonly schema: FormSchema;
@@ -115,13 +194,33 @@ export interface Form extends BaseRecord {
   readonly endpoint: string | null;
   /** Shareable short URL, or `null` while there is no endpoint. */
   readonly published_url: string | null;
-  /** Set the first time the form is published, and never cleared. */
-  readonly published_at?: Timestamp | null;
+  /**
+   * Set the first time the form is published, and never cleared - archiving or
+   * returning a form to draft leaves it standing, so this is "was ever
+   * published", not "is published". Read `status` for that.
+   *
+   * The key is always present; the value is `null` until the first publish.
+   */
+  readonly published_at: Timestamp | null;
+  /** Bumped by every `getPublic` call, the SDK's included. Never `null`. */
   readonly views_count: number;
+  /**
+   * Answers recorded. Computed per request - batched into one grouped COUNT
+   * for a whole listing, one COUNT for a single render - so it is always
+   * current and never cached.
+   */
   readonly submissions_count: number;
 }
 
-/** The reduced form a public respondent is allowed to see. */
+/**
+ * The reduced form a public respondent is allowed to see.
+ *
+ * NOT a subset of {@link Form}: the controller builds this hash by hand rather
+ * than rendering a blueprint view, so it carries `require_login` - which is not
+ * a field on `Form` at all, only a key inside `settings` - and carries no
+ * timestamps, no `user_id`, no counts and no `status`. Seven keys, always all
+ * seven.
+ */
 export interface PublicForm {
   readonly id: Id;
   readonly title: string;
@@ -135,48 +234,79 @@ export interface PublicForm {
 /**
  * One answered form.
  *
- * Deliberately has no `updated_at`: a submission is never edited, and the
- * blueprint leaves the field out rather than render a lie.
+ * Deliberately has no `updated_at`: a submission is never edited, and
+ * `FormSubmissionBlueprint` is the one blueprint in the API that inherits
+ * `Blueprinter::Base` directly rather than `ApplicationBlueprint`, precisely so
+ * that the automatic `updated_at` cannot creep in. Do not add it here on the
+ * assumption that every record has one.
+ *
+ * The other seven keys are all declared unconditionally, so all seven are
+ * always present; four of them are nullable columns.
  */
 export interface FormSubmission {
   readonly id: Id;
   readonly form_id: Id;
-  /** The respondent, when they were signed in. */
-  readonly user_id?: Id | null;
+  /** The respondent, or `null` when they answered anonymously. */
+  readonly user_id: Id | null;
   /**
    * Answers keyed by {@link FormSchemaField.id}. An `image` answer is
    * `{ attachment_id, filename }`; a `number` is a float; a `multi_choice` is
    * an array of strings; everything else is a string.
+   *
+   * Only keys that match a field in the schema survive - anything else is
+   * dropped in silence - so a submission can hold FEWER keys than were sent,
+   * and an optional field nobody filled in is simply absent.
    */
   readonly answers: Record<string, Json>;
-  /** Resolved from the respondent's IP. */
-  readonly country?: string | null;
-  /** Parsed from the respondent's user agent. */
-  readonly device_name?: string | null;
-  readonly completed_at?: Timestamp | null;
+  /**
+   * ISO 3166-1 alpha-2, lowercase, resolved from the respondent's IP.
+   * `null` when the lookup found nothing.
+   */
+  readonly country: string | null;
+  /** Parsed from the respondent's user agent. `null` when unparseable. */
+  readonly device_name: string | null;
+  /**
+   * When the answers were recorded. The controller writes `Time.current` on
+   * every submission it creates, so this is `null` only for a row predating
+   * that - but the column is nullable, so check before formatting it.
+   */
+  readonly completed_at: Timestamp | null;
   readonly created_at: Timestamp;
 }
 
-/** What `POST /form_attachments` answers with. */
+/**
+ * What `POST /form_attachments` answers with.
+ *
+ * Built by hand in the controller rather than by a blueprint, so this is the
+ * literal four-key hash it renders and there is no `created_at` to read.
+ */
 export interface FormAttachment {
   readonly id: Id;
   readonly filename: string;
+  /** One of `FormAttachment::ALLOWED_TYPES`; a save with anything else is a 400. */
   readonly content_type: string;
   /** Absolute URL that serves the bytes inline, no credential required. */
   readonly url: string;
 }
 
 /**
- * `GET /forms/endpoint_availability`. Read `available`; `suggestions` is only
- * present when the endpoint is well formed but taken.
+ * `GET /forms/endpoint_availability`. Read `available`; the other two keys are
+ * conditional and mutually exclusive.
+ *
+ * `reason` appears only on the rejected branch and only ever holds
+ * `"invalid"` - the controller has a single rejection reason for forms,
+ * covering both a bad shape and a reserved word. (Link trees, which look
+ * identical, do distinguish the two; see `LinkTreeSlugAvailability`.)
+ * `suggestions` appears only on the well-formed-but-taken branch.
  */
 export interface FormEndpointAvailability {
   readonly endpoint: string;
   /** Whether it matches the format and is not reserved. */
   readonly valid: boolean;
   readonly available: boolean;
-  /** `"invalid"` when the format or the reserved list rejected it. */
-  readonly reason?: string;
+  /** Only when `valid` is `false`. */
+  readonly reason?: "invalid";
+  /** Only when `valid` is `true` and `available` is `false`. */
   readonly suggestions?: string[];
 }
 
@@ -187,14 +317,20 @@ export interface FormEndpointAvailability {
  * through {@link UpdateFormInput}. `require_login` lives in `settings`.
  */
 export interface CreateFormInput {
-  readonly title: string;
+  /**
+   * Optional, despite being the thing a person names the form by: the
+   * controller runs it through `.to_s.strip` and the model only validates its
+   * LENGTH (200 maximum), so an omitted title saves an untitled form rather
+   * than failing. Pass one.
+   */
+  readonly title?: string;
   /**
    * Public path segment. Lowercased, 1 to 64 characters of `[a-z0-9_-]`
    * starting and ending alphanumeric, and never one of `new create index
    * admin api login signup help`.
    */
   readonly endpoint: string;
-  readonly schema?: FormSchema;
+  readonly schema?: FormSchemaInput;
   readonly theme?: FormTheme;
   readonly settings?: FormSettings;
 }
@@ -208,7 +344,7 @@ export interface UpdateFormInput {
   readonly title?: string;
   /** Renames the paired short link, so the old public URL stops working. */
   readonly endpoint?: string;
-  readonly schema?: FormSchema;
+  readonly schema?: FormSchemaInput;
   readonly theme?: FormTheme;
   readonly settings?: FormSettings;
   /**
@@ -440,6 +576,20 @@ export class FormsNamespace extends Resource {
   async attachment(attachmentId: Id, options: RequestOptions = {}): Promise<Blob> {
     const response = await this.http.raw("GET", `/form_attachments/${encodeURIComponent(attachmentId)}`, options);
     return response.blob();
+  }
+
+  /**
+   * The public URL an endpoint is served from. Pure string building, no
+   * request, and the same string the server puts in {@link Form.published_url}.
+   *
+   * Prefer `form.published_url` when you are holding a record - it is the
+   * server's own answer and it is `null` exactly when the pairing is broken,
+   * which this cannot know. Reach for this when all you have is an endpoint:
+   * after {@link endpointAvailability}, or in a client that stores endpoints
+   * rather than forms.
+   */
+  publicUrl(endpoint: string): string {
+    return `${FORM_BASE_URL}/${endpoint}`;
   }
 }
 

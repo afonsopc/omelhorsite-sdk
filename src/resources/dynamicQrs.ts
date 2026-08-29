@@ -19,8 +19,17 @@ import { Resource } from "../http";
 import type { BaseRecord, Id, JsonObject, RequestOptions } from "../types";
 import { SHORT_LINK_BASE_URL, type ShortLinkId, type ShortLinkStats } from "./shortLinks";
 
+/**
+ * The reserved short-link namespace every dynamic QR lives in.
+ *
+ * `ShortLink::DYNAMIC_QR_NAMESPACE`. It is not a user choice and it never
+ * changes on a record, which is why {@link DynamicQr.namespace} is typed as
+ * this literal rather than as a string.
+ */
+export const DYNAMIC_QR_NAMESPACE = "qr";
+
 /** Public prefix a dynamic QR resolves under. */
-export const DYNAMIC_QR_BASE_URL = `${SHORT_LINK_BASE_URL}/qr`;
+export const DYNAMIC_QR_BASE_URL = `${SHORT_LINK_BASE_URL}/${DYNAMIC_QR_NAMESPACE}`;
 
 /** Module shapes `DynamicQrs::SettingsSanitizer` accepts. Anything else is dropped. */
 export type DynamicQrStyle = "classic" | "rounded" | "dots" | "extraRounded" | "classy" | "classyRounded";
@@ -77,7 +86,24 @@ export interface DynamicQrSettings {
   readonly [key: string]: unknown;
 }
 
-/** A dynamic QR code. */
+/**
+ * A dynamic QR code.
+ *
+ * `DynamicQrBlueprint` renders `ApplicationBlueprint`'s three automatic keys
+ * (`id`, `created_at`, `updated_at`) plus exactly five more, and that is the
+ * whole record. Two keys a client migrating off the old web service will
+ * expect are NOT here and never were on this endpoint: `website_id` and
+ * `website_managed`. They are residue of the websites feature, which was
+ * extracted out of this backend entirely - there is no such column on
+ * `short_links` and no such field on any blueprint, so anything declaring them
+ * has been reading `undefined`.
+ *
+ * The blueprint is also never resolved automatically. A dynamic QR IS a
+ * `ShortLink`, and `ShortLinkBlueprint` already owns that name with a
+ * different shape (associations, no `settings`), so every call site passes
+ * this blueprint explicitly. That is why the two records disagree about which
+ * fields exist even though they are rows in one table.
+ */
 export interface DynamicQr extends Omit<BaseRecord, "id"> {
   /** Integer primary key: a dynamic QR is a `short_links` row. See {@link ShortLinkId}. */
   readonly id: number;
@@ -85,8 +111,19 @@ export interface DynamicQr extends Omit<BaseRecord, "id"> {
   readonly url: string;
   /** Server-assigned UUID the QR image encodes. Not choosable, not renameable. */
   readonly endpoint: string;
-  /** Always `"qr"`. */
-  readonly namespace: string;
+  /**
+   * Always {@link DYNAMIC_QR_NAMESPACE}. The controller writes it on create
+   * and nothing can change it afterwards, and the listing scope filters on it,
+   * so a record that reached you through this namespace cannot hold anything
+   * else.
+   */
+  readonly namespace: typeof DYNAMIC_QR_NAMESPACE;
+  /**
+   * Owner. The column is nullable because anonymous short links exist, but
+   * every route on this resource requires a credential and the controller
+   * always sets the owner, so in practice this is never `null` for a dynamic
+   * QR.
+   */
   readonly user_id: Id | null;
   /** Never `null`: the blueprint substitutes `{}` for an unset bag. */
   readonly settings: DynamicQrSettings & JsonObject;

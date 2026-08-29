@@ -19,9 +19,16 @@ import type { RequestOptions } from "../types";
 /**
  * What the lookup service knows about an address.
  *
- * Every field comes straight out of the MMDB record, so the shape is exactly
- * what the backend read: no field is computed and none is filled in for a
+ * Exactly five keys, always all five. `IpLookuper` answers `{ ip:, **record }`
+ * and nothing else: `country`, `asn` and `organization` are the three the MMDB
+ * builder writes per range, and `network` is stamped on by the reader from the
+ * prefix that matched. Nothing is computed and nothing is filled in for a
  * missing row - a miss is a 400, not a half-empty object.
+ *
+ * The name promises a GeoIP payload and this is not one, so there is no
+ * `city`, no `latitude`/`longitude`, no `timezone` and no `postal`. Those keys
+ * exist in the MaxMind gem's own result API and are all `nil` here, because
+ * the database behind it is the iptoasn.com IP-to-ASN table.
  */
 export interface IpLookupResult {
   /** The address that was looked up, echoed back. For `"mine"`, the resolved one. */
@@ -32,9 +39,18 @@ export interface IpLookupResult {
    * it yourself before feeding it to a flag or a locale lookup.
    */
   readonly country: string;
-  /** Autonomous system number, or `0` when the range is not announced. */
+  /**
+   * Autonomous system number, or `0` when the range is not announced. `0` is
+   * the builder's substitute for a non-numeric column, not a real AS, so treat
+   * it as "unknown" rather than looking it up.
+   */
   readonly asn: number;
-  /** Network operator name as the AS registry spells it, e.g. `"GOOGLE"`. */
+  /**
+   * Network operator name as the AS registry spells it, e.g. `"GOOGLE"`.
+   * Whitespace-squished, and the EMPTY STRING when the source table had no
+   * name for the range - never `null`, so test it for length rather than for
+   * presence.
+   */
   readonly organization: string;
   /** The CIDR block the address fell in, e.g. `"8.8.8.0/24"`. */
   readonly network: string;

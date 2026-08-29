@@ -141,8 +141,21 @@ export interface RequestOptions {
   /** Extra request headers. Merged over the client's, under `Authorization`. */
   readonly headers?: Record<string, string>;
   /**
-   * Per-call retry override. `false` disables retries entirely - pass it for
-   * any non-idempotent create you would rather see fail than duplicate.
+   * Per-call retry override, and the ONLY way to put a mutating request in
+   * scope for a retry.
+   *
+   * By default only safe methods are replayed after an ambiguous failure (a
+   * torn connection, a 5xx); a `POST` is not, because a replay after a lost
+   * answer is how one create becomes two records. Passing an object here -
+   * `{}` is enough, it inherits {@link DEFAULT_RETRY} - says you have looked at
+   * this specific endpoint and decided a duplicate is acceptable.
+   *
+   * `false` disables retrying completely, `429` included. Pass it for a call
+   * that mints something under a fresh random identifier per attempt (a short
+   * link, a notepad, a chest): a retry there does not duplicate the answer, it
+   * leaves an orphan behind and hands you the wrong one.
+   *
+   * See the retry policy documented on `ApiClient`.
    */
   readonly retry?: RetryOptions | false;
 }
@@ -182,14 +195,99 @@ export const DEFAULT_RETRY: ResolvedRetry = Object.freeze({
 });
 
 /**
- * Query parameters. Nested objects and arrays are encoded the way Rails reads
- * them (`search[status]=open`, `ids[]=1&ids[]=2`) - see `encodeQuery` in
- * `http.ts`. `undefined` and `null` values are dropped, not sent as empty.
+ * One value in a query string.
+ *
+ * Nested objects and arrays are encoded the way Rails reads them
+ * (`search[status]=open`, `ids[]=1&ids[]=2`). Three values do NOT encode
+ * literally, and `encodeQuery` in `http.ts` carries the full argument:
+ *
+ * - `undefined` is dropped. It means "I am not filtering on this column".
+ * - `null` is sent as the backend's `\b` null sentinel and comes back out of
+ *   `CrudActions` as SQL `NULL`. It means "filter where this column IS NULL".
+ *   The two are not interchangeable, and getting them the wrong way round is
+ *   the difference between one folder and somebody's entire tree.
+ * - a `Date` is sent as its ISO-8601 string, which is the only shape the Rails
+ *   date filters parse (`String#to_date_safe`).
  */
-export type QueryValue = string | number | boolean | null | undefined | QueryValue[] | { [key: string]: QueryValue };
+export type QueryValue =
+  | string
+  | number
+  | boolean
+  | Date
+  | null
+  | undefined
+  | QueryValue[]
+  | { [key: string]: QueryValue };
 
 /** A bag of query parameters. */
 export type QueryParams = Record<string, QueryValue>;
+
+/**
+ * Hard ceiling the backend applies to a page size, mirroring
+ * `QueryModifier::MAX_PAGE_SIZE`.
+ *
+ * The server clamps silently - `size = [size, MAX_PAGE_SIZE].min` - so asking
+ * for 1200 returns 500 rows and no indication that a ceiling was hit. The SDK
+ * therefore clamps to the same number BEFORE the request, so that the size it
+ * reports back in {@link Paginated.pageSize} is the size the rows were actually
+ * counted against. See {@link resolvePageSize}.
+ */
+export const MAX_PAGE_SIZE = 500;
+
+/**
+ * Page size the SDK asks for when the caller says nothing.
+ *
+ * Deliberately below {@link MAX_PAGE_SIZE}: a `list()` is usually the first
+ * screen of something, and 500 rows of expanded records is a slow first paint.
+ * Note this is NOT the server's own default - a request with no page modifier
+ * at all gets `QueryModifier::DEFAULT_PAGE_SIZE` (500) forced on it by
+ * `CrudActions#index_modifiers_params` - but the SDK always sends one.
+ */
+export const DEFAULT_PAGE_SIZE = 100;
+
+/**
+ * Normalises a requested page size into the one the server will actually use.
+ *
+ * Two different failures are handled differently on purpose:
+ *
+ * - **above the ceiling** is clamped, not rejected. The request still succeeds
+ *   and paging still reaches every row, so failing it would break a working
+ *   call for nothing. What must not happen is the caller being told it got the
+ *   size it asked for: that is how `pageSize: 1200` yielded 500 items and
+ *   `hasMore: false`, dropping 700 rows without a word.
+ * - **not a usable size at all** (`NaN`, `Infinity`, zero, negative) throws.
+ *   There is nothing sensible to clamp such a value to, and it is not merely
+ *   wrong on the client: `pageModifier` would put `"1:NaN"` on the wire,
+ *   `QueryModifier#apply_pagination` reads that as size `0`, bails out before
+ *   `limit`/`offset` are applied, and the endpoint answers with the WHOLE
+ *   table. A typo would turn a listing into an unbounded scan holding a Puma
+ *   thread and a DB connection.
+ *
+ * @throws {TypeError} when `pageSize` is not a finite number of at least 1.
+ */
+export function resolvePageSize(pageSize: number = DEFAULT_PAGE_SIZE): number {
+  if (!Number.isFinite(pageSize) || Math.trunc(pageSize) < 1) {
+    throw new TypeError(
+      `pageSize must be a finite number of at least 1, got ${String(pageSize)}. ` +
+        "A page size the server cannot parse disables its pagination entirely and returns the full table.",
+    );
+  }
+  return Math.min(MAX_PAGE_SIZE, Math.trunc(pageSize));
+}
+
+/**
+ * Normalises a requested page number. Pages are 1-based on the server
+ * (`offset = (number - 1) * size`), so page `0` is page 1 - and a
+ * {@link Paginated} that reported `page: 0` would fetch page 1 twice.
+ *
+ * @throws {TypeError} when `page` is not a finite number.
+ */
+export function resolvePageNumber(page: number = 1): number {
+  if (!Number.isFinite(page)) {
+    throw new TypeError(`page must be a finite number, got ${String(page)}.`);
+  }
+  return Math.max(1, Math.trunc(page));
+}
 
 /**
  * Paging arguments accepted by every `list()` method.
@@ -201,7 +299,26 @@ export type QueryParams = Record<string, QueryValue>;
 export interface PageParams {
   /** 1-based page number. Defaults to 1. */
   readonly page?: number;
-  /** Items per page. Server maximum is 500. */
+  /**
+   * Items per page. Defaults to {@link DEFAULT_PAGE_SIZE}.
+   *
+   * {@link MAX_PAGE_SIZE} is the ceiling and it is enforced on both sides: ask
+   * for more and you get the ceiling, with {@link Paginated.pageSize} reporting
+   * the size you actually got rather than the one you asked for. To read more
+   * than 500 rows, page through them - `collect` and `pages` do it for you.
+   *
+   * A size the server could not parse is NOT clamped, it throws: `0`, a
+   * negative, `NaN` and `Infinity` all raise a `TypeError` before the request
+   * is built. This is deliberate and it is not defensive tidiness. `"1:NaN"`
+   * on the wire makes `QueryModifier#apply_pagination` read the size as zero
+   * and bail out before `limit`/`offset` are applied, so the endpoint answers
+   * with the WHOLE table: one typo turns a listing into an unbounded scan
+   * holding a Puma thread and a database connection. Failing at the call site
+   * is the only place that mistake is still cheap.
+   *
+   * Narrower than 0.2.0, which clamped `0` to 1 and let `NaN` through onto
+   * the wire. See {@link resolvePageSize}.
+   */
   readonly pageSize?: number;
   /** `"column:asc"` or `"column:desc"`, passed through as `modifiers[order]`. */
   readonly order?: string;
@@ -221,7 +338,12 @@ export interface Paginated<T> {
   readonly items: T[];
   /** 1-based number of this page. */
   readonly page: number;
-  /** Page size that was requested. */
+  /**
+   * The page size the server actually applied, which is NOT necessarily the
+   * one that was requested: it is clamped to {@link MAX_PAGE_SIZE}. Read this
+   * rather than the number you passed in - they differ exactly when the
+   * difference matters.
+   */
   readonly pageSize: number;
   /** True when this page came back full, so another page may exist. */
   readonly hasMore: boolean;
@@ -236,20 +358,34 @@ export type PageLoader<T> = (params: Required<Pick<PageParams, "page" | "pageSiz
  * Builds a {@link Paginated} from the raw array the API returned plus the
  * loader that can fetch the next page. Resource modules use this instead of
  * hand-rolling the shape.
+ *
+ * @throws {TypeError} when `pageSize` is not a finite number of at least 1, or
+ *   `page` is not finite. Both go through {@link resolvePageSize} /
+ *   {@link resolvePageNumber}, which reject rather than clamp - see
+ *   {@link PageParams.pageSize} for why an unparseable size is dangerous
+ *   enough to be worth a throw.
  */
 export function createPage<T>(items: T[], page: number, pageSize: number, load: PageLoader<T>): Paginated<T> {
-  const hasMore = items.length >= pageSize && pageSize > 0;
+  // The EFFECTIVE size decides everything, because it is what the server
+  // counted the rows against. Comparing `items.length` to a requested 1200
+  // when the server capped the query at 500 makes a full page look like a
+  // short one: `hasMore` says false, `next()` returns null, and the 700 rows
+  // behind it are lost with no error anywhere. Both sides of the comparison
+  // now come through resolvePageSize, so they cannot drift apart.
+  const size = resolvePageSize(pageSize);
+  const number = resolvePageNumber(page);
+  const hasMore = items.length >= size;
   return {
     items,
-    page,
-    pageSize,
+    page: number,
+    pageSize: size,
     hasMore,
     async next(): Promise<Paginated<T> | null> {
       if (!hasMore) return null;
-      const nextPage = page + 1;
-      const nextItems = await load({ page: nextPage, pageSize });
+      const nextPage = number + 1;
+      const nextItems = await load({ page: nextPage, pageSize: size });
       if (nextItems.length === 0) return null;
-      return createPage(nextItems, nextPage, pageSize, load);
+      return createPage(nextItems, nextPage, size, load);
     },
   };
 }

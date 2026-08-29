@@ -28,13 +28,26 @@
  * - the direct PUTs at the object store, which rack-attack never sees at all.
  */
 
-import { Resource, filenameFromDisposition, pageModifier, type ApiClient } from "../http";
+/**
+ * The server's null sentinel: U+0008, a literal backspace.
+ *
+ * `CrudActions` rewrites any filter value equal to it before the query layer
+ * ever sees it - `transform_values! { |v| v == "\b" ? nil : v }`, applied to
+ * every option bag, not just to `exact_search`. Through `exact_search` that is
+ * exactly what is wanted: `where(parent_id: nil)`, the root nodes.
+ *
+ * Through `extra_options` the same rewrite is a trap, because
+ * `QueryExtraOptions::FsNodes` opens with
+ * `return unless params[:parent_id].present?` and `nil` is not present, so the
+ * filter is dropped without a word. {@link StorageNamespace.list} is built
+ * around that difference; do not collapse the two filters back together.
+ */
+import { type ApiClient, filenameFromDisposition, NULL_SENTINEL, pageModifier, Resource } from "../http";
 import { OmsApiError, OmsError } from "../errors";
 import { createPage } from "../types";
 import type {
   BaseRecord,
   FetchLike,
-  FileInput,
   FileOutput,
   Id,
   OperationOptions,
@@ -45,6 +58,7 @@ import type {
 } from "../types";
 import type { User } from "./account";
 import { FS_BULK_JOB_RATE_LIMIT, StorageRateGate, UploadManager, objectStoreFetch } from "./storage/upload";
+import type { UploadInput } from "./storage/upload";
 
 /** What a node is. */
 export type FsNodeKind = "file" | "directory";
@@ -52,11 +66,27 @@ export type FsNodeKind = "file" | "directory";
 /**
  * A node in the virtual filesystem.
  *
- * These are exactly the fields the server's blueprint emits - `id`,
- * `created_at`, `updated_at`, `name`, `parent_id`, `kind`, `size`, `max_size` -
- * and the `:extended` view adds nothing. In particular there is no
- * `content_type` and no `path`: the type of a file is decided from its name at
- * download time, and the path is gone.
+ * This is the WHOLE record, and it was checked against the blueprint CHAIN
+ * rather than against the table, because those two disagree.
+ * `FsNodeBlueprint` declares `name`, `parent_id`, `kind`, `size`,
+ * `max_size`; it extends `ApplicationBlueprint`, which contributes `id`,
+ * `created_at` and `updated_at`; and its `:extended` view has an EMPTY body,
+ * which in Blueprinter inherits the base fields rather than emitting nothing.
+ * So `list`, `get`, `create` and `update` all answer the same eight fields.
+ * Reading a view name and assuming it adds something has already produced bugs
+ * in this repo - follow the `<` before deciding a field does or does not exist.
+ *
+ * The `fs_nodes` TABLE is wider than that, and the difference is never sent:
+ * `creator_id`, `updater_id`, `destroyer_id`, `signed_url_generated`,
+ * `is_vault_root` and the `id_path` ltree are all real columns that appear in
+ * no view. Declaring them client-side is worse than leaving them out, because
+ * every later reader then believes they arrive.
+ *
+ * There is no `data` and no `url` field either: bytes are reached through
+ * {@link StorageNamespace.download}, {@link StorageNamespace.downloadStream} or
+ * {@link StorageNamespace.downloadUrl}, never off the record. And no
+ * `content_type` and no `path` - the type is decided from the name at download
+ * time, and the `path` column was dropped in the ltree migration.
  */
 export interface FsNode extends BaseRecord {
   readonly name: string;
@@ -130,6 +160,12 @@ export interface ListFsNodesParams extends PageParams {
   /**
    * Also return the parent itself, so one call gets both the folder's metadata
    * and its children. It occupies a slot on the page like any other row.
+   *
+   * IGNORED when `parentId` is `null`, and that is a correction rather than a
+   * convenience: the server-side filter behind this flag cannot express "no
+   * parent" at all, and asking it to used to answer with the caller's whole
+   * tree. The roots have no folder to fold in anyway. The detail is on
+   * {@link StorageNamespace.list}.
    */
   readonly includeSelf?: boolean;
 }
@@ -343,12 +379,38 @@ export class StorageNamespace extends Resource {
   }
 
   /**
-   * `GET /fs_nodes` - the children of a directory.
+   * `GET /fs_nodes` - the children of a directory, or the roots when
+   * `parentId` is `null`.
    *
    * Anonymous callers get an empty listing, always: the listing scope is the
    * caller's own tree plus what was explicitly shared with them, and a public
    * grant is deliberately NOT enumerable. Reach a publicly-shared node by id
    * with {@link get} or {@link shared} instead.
+   *
+   * TWO server-side filters address a directory and they are NOT
+   * interchangeable. That asymmetry is the whole subtlety of this method:
+   *
+   * - `exact_search[parent_id]` reaches `Searchable.exact_search`, which is a
+   *   bare `where(params)`. The controller has already rewritten a `\b` value
+   *   to `nil` by then, so the sentinel lands as `WHERE parent_id IS NULL` -
+   *   and since `FsNode.root_nodes` is exactly `where(parent_id: nil)`, this is
+   *   the only filter in the API that can say "the roots". The ltree
+   *   `id_path` is the source of truth for ANCESTRY, but rootness is still a
+   *   null `parent_id`.
+   * - `extra_options[parent_id]` reaches `QueryExtraOptions::FsNodes`, which
+   *   runs `where(parent_id: x).or(where(id: x))` and so folds the folder
+   *   itself back into its own listing. Convenient - and guarded by
+   *   `return unless params[:parent_id].present?`, with that same `\b` -> `nil`
+   *   rewrite happening first. Hand it the sentinel and the guard drops the
+   *   filter IN SILENCE. The request still answers 200; it just answers with
+   *   the caller's ENTIRE listable tree, page after page, instead of three
+   *   rows. It is the same failure shape as the `inside_path` incident that
+   *   `reject_unknown_filter_keys!` was written for, except this key IS known,
+   *   so nothing rejects it.
+   *
+   * Hence `includeSelf` is honoured under a real directory and ignored at the
+   * top of the tree. Not client-side taste: it is the only combination the
+   * server can actually express.
    *
    * The endpoint is conditional-GET aware and answers 304 to a matching
    * `If-None-Match`. The SDK never sends one, and asks the runtime not to
@@ -357,21 +419,22 @@ export class StorageNamespace extends Resource {
    */
   async list(params: ListFsNodesParams, options: RequestOptions = {}): Promise<Paginated<FsNode>> {
     const pageSize = params.pageSize ?? 200;
-    const target = params.parentId ?? NULL_SENTINEL;
+    const parentId = params.parentId ?? null;
+    // See the note above: only exact_search can express "no parent", so at the
+    // top of the tree the request is built as though includeSelf were off.
+    const foldSelfIn = parentId !== null && params.includeSelf === true;
 
-    // Two different server-side filters address a directory, and they are not
-    // interchangeable: exact_search[parent_id] is exactly the children, while
-    // extra_options[parent_id] ORs the folder itself back in - handy for a one
-    // call bootstrap, but it then occupies a slot on the page.
     const extraOptions: Record<string, QueryValue> = {};
-    if (params.includeSelf) extraOptions["parent_id"] = target;
+    if (foldSelfIn) extraOptions["parent_id"] = parentId;
     if (params.includePending) extraOptions["include_pending"] = true;
 
     const load = async (page: { page: number; pageSize: number }): Promise<FsNode[]> =>
       (await this.http.get<FsNode[]>("/fs_nodes", {
         ...options,
         query: {
-          ...(params.includeSelf ? {} : { exact_search: { parent_id: target } }),
+          // The sentinel travels as a literal string rather than as `null`, so
+          // this call does not depend on how the encoder treats null.
+          ...(foldSelfIn ? {} : { exact_search: { parent_id: parentId ?? NULL_SENTINEL } }),
           ...(Object.keys(extraOptions).length > 0 ? { extra_options: extraOptions } : {}),
           modifiers: {
             page: pageModifier(page.page, page.pageSize),
@@ -508,23 +571,28 @@ export class StorageNamespace extends Resource {
    * intake, presigns, sends the bytes straight to object storage, binds the
    * blobs and reads the finished nodes back.
    *
-   * Files at or above 32 MiB take the multipart path automatically, and that is
-   * not tuning: the object store sits behind Cloudflare with a request-body cap
-   * around 100 MB, so it is the only way a large file gets in.
+   * Files at or above `MULTIPART_THRESHOLD` (32 MiB, exported from this
+   * package) take the multipart path automatically, and that is not tuning:
+   * the object store sits behind Cloudflare with a request-body cap around
+   * 100 MB, so it is the only way a large file gets in at all.
    *
    * A per-file rejection - a quota that ran out, a name that collides with a
    * directory - does not throw. It comes back in
    * {@link UploadManager.upload}'s results, which is why that method is the one
    * to call when partial success matters; this wrapper returns only the nodes
-   * that landed.
+   * that landed, and throws only when EVERY file was refused.
    *
-   * Progress arrives per finished part or file, not per byte: `fetch` exposes
-   * no upload-progress event.
+   * `options.onProgress` counts bytes across the whole run and only ever
+   * climbs. It ticks once per finished direct PUT and once per finished
+   * multipart part, never per byte - `fetch` has no upload-progress event, and
+   * the alternatives are argued out in `storage/upload.ts`. A caller that needs
+   * true byte granularity in a browser builds an `UploadManager` with an
+   * XHR-backed transport; a caller that wants to drive the three phases itself
+   * has {@link UploadManager.createBatch}, {@link UploadManager.putDirect},
+   * {@link UploadManager.attachBlobs} and the `multipart*` methods, all public
+   * for that purpose.
    */
-  async upload(
-    input: { parentId: Id; files: FileInput[]; relativePaths?: string[]; concurrency?: number },
-    options: OperationOptions = {},
-  ): Promise<FsNode[]> {
+  async upload(input: UploadInput, options: OperationOptions = {}): Promise<FsNode[]> {
     const results = await this.uploads.upload(input, options);
     const failures = results.filter((result) => result.error);
     if (failures.length > 0 && failures.length === results.length) {
@@ -914,15 +982,6 @@ export class StorageNamespace extends Resource {
     return response;
   }
 }
-
-/**
- * The server's null sentinel.
- *
- * A filter value equal to a backspace character is turned into SQL `NULL`, and
- * it is the only way to ask for `parent_id IS NULL` (the root nodes) through
- * `exact_search`.
- */
-const NULL_SENTINEL = "";
 
 /** `parentId` and `name` joined. A node name can never contain a `/`, so this is unambiguous. */
 function cacheKey(parentId: Id, name: string): string {

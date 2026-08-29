@@ -65,24 +65,58 @@ export const JUMPSTYLE_DENSITIES: readonly JumpstyleDensity[] = Object.freeze([
   "hyper",
 ] as const);
 
-/** A jumpstyle edit. */
+/**
+ * Lifecycle of a jumpstyle edit.
+ *
+ * Narrower than {@link ToolStatus}: `JumpstyleJob::STATUSES` has only three
+ * entries and `"pending"` is not one of them. The controller forwards the files
+ * to the sidecar inside the create request and saves the row already
+ * `"processing"`, so there is no state in which an edit exists but has not
+ * started.
+ */
+export type JumpstyleStatus = "processing" | "complete" | "failed";
+
+/**
+ * A jumpstyle edit.
+ *
+ * Both routes that answer with one - `POST /jumpstyle_jobs` and
+ * `GET /jumpstyle_jobs/:id` - render the `:extended` view, so every key below
+ * is present on every response.
+ *
+ * The first four columns are nullable in the schema but written by the
+ * controller on every create, so a row the API can produce always carries
+ * them. `density` and `rapid_fire` are `NOT NULL` with defaults on top of that.
+ */
 export interface JumpstyleJob extends ToolRecord {
-  readonly track_filename?: string | null;
-  readonly n_clips?: number | null;
-  /** Seconds of output. */
-  readonly duration?: number | null;
-  /** The seed that produced this cut. Reuse it to reproduce the edit. */
-  readonly seed?: number | null;
-  readonly density?: string | null;
-  readonly rapid_fire?: boolean | null;
-  /** BPM that was forced, when one was. */
-  readonly bpm?: number | null;
-  /** BPM the sidecar detected, or the forced one once the run settles. */
-  readonly detected_bpm?: number | null;
-  /** What the sidecar is doing right now. `null` unless processing. */
-  readonly stage?: string | null;
-  /** The finished video, once the status is `"complete"`. */
-  readonly output_url?: string | null;
+  readonly status: JumpstyleStatus;
+  /** Uploaded track's name; `"track"` when the upload carried none. */
+  readonly track_filename: string;
+  /** How many clips were sent. At most 20. */
+  readonly n_clips: number;
+  /** Seconds of output, clamped by the server to `[10, 60]`. */
+  readonly duration: number;
+  /**
+   * The seed that produced this cut. Reuse it to reproduce the edit - it is
+   * the ONLY way to, and the server rolls a fresh one whenever it is not
+   * given one.
+   */
+  readonly seed: number;
+  /** `NOT NULL DEFAULT 'normal'`. An unrecognised request value lands here as `"normal"`. */
+  readonly density: JumpstyleDensity | string;
+  /** `NOT NULL DEFAULT false`. */
+  readonly rapid_fire: boolean;
+  /** BPM that was forced at create time, or `null` when detection was left to run. */
+  readonly bpm: number | null;
+  /**
+   * While processing: the BPM the sidecar has detected, or `null` if it has not
+   * yet. Once the row settles: whatever `bpm` holds, forced or not. So this
+   * changes meaning at the moment the run ends.
+   */
+  readonly detected_bpm: number | null;
+  /** What the sidecar is doing right now, read live. `null` unless processing. */
+  readonly stage: string | null;
+  /** Signed URL of the finished video once complete and attached, `null` otherwise. */
+  readonly output_url: string | null;
 }
 
 /** Arguments for starting an edit. */

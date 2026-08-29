@@ -11,8 +11,8 @@
  * in the same request.
  */
 
-import { OmsError } from "../errors";
-import { type ApiClient, Resource, pageModifier } from "../http";
+import { OmsError, OmsNetworkError } from "../errors";
+import { type ApiClient, Resource, type TokenProvider, pageModifier } from "../http";
 import type {
   FileInput,
   Id,
@@ -23,7 +23,7 @@ import type {
   RequestOptions,
   Timestamp,
 } from "../types";
-import { createPage, readFileInput } from "../types";
+import { createPage, readFileInput, resolvePageNumber, resolvePageSize } from "../types";
 
 /** Lifecycle of a ticket. */
 export type TicketStatus = "open" | "closed";
@@ -304,17 +304,150 @@ export class TicketsNamespace extends Resource {
   /**
    * `GET /tickets/:id/attachment/:blob_id` - one attachment's bytes.
    *
-   * The endpoint answers 302 towards object storage and `fetch` follows it.
-   * The redirect is cross-origin, so the platform drops the `Authorization`
-   * header on the way: the credential never reaches the storage host.
+   * Unlike `account.picture` and `chests.entries.download`, this one CANNOT be
+   * asked for anonymously. The action resolves the ticket through
+   * `Ticket.viewable_by(Current.user)` and declares `oauth_scope
+   * "tickets:write"`, so a request with no credential is a 404 on someone
+   * else's ticket and a 401 on your own. The credential has to ride the first
+   * hop, which is exactly what makes this awkward.
+   *
+   * The awkward part. Rails answers `302` to `minio.omelhorsite.pt` and `fetch`
+   * follows it. Two different things then happen depending on how the client
+   * was built:
+   *
+   * - **token mode** (`credentials: "omit"`). The Fetch standard strips
+   *   `Authorization` on a cross-origin redirect, so the store gets a clean
+   *   presigned request. The hop also swaps the origin for an opaque one, so
+   *   MinIO sees `Origin: null` and answers `Access-Control-Allow-Origin: *` -
+   *   which an uncredentialed request accepts. This works, in a browser and
+   *   out of one.
+   * - **cookie mode** (`sessionCookie: true`, the production web app). Same
+   *   `Origin: null`, same `*` back, but now the request carries credentials,
+   *   and wildcard plus credentials is illegal in CORS regardless of
+   *   `Access-Control-Allow-Credentials`. The browser rejects the response and
+   *   `fetch` rejects with an opaque "Failed to fetch".
+   *
+   * And it cannot be repaired the way the other two were, because the obvious
+   * repair does not exist in a browser: `redirect: "manual"` there yields an
+   * OPAQUE-REDIRECT response - status 0, empty header list - so `Location` is
+   * unreadable and the second hop cannot be re-issued without credentials.
+   * `redirect: "error"` and `XMLHttpRequest` are no better. Reading `Location`
+   * works only off-browser, where nothing was broken to begin with. The other
+   * two endpoints escape by needing no credential at all; this one has no such
+   * escape, and the backend exposes no `..._url` companion route the way
+   * `fs_nodes` does with `data_url`.
+   *
+   * So in a browser in cookie mode, use {@link attachmentUrl} and let the
+   * platform fetch the bytes - an `<img>`, a `<video>`, an `<a download>` make
+   * no-cors requests and follow the redirect with no CORS check at all. This
+   * method stays for every other context, and turns the browser failure into an
+   * error that says so instead of an unexplained network fault.
    *
    * Take `blobId` from {@link TicketAttachment.blob_id}; the filename and
    * content type are on the same record, which is why this hands back bare
    * bytes.
+   *
+   * @throws {OmsError} `unsupported` when the redirect was blocked by CORS,
+   *   naming {@link attachmentUrl} as the way through.
+   * @throws {OmsApiError} 404 when the blob is not on that ticket, or the
+   *   ticket is not yours.
    */
   async attachment(id: TicketId, blobId: number, options: RequestOptions = {}): Promise<Blob> {
-    const response = await this.http.raw("GET", `/tickets/${id}/attachment/${blobId}`, options);
-    return response.blob();
+    const path = attachmentPath(id, blobId);
+    try {
+      const response = await this.http.raw("GET", path, options);
+      return await response.blob();
+    } catch (thrown) {
+      // A CORS rejection reaches us as a bare `fetch` rejection, indistinguishable
+      // from a real network fault, and the transport has already retried it three
+      // times by now. Only the client's shape tells the two apart.
+      if (thrown instanceof OmsNetworkError && (await tokenOf(this.http)) === null) {
+        throw new OmsError(
+          "The ticket attachment redirect could not be followed. In a browser, a client built with " +
+            "`sessionCookie: true` sends credentials, the 302 to object storage arrives there with " +
+            "`Origin: null`, and the store answers a wildcard `Access-Control-Allow-Origin` - which CORS " +
+            "forbids for a credentialed request. Use `oms.tickets.attachmentUrl(id, blobId)` and put the URL " +
+            "in an <img>, a <video> or an <a download> instead: those follow the redirect with no CORS check.",
+          "unsupported",
+          { method: "GET", url: this.http.url(path), cause: thrown },
+        );
+      }
+      throw thrown;
+    }
+  }
+
+  /**
+   * Absolute URL for one attachment, for an `<img>`, an `<a download>` or a new
+   * tab. In a browser in cookie mode this is the ONLY way to get at the bytes;
+   * see {@link attachment} for why.
+   *
+   * Asynchronous, unlike `account.pictureUrl` and
+   * `chests.entries.downloadUrl`, and the difference is not an accident: those
+   * two routes are anonymous, this one is not, so a credential has to be
+   * resolved before the URL means anything. Resolving it may involve a token
+   * refresh, which is why it cannot be a getter.
+   *
+   * How the URL authenticates depends on the client, matching what the backend
+   * accepts (`Session.candidate_tokens` reads the `Authorization` header, then
+   * `?token=`, then the `oms_session` cookie):
+   *
+   * - **cookie mode**: no credential in the URL. The browser attaches the
+   *   `oms_session` cookie itself. It is host-only on the API host and
+   *   `SameSite=Lax`, so this works from a page on `omelhorsite.pt` or another
+   *   host under it, and from nowhere else. Do not add `crossorigin` to the
+   *   element: it turns a no-cors load into a CORS one and re-creates the exact
+   *   failure this method exists to avoid.
+   * - **token mode**: the token is appended as `?token=`. Rails accepts a query
+   *   credential on API routes precisely because a native client has no cookie
+   *   jar and an `<img>` cannot carry a header.
+   *
+   * THE TOKEN-MODE URL CONTAINS A LIVE CREDENTIAL. It goes into the DOM, into
+   * the server access log, and into anything that records URLs. Build it at the
+   * moment of use, never store it, never log it, and never put it somewhere
+   * another person can read - anyone holding it holds the session until it is
+   * revoked. When the URL is destined for something outside your own page,
+   * fetch the bytes with {@link attachment} and hand over a `blob:` URL
+   * instead.
+   *
+   * ```tsx
+   * const src = await oms.tickets.attachmentUrl(ticket.id, file.blob_id);
+   * <img src={src} alt={file.filename} />
+   * ```
+   */
+  async attachmentUrl(id: TicketId, blobId: number): Promise<string> {
+    const token = await tokenOf(this.http);
+    return this.http.url(attachmentPath(id, blobId), token === null ? undefined : { token });
+  }
+}
+
+/** The one place the attachment route is spelled. */
+function attachmentPath(id: TicketId, blobId: number): string {
+  return `/tickets/${id}/attachment/${blobId}`;
+}
+
+/**
+ * The bearer token the transport would send, or `null` when there is none -
+ * which for a working client means it is in cookie mode.
+ *
+ * Read off `ApiClient` through a defensive probe, the same way
+ * `objectStoreFetch` reads `fetchImpl`, and for the same reason: the provider
+ * is private, `http.ts` is shared, and neither of these two needs is worth
+ * growing the transport a new public member for. A probe that finds nothing
+ * degrades to `null`, which is the safe answer in both places it is used - a
+ * URL with no credential rather than a wrong one, and the CORS explanation
+ * rather than a swallowed error.
+ *
+ * `getToken` may refresh, so this awaits it, and a provider that throws is
+ * treated as "no token" rather than allowed to mask the caller's actual
+ * failure.
+ */
+async function tokenOf(http: ApiClient): Promise<string | null> {
+  const provider = (http as unknown as { tokens?: TokenProvider }).tokens;
+  if (provider === undefined || typeof provider.getToken !== "function") return null;
+  try {
+    return (await provider.getToken()) ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -415,13 +548,6 @@ function messageQuery(params: ListTicketMessagesParams, page: number, pageSize: 
   };
 }
 
-function resolvePageNumber(page: number | undefined): number {
-  return Math.max(1, Math.trunc(page ?? 1));
-}
-
-function resolvePageSize(pageSize: number | undefined): number {
-  return Math.min(500, Math.max(1, Math.trunc(pageSize ?? 100)));
-}
 
 /** Fails fast on a field the backend would truncate, reject, or drop silently. */
 function assertLength(field: string, value: string, max: number): void {

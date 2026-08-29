@@ -92,35 +92,70 @@ export function isJobTerminal(status: string): boolean {
   return (JOB_TERMINAL_STATUSES as readonly string[]).includes(status);
 }
 
-/** A background job. */
+/**
+ * A background job.
+ *
+ * `JobBlueprint` declares thirteen fields and nothing else, so EVERY key below
+ * is present on every response. A `?` here would mean "the server sometimes
+ * leaves this out", and it never does; what varies is the VALUE, because most
+ * of these are nullable columns that fill in as the job moves.
+ *
+ * Two keys are deliberately NOT here, and a client migrating off the old web
+ * service will expect them: `updater_id` and `destroyer_id`. Both columns
+ * exist on the `jobs` table and both are indexed, but `JobBlueprint` renders
+ * NEITHER, so anything declaring them has been reading `undefined` for as long
+ * as it has existed. Declaring them here would only move the lie.
+ */
 export interface Job extends BaseRecord {
   readonly status: JobStatus;
   /**
-   * Feature-level kind of the run. Today the backend only ever writes
-   * `"omsvs"` (vocal separation) or `"unknown"`, which is the column default
-   * every generic enqueue gets - including the upscale and background-removal
-   * proxies. It is NOT the worker's class name.
+   * Feature-level kind of the run. `Job::JOB_TYPES` holds exactly two strings:
+   * `"omsvs"` (vocal separation) and `"unknown"`, which is the column default
+   * every generic enqueue gets - the upscale and background-removal proxies
+   * included. It is NOT the worker's class name, and a third value cannot
+   * appear without a model change, because an inclusion validation rejects it.
    */
   readonly job_type: string;
-  /** Enqueue-time arguments, when the enqueuer wrote any. Shape depends on `job_type`. */
-  readonly payload?: Json;
-  /** Set when a worker claimed the job. */
-  readonly started_at?: Timestamp | null;
-  readonly finished_at?: Timestamp | null;
   /**
-   * Percentage, an integer in `[0, 100]`. The column is `NOT NULL DEFAULT 0`,
-   * so it is a real number from the moment the row exists and 0 means "not
-   * started", never "unknown".
+   * Enqueue-time arguments. The column is `jsonb DEFAULT '{}'`, so a row whose
+   * enqueuer wrote nothing carries `{}` rather than `null`. Shape depends on
+   * `job_type`.
    */
-  readonly progress?: number | null;
-  /** Failure message, set once `status === "failed"` (or a cancellation reason). */
-  readonly error?: string | null;
-  /** Worker-specific payload; shape depends on `job_type`. */
-  readonly result?: Json;
+  readonly payload: Json;
+  /** Set when a worker claimed the job; `null` while it is still `"pending"`. */
+  readonly started_at: Timestamp | null;
+  /** Set when the job reached a terminal state, cancellation included. */
+  readonly finished_at: Timestamp | null;
+  /**
+   * Percentage, an integer in `[0, 100]`. The column is `NOT NULL DEFAULT 0`
+   * and the model validates the range, so this is a real number from the
+   * moment the row exists: `0` means "not started", never "unknown".
+   */
+  readonly progress: number;
+  /**
+   * Failure message once `status === "failed"` - and ALSO the reason once
+   * `"canceled"`, because `Job#cancel!` writes it into this same column. A
+   * non-null `error` therefore does not by itself mean the work failed. Read
+   * `status`.
+   */
+  readonly error: string | null;
+  /**
+   * Whatever the worker returned, stored by `ApplicationJob`'s
+   * `around_perform`. Shape depends on `job_type`, and the two proxies worth
+   * naming both answer an object carrying a signed download link:
+   *
+   * - upscale: `{ upscale_id, result_url }`;
+   * - background removal: `{ background_removal_id, result_url }`.
+   *
+   * That `result_url` is the same string the tool's own row carries once the
+   * run completes, which is why `awaitToolJob` waits on the job and then
+   * re-reads the typed row instead of digging a URL out of here.
+   */
+  readonly result: Json;
   /** Who enqueued it. `null` for a job with no owner, e.g. an anonymous tool run. */
-  readonly creator_id?: Id | null;
-  /** Which worker claimed it. */
-  readonly worker_id?: string | null;
+  readonly creator_id: Id | null;
+  /** Which worker claimed it. `null` until one does. */
+  readonly worker_id: string | null;
 }
 
 /**
@@ -361,6 +396,12 @@ export function jobRef(ref: JobRef | Id): JobRef {
  * `total` is 100 rather than `undefined` because `progress` is a percentage the
  * server always has: the column is `NOT NULL DEFAULT 0`, so there is no
  * "unknown" to be honest about.
+ *
+ * The `typeof` guard is not defensive typing for its own sake. `Job.progress`
+ * is declared non-nullable because the column is, but this function is also
+ * handed rows that came off `JobChannel` and rows a host deserialised itself,
+ * and reading `undefined` as `NaN%` would put a broken number on a progress
+ * bar rather than a zero.
  */
 export function jobProgress(job: Job): Progress {
   return {

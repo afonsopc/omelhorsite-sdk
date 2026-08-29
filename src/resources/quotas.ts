@@ -70,7 +70,13 @@ export type QuotaUnit = "seconds" | "count" | "bytes";
  */
 export type QuotaPeriod = "daily" | "total";
 
-/** One resource, in the one shape every resource uses. */
+/**
+ * One resource, in the one shape every resource uses.
+ *
+ * All seven keys are always present. `resource`, `unit` and `period` are Ruby
+ * symbols on the server (`:daily`, `:bytes`) and reach the wire as plain
+ * strings, so compare them as strings and never against a leading colon.
+ */
 export interface QuotaEntry {
   /** A {@link QuotaResource}, or a name added to the server since this build. */
   readonly resource: QuotaResource | string;

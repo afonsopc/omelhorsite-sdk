@@ -37,6 +37,18 @@
  * Read {@link CaptionsNamespace.quota} before uploading, and again once the
  * window is known: the second check is the exact one, and the server refuses a
  * window that would cross the ceiling rather than truncating it.
+ *
+ * **The 250 MiB ceiling is not reachable through {@link CaptionsNamespace.create}.**
+ * Cloudflare rejects any request body over 100 MB with a 413 of its own before
+ * Rails ever sees it, so the backend also exposes a three-call chunked upload -
+ * `POST /caption_jobs/uploads` opens a session and returns a signed
+ * `upload_token` plus a `part_size` (32 MiB), `POST /caption_jobs/uploads/parts?offset=`
+ * streams each raw part under an `X-Upload-Token` header, and
+ * `POST /caption_jobs/uploads/finish` probes the assembled file and creates the
+ * row. THAT path is not implemented in this SDK yet: a video above roughly
+ * 64 MiB has to go through it, and `create` will answer 413 for one. The web
+ * tool already switches at 64 MiB, so this is the one gap that blocks it from
+ * dropping its own HTTP layer for captions.
  */
 
 import { OmsError } from "../../errors";
@@ -96,6 +108,14 @@ export interface CaptionWord {
 }
 
 /**
+ * An RGB triple, each channel clamped to `[0, 255]` server-side.
+ *
+ * The controller reads the key only when the array has EXACTLY three entries;
+ * two or four is dropped in silence, which costs a whole render to discover.
+ */
+export type CaptionRgb = readonly [number, number, number] | readonly number[];
+
+/**
  * Look of the burned-in captions.
  *
  * Open bag, because the renderer gains options without an SDK release and
@@ -108,8 +128,22 @@ export interface CaptionWord {
  * back as the nearest end of it rather than as a 400.
  */
 export interface CaptionStyle {
+  /**
+   * A font KEY from {@link CaptionsNamespace.fonts}, never a path: the sidecar
+   * resolves the key against the faces installed in its image, so a caller
+   * cannot point the renderer at a file. Must match `/\A[a-z0-9_-]{1,40}\z/`;
+   * anything else is dropped and the renderer uses its own default.
+   */
+  readonly font?: string;
   /** Font size as a fraction of the video height. Clamped to `[0.03, 0.09]`. */
   readonly fontscale?: number;
+  /**
+   * Outline thickness as a fraction of the font size. Clamped to `[0, 0.3]`,
+   * and `0` is a legitimate choice meaning no outline at all - which is why
+   * the controller reads this key whenever it is PRESENT rather than when it
+   * is truthy, unlike every other numeric key here.
+   */
+  readonly stroke_factor?: number;
   /** Vertical placement, `0` top to `1` bottom. Clamped to `[0.3, 0.9]`. */
   readonly pos?: number;
   /** Words on screen at once. Clamped to `[1, 6]`. */
@@ -122,33 +156,65 @@ export interface CaptionStyle {
   readonly preset?: "veryfast" | "medium" | "slow";
   /**
    * Colour of the word currently being sung, as `[r, g, b]`, each clamped to
-   * `[0, 255]`. Ignored unless it has exactly three entries.
+   * `[0, 255]`. Named after its default rather than after its job. Ignored
+   * unless the array has exactly three entries.
    */
-  readonly yellow?: readonly [number, number, number] | readonly number[];
+  readonly yellow?: CaptionRgb;
+  /** Colour of the words that are not highlighted. Same three-entry rule. */
+  readonly white?: CaptionRgb;
+  /** Colour of the outline. Same three-entry rule. */
+  readonly stroke?: CaptionRgb;
   readonly [key: string]: unknown;
 }
 
-/** A caption job. */
+/**
+ * A caption job.
+ *
+ * Every route that answers with one - create, the chunked upload's finish
+ * call, show, transcribe and render - renders the `:extended` view, so every
+ * key below is present on every response.
+ *
+ * Five of the columns are `NOT NULL` with a numeric default, so `width`,
+ * `height`, `fps`, `duration` and `transcribed_seconds` are always real
+ * numbers. On a row whose upload has only just been probed they are the probed
+ * values; the sidecar's precise metadata overwrites them a moment later.
+ */
 export interface CaptionJob extends ToolRecord {
   readonly status: CaptionStatus;
+  /** Original upload name. The controller substitutes `"video.mp4"` for a
+   * blank one, so this is never empty in practice. */
   readonly filename: string;
-  readonly width?: number | null;
-  readonly height?: number | null;
-  readonly fps?: number | null;
-  /** Seconds of video, probed at upload. */
-  readonly duration?: number | null;
-  readonly language?: string | null;
-  /** The transcribed window, seconds from the video start. */
-  readonly window_start?: number | null;
-  readonly window_end?: number | null;
-  /** Seconds charged against the quota so far. Accumulates across windows. */
-  readonly transcribed_seconds?: number | null;
-  /** Timed words. Present from `"transcribed"` onwards. */
-  readonly words?: CaptionWord[] | null;
-  /** What the renderer is doing right now. `null` unless rendering. */
-  readonly render_stage?: string | null;
-  /** The finished video, once the status is `"complete"`. */
-  readonly output_url?: string | null;
+  /** Pixels. `NOT NULL DEFAULT 0`, so `0` means "not probed yet", not unknown. */
+  readonly width: number;
+  readonly height: number;
+  /** `NOT NULL DEFAULT 0.0`. */
+  readonly fps: number;
+  /** Seconds of video, probed at upload. `NOT NULL DEFAULT 0.0`. */
+  readonly duration: number;
+  /** Language of the last transcribe call, `"auto"` included. `null` before the first. */
+  readonly language: string | null;
+  /** The transcribed window, seconds from the video start. `null` before the first transcribe. */
+  readonly window_start: number | null;
+  readonly window_end: number | null;
+  /**
+   * Seconds charged against the quota so far, accumulated across every window
+   * transcribed on this job. `NOT NULL DEFAULT 0`.
+   */
+  readonly transcribed_seconds: number;
+  /**
+   * Timed words, from `"transcribed"` onwards.
+   *
+   * `null` and not `[]` when there are none: the column is `NOT NULL DEFAULT
+   * '[]'`, but the blueprint renders `words.presence`, and `[].presence` is
+   * `nil` in Ruby. So an empty list arrives as `null`, and the key is present
+   * either way.
+   */
+  readonly words: CaptionWord[] | null;
+  /** What the renderer is doing right now, read live off the sidecar. `null`
+   * unless the status is `"rendering"`. */
+  readonly render_stage: string | null;
+  /** Signed URL of the finished video once complete and attached, `null` otherwise. */
+  readonly output_url: string | null;
 }
 
 /** Arguments for uploading a video. */
@@ -215,6 +281,28 @@ export class CaptionsNamespace extends Resource {
    */
   async quota(options: RequestOptions = {}): Promise<SecondsQuota> {
     return this.http.get<SecondsQuota>("/caption_jobs/quota", options);
+  }
+
+  /**
+   * `GET /caption_jobs/fonts` - the font KEYS the renderer has, for
+   * {@link CaptionStyle.font}.
+   *
+   * Plain strings, not objects and not display names: they are the keys the
+   * sidecar resolves against the faces installed in its image, which is the
+   * whole reason a caller cannot pass a path.
+   *
+   * The controller answers `{ fonts: [...] }`; this unwraps it. It also
+   * NEVER fails: a sidecar that is down or slow is caught and answered as an
+   * empty list with a 200, so `[]` means "could not ask right now" just as
+   * much as it means "no fonts", and the two are not distinguishable. Do not
+   * treat an empty answer as a reason to refuse a render - omitting `font`
+   * lets the renderer use its own default.
+   *
+   * Cached server-side for ten minutes, so polling it buys nothing.
+   */
+  async fonts(options: RequestOptions = {}): Promise<string[]> {
+    const answer = await this.http.get<{ fonts?: string[] }>("/caption_jobs/fonts", options);
+    return answer?.fonts ?? [];
   }
 
   /**

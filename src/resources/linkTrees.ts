@@ -11,9 +11,35 @@
 
 import { Resource, buildFormData, readJson } from "../http";
 import type { BaseRecord, FileInput, Id, RequestOptions, Timestamp } from "../types";
+import { SHORT_LINK_BASE_URL } from "./shortLinks";
 
-/** Longest a slug may be. The shortest is 2. */
+/**
+ * The reserved short-link namespace a link tree is served under.
+ * `ShortLink::LINK_TREE_NAMESPACE`.
+ *
+ * Note it is `"t"` and not `"lt"`. The model's own comment says `"lt"`; the
+ * constant says `"t"`, and the constant is what the rows carry.
+ */
+export const LINK_TREE_NAMESPACE = "t";
+
+/** Public prefix a link tree resolves under. */
+export const LINK_TREE_BASE_URL = `${SHORT_LINK_BASE_URL}/${LINK_TREE_NAMESPACE}`;
+
+/** Longest a slug may be. */
 export const LINK_TREE_SLUG_MAX_LENGTH = 63;
+
+/**
+ * Shortest a slug may actually be, which is **3** and not the 2 that
+ * `LinkTree::SLUG_MIN` claims.
+ *
+ * Two validations run, and the tighter one wins. The length check allows 2,
+ * but `SLUG_FORMAT` is `/\A[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?\z/`: either the
+ * optional group is absent, which matches ONE character and then fails the
+ * length check, or it is present and contributes at least two more. There is
+ * no way to spell a valid two-character slug, so a caller that trusts
+ * `SLUG_MIN` gets a 400 saying the slug "contains invalid characters".
+ */
+export const LINK_TREE_SLUG_MIN_LENGTH = 3;
 
 /** Most items one tree may carry. */
 export const LINK_TREE_MAX_ITEMS = 30;
@@ -22,19 +48,27 @@ export const LINK_TREE_MAX_ITEMS = 30;
 export const LINK_TREE_CV_MAX_BYTES = 10 * 1024 * 1024;
 
 /**
- * One entry on a link tree.
+ * One entry on a link tree, AS READ back.
  *
- * `url` must carry an `http`, `https`, `mailto`, `tel` or `sms` scheme; a bare
- * domain is rejected by the model, not silently fixed.
+ * `id` is not optional here even though it is optional when writing:
+ * `LinkTrees::InputSanitizer#items` mints `SecureRandom.uuid` for any entry
+ * that arrives without one, so a stored entry always has one - and it has to,
+ * because it is the key `clicks_by_item` is filed under.
+ *
+ * `label` and `url` are likewise always present, because an entry missing
+ * either is DROPPED from the list rather than stored blank. The three
+ * remaining keys are genuinely absent when unset: the sanitiser only writes
+ * `icon` and `description` when non-blank, and `icon_image` only when it is a
+ * `data:image/` URI under the cap.
+ *
+ * Write with {@link LinkTreeItemInput}.
  */
 export interface LinkTreeItem {
-  /** Stable within the tree, and the key click tracking is filed under. The
-   * server mints a UUID when you leave it out, so read the tree back before
-   * calling {@link LinkTreesNamespace.trackClick}. */
-  readonly id?: string;
-  /** Up to 80 characters. */
+  /** Stable within the tree, and the key `clicks_by_item` is filed under. */
+  readonly id: string;
+  /** Up to 80 characters, and never blank. */
   readonly label: string;
-  /** Up to 1024 characters, with a scheme. */
+  /** Up to 1024 characters, and never blank. */
   readonly url: string;
   /** Icon slug the renderer resolves. Up to 40 characters. */
   readonly icon?: string;
@@ -42,6 +76,35 @@ export interface LinkTreeItem {
   readonly description?: string;
   /** `data:image/...` under 80 KB, for a custom icon. */
   readonly icon_image?: string;
+}
+
+/**
+ * One entry as WRITTEN.
+ *
+ * `url` must carry an `http`, `https`, `mailto`, `tel` or `sms` scheme; a bare
+ * domain is rejected by the model, not silently fixed. An entry whose `label`
+ * or `url` is blank is dropped by the sanitiser BEFORE validation, so it
+ * disappears without an error rather than failing the write.
+ *
+ * A {@link LinkTreeItem} read off a tree is assignable here, so the
+ * read-edit-write round trip needs no mapping - and keeping each item's `id`
+ * through that round trip is what keeps `clicks_by_item` lined up with
+ * anything.
+ */
+export interface LinkTreeItemInput {
+  /** Omit and the server mints a UUID, which you then have to read back before
+   * you can call {@link LinkTreesNamespace.trackClick} for this entry. */
+  readonly id?: string;
+  readonly label: string;
+  readonly url: string;
+  readonly icon?: string;
+  readonly description?: string;
+  /**
+   * `data:image/...` under 80 KB. `null` and any other non-conforming value
+   * are DROPPED by the sanitiser rather than rejected, so sending `null` here
+   * clears the icon by omission and answers 200 either way.
+   */
+  readonly icon_image?: string | null;
 }
 
 /**
@@ -63,39 +126,61 @@ export interface LinkTreeTheme {
   readonly banner_image?: string | null;
 }
 
-/** A link-in-bio page, owner view. */
+/**
+ * A link-in-bio page, owner view.
+ *
+ * Every key is present on every owner-facing response: index, show, create,
+ * update, `uploadCv` and `removeCv` all render the blueprint's DEFAULT view,
+ * never `:extended`, so there is no richer variant and nothing here is
+ * conditional. Four of the values are nullable.
+ */
 export interface LinkTree extends BaseRecord {
   readonly user_id: Id;
   /** Public path segment. Lowercase letters, digits and dashes. */
   readonly slug: string;
+  /** Never blank: the model validates presence. Up to 80 characters. */
   readonly title: string;
-  readonly bio?: string | null;
-  /** The avatar, inline as a `data:image/` URI rather than a URL. */
-  readonly avatar_data_url?: string | null;
+  /** Up to 280 characters, or `null`. Never `undefined`. */
+  readonly bio: string | null;
+  /** The avatar, inline as a `data:image/` URI rather than a URL, or `null`. */
+  readonly avatar_data_url: string | null;
+  /** Never `null`: the blueprint substitutes `[]` for an unset list. */
   readonly items: LinkTreeItem[];
+  /** Never `null`: the blueprint substitutes `{}` for an unset bag. */
   readonly theme: LinkTreeTheme;
-  /** Click counters keyed by {@link LinkTreeItem.id}. */
+  /**
+   * Click counters keyed by {@link LinkTreeItem.id}. Never `null` - `{}` for a
+   * tree nobody has clicked - and it can hold ids of items that have since
+   * been deleted, because nothing prunes it.
+   */
   readonly clicks_by_item: Record<string, number>;
   /** Absolute URL that downloads the CV, or `null` when none is attached. */
   readonly cv_url: string | null;
   readonly cv_filename: string | null;
-  /** The shareable short URL. */
+  /** The shareable short URL: `{@link LINK_TREE_BASE_URL}/{slug}`. */
   readonly public_url: string;
   /** Endpoint of the paired short link. Always equal to `slug`. */
   readonly short_link_endpoint: string;
-  readonly short_link_namespace: string;
+  /** Always {@link LINK_TREE_NAMESPACE}; the blueprint renders the constant. */
+  readonly short_link_namespace: typeof LINK_TREE_NAMESPACE;
 }
 
 /**
- * The visitor's view: the same page with the owner-only fields removed. Note
- * that it carries no timestamps, so it is NOT a {@link LinkTree}.
+ * The visitor's view: the same page with the owner-only fields removed.
+ *
+ * The `:public` view excludes exactly seven keys - `user_id`,
+ * `clicks_by_item`, `public_url`, `short_link_endpoint`,
+ * `short_link_namespace`, `created_at` and `updated_at` - and INHERITS
+ * everything else from the default view, which is why `id`, `cv_url` and
+ * `cv_filename` are still here. It carries no timestamps, so it is NOT a
+ * {@link LinkTree} and cannot be passed where one is expected.
  */
 export interface PublicLinkTree {
   readonly id: Id;
   readonly slug: string;
   readonly title: string;
-  readonly bio?: string | null;
-  readonly avatar_data_url?: string | null;
+  readonly bio: string | null;
+  readonly avatar_data_url: string | null;
   readonly items: LinkTreeItem[];
   readonly theme: LinkTreeTheme;
   readonly cv_url: string | null;
@@ -105,18 +190,27 @@ export interface PublicLinkTree {
 /** Arguments for creating a link tree. */
 export interface CreateLinkTreeInput {
   /**
-   * 2 to {@link LINK_TREE_SLUG_MAX_LENGTH} characters of `[a-z0-9-]`, starting
-   * and ending alphanumeric, and never one of `new edit admin api root login
-   * logout signup signin manage`.
+   * {@link LINK_TREE_SLUG_MIN_LENGTH} to {@link LINK_TREE_SLUG_MAX_LENGTH}
+   * characters of `[a-z0-9-]`, starting and ending alphanumeric, and never one
+   * of `new edit admin api root login logout signup signin manage`.
+   *
+   * Lowercased and trimmed server-side before any check, so casing is not a
+   * reason to be refused.
    */
   readonly slug: string;
   /** Required: the model refuses a blank title. Up to 80 characters. */
   readonly title: string;
   /** Up to 280 characters. */
   readonly bio?: string;
-  /** `data:image/...` under 500 KB. Build one with `dataUrlFromFile`. */
+  /**
+   * `data:image/...` under 500 KB. Anything else - a plain URL, an oversized
+   * image - is turned into `null` by the sanitiser before validation, so a bad
+   * avatar creates the tree WITHOUT one rather than failing. Read
+   * `avatar_data_url` back off the answer.
+   */
   readonly avatarDataUrl?: string;
-  readonly items?: LinkTreeItem[];
+  /** At most {@link LINK_TREE_MAX_ITEMS}; more is a 400. */
+  readonly items?: LinkTreeItemInput[];
   readonly theme?: LinkTreeTheme;
 }
 
@@ -133,9 +227,16 @@ export interface UpdateLinkTreeInput {
   /** Renames the paired short link; the old public URL stops resolving. */
   readonly slug?: string;
   readonly title?: string;
-  readonly bio?: string;
+  /**
+   * Accepts `null`, but note what it does: the controller assigns
+   * `params[:bio].to_s.strip`, so `null` stores the empty STRING and not
+   * `null`. There is no way through this endpoint to put the column back to
+   * `null` once it holds a value; `""` is as empty as it gets.
+   */
+  readonly bio?: string | null;
+  /** `null` or `""` clears the avatar. Anything malformed also clears it. */
   readonly avatarDataUrl?: string | null;
-  readonly items?: LinkTreeItem[];
+  readonly items?: LinkTreeItemInput[];
   readonly theme?: LinkTreeTheme;
 }
 
@@ -186,8 +287,14 @@ export interface LinkTreeSlugAvailability {
   readonly slug: string;
   readonly valid: boolean;
   readonly available: boolean;
-  /** `"invalid"` for the format, `"reserved"` for the blocklist. */
-  readonly reason?: string;
+  /**
+   * Only when `valid` is `false`. `"invalid"` for the format or the length,
+   * `"reserved"` for the blocklist - link trees distinguish the two, unlike
+   * the otherwise identical `FormEndpointAvailability`, which only ever says
+   * `"invalid"`.
+   */
+  readonly reason?: "invalid" | "reserved";
+  /** Only when `valid` is `true` and `available` is `false`. */
   readonly suggestions?: string[];
 }
 
@@ -335,5 +442,18 @@ export class LinkTreesNamespace extends Resource {
       { item_id: itemId },
       { retry: false, ...options },
     );
+  }
+
+  /**
+   * The public URL a slug is served from. Pure string building, no request, and
+   * the same string the server puts in {@link LinkTree.public_url}.
+   *
+   * Prefer `tree.public_url` when you are holding an owner-view record. Reach
+   * for this when all you have is a slug - after {@link slugAvailability}, or
+   * from a {@link PublicLinkTree}, whose `:public` view deliberately drops
+   * `public_url` along with the rest of the pairing metadata.
+   */
+  publicUrl(slug: string): string {
+    return `${LINK_TREE_BASE_URL}/${slug}`;
   }
 }
