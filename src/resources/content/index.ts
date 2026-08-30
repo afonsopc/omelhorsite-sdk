@@ -49,10 +49,7 @@ export class ContentNamespace extends Resource {
   readonly analysis: AnalysisNamespace;
   /** The Space Invaders leaderboard. */
   readonly spaceInvaders: SpaceInvadersNamespace;
-  /**
-   * Intel: seven typed families over the backend's own tables, with the
-   * untyped sidecar passthrough kept on `.proxy`. See {@link IntelNamespace}.
-   */
+  /** Intel: articles, reports, sources, scripts, items, config and stats. See {@link IntelNamespace}. */
   readonly intel: IntelNamespace;
 
   constructor(http: ApiClient) {

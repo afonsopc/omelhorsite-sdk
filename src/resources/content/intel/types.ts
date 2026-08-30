@@ -12,13 +12,12 @@
  * An OAuth access token is `403 {"error":"insufficient_scope"}` on every
  * route below. Session credential only.
  *
- * ## Ids are STRINGS here, unlike the rest of this file
+ * ## Ids are STRINGS here
  *
- * Both intel migrations create every table with `id: :string`, so articles,
- * reports, sources, scripts, items and the config row all carry opaque string
- * ids - while blogs, notifications, jokes and Space Invaders games two hundred
- * lines up are integers. Nothing in intel is ever a number you can compare or
- * sort by.
+ * Articles, reports, sources, scripts, items and the config row all carry
+ * opaque string ids, unlike blogs, notifications, jokes and Space Invaders
+ * games, whose ids are integers. Nothing in intel is ever a number you can
+ * compare or sort by.
  *
  * ## Ceilings
  *
