@@ -2,9 +2,9 @@
  * The `dynamicQrs` namespace: QR codes whose destination can be changed after
  * the code has been printed.
  *
- * Under the hood each one is a `ShortLink` in the reserved `"qr"` namespace
- * with a server-minted UUID endpoint, plus the styling the renderer needs. It
- * is a separate resource because the endpoint is not user-chosen, the payload
+ * Each one is a short link in the reserved `"qr"` namespace with a
+ * server-minted UUID endpoint, plus the styling a renderer needs. It is a
+ * separate resource because the endpoint is not user-chosen, the payload
  * carries `settings`, and the plain short-link listing filters system
  * namespaces out - a dynamic QR will never appear in `oms.shortLinks.list()`.
  *
@@ -22,33 +22,31 @@ import { SHORT_LINK_BASE_URL, type ShortLinkId, type ShortLinkStats } from "./sh
 /**
  * The reserved short-link namespace every dynamic QR lives in.
  *
- * `ShortLink::DYNAMIC_QR_NAMESPACE`. It is not a user choice and it never
- * changes on a record, which is why {@link DynamicQr.namespace} is typed as
- * this literal rather than as a string.
+ * It is not a user choice and it never changes on a record, which is why
+ * {@link DynamicQr.namespace} is typed as this literal rather than as a string.
  */
 export const DYNAMIC_QR_NAMESPACE = "qr";
 
 /** Public prefix a dynamic QR resolves under. */
 export const DYNAMIC_QR_BASE_URL = `${SHORT_LINK_BASE_URL}/${DYNAMIC_QR_NAMESPACE}`;
 
-/** Module shapes `DynamicQrs::SettingsSanitizer` accepts. Anything else is dropped. */
+/** Module shapes the server accepts. Anything else is dropped. */
 export type DynamicQrStyle = "classic" | "rounded" | "dots" | "extraRounded" | "classy" | "classyRounded";
 
 /**
  * Styling of a dynamic QR.
  *
- * The backend runs this bag through `DynamicQrs::SettingsSanitizer`, which
- * **silently drops** every key it does not recognise and every value that fails
- * its check - a bad `style`, a colour that is not `#rrggbb`. An unknown or
- * malformed key is therefore a no-op, not an error, and the only way to know
- * what stuck is to read `settings` back off the response.
+ * The server **silently drops** every key it does not recognise and every
+ * value that fails its check - a bad `style`, a colour that is not `#rrggbb`.
+ * An unknown or malformed key is therefore a no-op, not an error, and the only
+ * way to know what stuck is to read `settings` back off the response.
  *
  * The two exceptions that DO fail loudly are `logo` and `bg_image`: a value
  * that is neither `null`/`""` nor a `data:image/...` URI under the size cap is
  * a 400.
  *
- * The SDK does not render any of this; it is what the web tool's renderer
- * consumes. `oms.local.qr` draws a plain symbol from the matrix instead.
+ * The SDK does not render any of this. `oms.local.qr` draws a plain symbol
+ * from the matrix instead.
  */
 export interface DynamicQrSettings {
   /** Module shape. Values outside {@link DynamicQrStyle} are dropped. */
@@ -80,8 +78,8 @@ export interface DynamicQrSettings {
   /** How the background image sits against `bg_color`. Anything but `"replace"` reads as `"behind"`. */
   readonly bg_image_mode?: "replace" | "behind";
   /**
-   * The stored bag is free-form JSON, so a code saved by an older version of
-   * the web tool can carry keys this interface does not name.
+   * The stored bag is free-form JSON, so a code saved by an older client can
+   * carry keys this interface does not name.
    */
   readonly [key: string]: unknown;
 }
@@ -89,43 +87,30 @@ export interface DynamicQrSettings {
 /**
  * A dynamic QR code.
  *
- * `DynamicQrBlueprint` renders `ApplicationBlueprint`'s three automatic keys
- * (`id`, `created_at`, `updated_at`) plus exactly five more, and that is the
- * whole record. Two keys a client migrating off the old web service will
- * expect are NOT here and never were on this endpoint: `website_id` and
- * `website_managed`. They are residue of the websites feature, which was
- * extracted out of this backend entirely - there is no such column on
- * `short_links` and no such field on any blueprint, so anything declaring them
- * has been reading `undefined`.
- *
- * The blueprint is also never resolved automatically. A dynamic QR IS a
- * `ShortLink`, and `ShortLinkBlueprint` already owns that name with a
- * different shape (associations, no `settings`), so every call site passes
- * this blueprint explicitly. That is why the two records disagree about which
- * fields exist even though they are rows in one table.
+ * Eight keys, and that is the whole record. There is no `website_id` and no
+ * `website_managed`. A dynamic QR is a short link, but the two records carry
+ * different fields: this one has `settings` and no associations.
  */
 export interface DynamicQr extends Omit<BaseRecord, "id"> {
-  /** Integer primary key: a dynamic QR is a `short_links` row. See {@link ShortLinkId}. */
+  /** Integer primary key: a dynamic QR is a short link. See {@link ShortLinkId}. */
   readonly id: number;
   /** Current destination. Changing it re-points every printed copy at once. */
   readonly url: string;
   /** Server-assigned UUID the QR image encodes. Not choosable, not renameable. */
   readonly endpoint: string;
   /**
-   * Always {@link DYNAMIC_QR_NAMESPACE}. The controller writes it on create
-   * and nothing can change it afterwards, and the listing scope filters on it,
-   * so a record that reached you through this namespace cannot hold anything
-   * else.
+   * Always {@link DYNAMIC_QR_NAMESPACE}. Set on create, never changeable, and
+   * the listing filters on it, so a record that reached you through this
+   * namespace cannot hold anything else.
    */
   readonly namespace: typeof DYNAMIC_QR_NAMESPACE;
   /**
-   * Owner. The column is nullable because anonymous short links exist, but
-   * every route on this resource requires a credential and the controller
-   * always sets the owner, so in practice this is never `null` for a dynamic
-   * QR.
+   * Owner. Nullable because anonymous short links exist, but every route on
+   * this resource requires a credential and always sets the owner, so in
+   * practice this is never `null` for a dynamic QR.
    */
   readonly user_id: Id | null;
-  /** Never `null`: the blueprint substitutes `{}` for an unset bag. */
+  /** Never `null`: `{}` for an unset bag. */
   readonly settings: DynamicQrSettings & JsonObject;
 }
 
@@ -140,7 +125,7 @@ export interface CreateDynamicQrInput {
 /**
  * Fields that can change afterwards.
  *
- * `settings` is **merged** into the stored bag by the backend, not replaced, so
+ * `settings` is **merged** into the stored bag server-side, not replaced, so
  * an update can never unset a key by omitting it. To clear one, send it
  * explicitly with the value that means empty (`null` for `logo`/`bg_image`).
  */
@@ -155,10 +140,9 @@ export class DynamicQrsNamespace extends Resource {
    * `GET /dynamic_qrs` - every code you own, newest first.
    *
    * Returns a plain array rather than a page object, and that is not an
-   * oversight: this controller does not use `CrudActions` and ignores
-   * `modifiers[page]` entirely, so it always answers with the complete set. A
-   * `Paginated` here would be a fiction with a `next()` that refetched
-   * everything.
+   * oversight: the endpoint ignores `modifiers[page]` entirely and always
+   * answers with the complete set. A `Paginated` here would be a fiction with
+   * a `next()` that refetched everything.
    *
    * @throws {OmsAuthError} 401 when anonymous.
    */

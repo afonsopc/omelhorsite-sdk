@@ -37,7 +37,7 @@ export interface Chest extends BaseRecord {
   readonly expires_at: Timestamp;
   /** Owner, when the chest was created by a signed-in user. */
   readonly creator_id?: Id | null;
-  /** Present on every read: `find_or_create` renders the `:extended` view. */
+  /** Present on every read. */
   readonly chest_entries?: ChestEntry[];
 }
 
@@ -130,7 +130,7 @@ export class ChestEntriesNamespace extends Resource {
 
   /**
    * Adds an entry. A note is one request; a file goes through
-   * {@link createWithUpload}, because a chest never takes bytes through Rails.
+   * {@link createWithUpload}, because a chest never takes bytes through the API.
    *
    * ```ts
    * await oms.chests.entries.create({ chestId, name: "notes", content: "..." });
@@ -180,9 +180,9 @@ export class ChestEntriesNamespace extends Resource {
    * 3. the PUT goes straight to object storage, with no `Authorization`;
    * 4. `POST /chest_entries/:id/attach_blob` binds the bytes to the entry.
    *
-   * Step 2 may be called ONCE per entry: a second call raises an unhandled
-   * `ArgumentError` server-side and comes back as a 500, so a naive retry is
-   * worse than useless. The SDK therefore treats the whole thing as atomic -
+   * Step 2 may be called ONCE per entry: a second call comes back as a 500, so
+   * a naive retry is worse than useless. The SDK therefore treats the whole
+   * thing as atomic -
    * anything that fails after step 1 destroys the half-built entry (releasing
    * the space it reserved) before rethrowing, so a retry starts clean.
    *
@@ -239,28 +239,25 @@ export class ChestEntriesNamespace extends Resource {
   /**
    * `GET /chest_entries/:id/data` - the entry's bytes.
    *
-   * SENT WITH NO CREDENTIAL, deliberately. `ChestEntriesController` lists
-   * `data` in `allow_unauthenticated_access`, and the action itself is three
-   * lines: find the entry by id, check that something is attached, redirect.
-   * It never looks at the chest name, the chest token, or who is asking. The
-   * ENTRY ID IS THE WHOLE CAPABILITY - which is worth knowing for its own sake,
-   * and which also means a credential on this request could not possibly change
-   * the answer.
+   * SENT WITH NO CREDENTIAL, deliberately. The endpoint checks only that the
+   * entry exists and has bytes attached - never the chest name, the chest
+   * token, or who is asking. The ENTRY ID IS THE WHOLE CAPABILITY - which is
+   * worth knowing for its own sake, and which also means a credential on this
+   * request could not possibly change the answer.
    *
-   * That matters because sending one breaks the call in a browser. The action
-   * answers `302` to `minio.omelhorsite.pt`, and following that hop replaces the
-   * request's origin with an opaque one (Fetch standard: a cross-origin
-   * redirect of a CORS request whose origin already differs from the current
-   * URL's origin), so the store sees `Origin: null` and answers
-   * `Access-Control-Allow-Origin: *`. Wildcard plus credentials is illegal, so a
-   * client built with `sessionCookie: true` - the production web app - would
-   * have the browser reject the bytes with an opaque "Failed to fetch". Asking
-   * anonymously sidesteps it: `*` is fine for an uncredentialed request.
+   * That matters because sending one breaks the call in a browser. The
+   * endpoint answers `302` to the object store, and following that hop
+   * replaces the request's origin with an opaque one (Fetch standard: a
+   * cross-origin redirect of a CORS request whose origin already differs from
+   * the current URL's origin), so the store sees `Origin: null` and answers
+   * `Access-Control-Allow-Origin: *`. Wildcard plus credentials is illegal, so
+   * a client built with `sessionCookie: true` would have the browser reject
+   * the bytes with an opaque "Failed to fetch". Asking anonymously sidesteps
+   * it: `*` is fine for an uncredentialed request.
    *
-   * Two shapes come back and both are handled here. Against MinIO it is the
-   * `302`. Against a Disk service (dev, test) presigning raises `ArgumentError`
-   * and the controller falls back to `send_data`, so the bytes arrive inline
-   * from Rails with a `Content-Disposition`. Either way this returns the bytes.
+   * Two shapes come back and both are handled here: the `302` to the object
+   * store, or the bytes inline with a `Content-Disposition`. Either way this
+   * returns the bytes.
    *
    * Going around the transport costs the usual thing: no retry, no per-call
    * deadline, only the caller's `signal`. Use {@link downloadUrl} when the
@@ -294,10 +291,9 @@ export class ChestEntriesNamespace extends Resource {
    * new tab.
    *
    * Synchronous and credential-free, because the endpoint is: the entry id is
-   * the only thing it checks. The frontend's older helper appended a `?token=`
-   * here; this deliberately does not, because a session token in a URL that
-   * ends up in markup, in a shared link and in an access log buys precisely
-   * nothing on a route that never reads it.
+   * the only thing it checks. No `?token=` is appended, because a session
+   * token in a URL that ends up in markup, in a shared link and in an access
+   * log buys precisely nothing on a route that never reads it.
    *
    * Treat the URL as a bearer capability all the same. Anyone holding it can
    * pull the file until the chest expires, so it is exactly as shareable as the

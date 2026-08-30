@@ -40,7 +40,7 @@ export * from "./tokens";
 
 /** Who the current credential belongs to. */
 export interface WhoAmI {
-  /** `users.id`. The stable identifier; matches the OIDC `sub` claim. */
+  /** The stable user identifier; matches the OIDC `sub` claim. */
   readonly id: string;
   /** Current handle. Mutable - never key anything on it. */
   readonly handle: string;
@@ -139,7 +139,7 @@ export class AuthNamespace extends Resource {
 
   /**
    * Reads the OIDC claims of the current credential from
-   * `GET /oauth/userinfo`. `sub` is `users.id`.
+   * `GET /oauth/userinfo`. `sub` is the user's stable `id`.
    *
    * Needs the `openid` scope; without it the answer is 403. Members whose
    * value is null or empty are omitted from the response, so read defensively.

@@ -44,7 +44,7 @@ import type { FetchLike, RetryOptions } from "./types";
  * Anything accepted as a credential by {@link Oms}.
  *
  * A bare string is either kind of bearer token the API takes: a legacy opaque
- * `Session` UUID or an OAuth access token. A function is called on every
+ * session UUID or an OAuth access token. A function is called on every
  * request. A {@link TokenProvider} additionally gets a chance to refresh on a
  * 401 - see `auth/tokens.ts`.
  */
@@ -70,7 +70,7 @@ export interface OmsOptions {
    * by name.
    *
    * ```ts
-   * // in the omelhorsite web app, served from the same site as the API
+   * // on a first-party page, served from the same site as the API
    * const oms = new Oms({ sessionCookie: true });
    * ```
    */
@@ -79,13 +79,13 @@ export interface OmsOptions {
   readonly baseUrl?: string;
   /**
    * The fetch to talk through. Defaults to `globalThis.fetch`. Injecting one is
-   * how a Worker adds a cache, how a test swaps in a double, and how the CLI
+   * how a Worker adds a cache, how a test swaps in a double, and how a host
    * adds a proxy - the SDK never patches a global.
    */
   readonly fetch?: FetchLike;
   /** Headers merged into every request, below per-call headers. */
   readonly headers?: Record<string, string>;
-  /** Default deadline for one call including its retries. `0` disables it. */
+  /** Default deadline for one attempt; a retry gets a fresh one. `0` disables it. */
   readonly timeoutMs?: number;
   /** Default backoff policy, or `false` to never retry. */
   readonly retry?: RetryOptions | false;
@@ -108,10 +108,10 @@ export interface OmsOptions {
  *
  * ## Two credentials, two namespaces
  *
- * `oms.sessions` mints the opaque `Session` token the website and the mobile
- * apps use, which carries the whole account. `oms.auth` runs OAuth, whose
- * tokens are scoped and, because `enforce_oauth_scope!` denies by omission,
- * cannot reach most of the API at all. `oms.realtime` accepts only the first
+ * `oms.sessions` mints the opaque session token, which carries the whole
+ * account. `oms.auth` runs OAuth, whose tokens are scoped and, because an
+ * endpoint with no declared scope refuses every OAuth token, cannot reach most
+ * of the API at all. `oms.realtime` accepts only the first
  * kind. Picking the wrong one shows up as a `403 insufficient_scope`, or on the
  * cable as a connection that is silently anonymous.
  *
@@ -184,9 +184,9 @@ export class Oms {
   /** OAuth client registration for anyone, plus the `/admin/*` routes. */
   readonly admin: AdminNamespace;
   /**
-   * The ActionCable connection: playback handoff, jams, notifications, job
+   * The WebSocket connection: playback handoff, jams, notifications, job
    * progress. Opens nothing until {@link RealtimeNamespace.connect} is called,
-   * and wants a `Session` token rather than the client's own credential - see
+   * and wants a session token rather than the client's own credential - see
    * that method for why.
    */
   readonly realtime: RealtimeNamespace;

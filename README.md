@@ -39,7 +39,7 @@ const oms = new Oms({
   baseUrl: "http://localhost:3000",  // defaults to https://backend.omelhorsite.pt
   fetch: myFetch,                    // defaults to globalThis.fetch
   headers: { "X-Trace": id },        // merged under per-call headers
-  timeoutMs: 30_000,                 // whole call, retries included; 0 disables
+  timeoutMs: 30_000,                 // per attempt; 0 disables
   retry: { maxAttempts: 3 },         // or false to never retry
   clientName: "my-worker/1.0",       // becomes X-Oms-Client
 });
@@ -186,7 +186,7 @@ const done = await oms.tools.transcription.run(
 `run` is `create` plus `jobs.wait`. Use `create` on hosts with a wall-clock
 budget or nowhere to hold a wait: start the job, keep the id, pick it up later.
 
-Waiting resolves for both `"completed"` and `"failed"`: a failed job is an
+Waiting resolves for both `"complete"` and `"failed"`: a failed job is an
 answer, not a transport error. Check the status before reading the result.
 
 ```ts
@@ -194,8 +194,8 @@ const job = await oms.jobs.wait({ id: started.job_id!, watchToken: started.watch
 if (job.status === "failed") throw new Error(job.error ?? "the job failed");
 ```
 
-A finished tool row says `status: "complete"`; a finished row in the job table
-says `"completed"`; the downloader says `"done"`. Compare against the exported
+A finished job says `status: "complete"`, not `"completed"`, and the
+downloader spells its own terminal state `"done"`. Compare against the exported
 constants, never against a literal.
 
 Check the quota before starting something expensive:

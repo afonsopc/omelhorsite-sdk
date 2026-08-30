@@ -5,43 +5,33 @@
  *
  * ## An artist row belongs to ONE user
  *
- * There is no global artist table. `Artist` is scoped by `user_id` and every
- * route here runs inside `Artist.viewable_by(Current.user)`, so two accounts
- * that both own a Chico Buarque track own two different artist rows with two
- * different integer ids. Never cache an artist id across identities, and never
- * hand one to another user's client.
+ * There is no global artist table. Every artist is scoped to the account that
+ * owns it, so two accounts that both own a Chico Buarque track own two
+ * different artist rows with two different integer ids. Never cache an artist
+ * id across identities, and never hand one to another user's client.
  *
- * Rows are created as a side effect of importing songs (`Songs::ArtistAttacher`)
- * and by `ArtistResolver`; this namespace has no `create`. `POST /artists` is
- * not routed - `resources :artists, only: [index, show, update, destroy]`.
+ * Rows are created as a side effect of importing songs; this namespace has no
+ * `create`, and `POST /artists` is not routed.
  *
  * ## Almost everything here shares ONE 60/min bucket
  *
- * `Rack::Attack` throttles `/lyrics`, `/artists/`, `/artist_metadata/` and
- * `/music_radios/` together at **60 requests a minute** - one bucket for all
- * four families, keyed by the literal `Authorization` header (or by IP when the
- * call is anonymous). A screen that opens an artist page while a lyrics panel
- * polls is spending the same budget twice.
+ * `/lyrics*`, `/artists/*`, `/artist_metadata/*` and `/music_radios/*` share
+ * **60 requests a minute** - one bucket for all four families, keyed by the
+ * `Authorization` header (or by IP when the call is anonymous). A screen that
+ * opens an artist page while a lyrics panel polls is spending the same budget
+ * twice.
  *
- * The regular expression is `\A/(lyrics|artists/|artist_metadata/|music_radios/)`
- * and the trailing slash after `artists` is load-bearing: the path is
- * normalised before it is matched, so `GET /artists` (the roster index) does
- * NOT match and falls back to the general authenticated ceiling of 600/min.
- * `/artists/overview`, `/artists/:id`, both uploads, `PATCH` and `DELETE` all
- * DO match. The `/artist_imports*` and `/artist_syncs*` routes do not (neither
- * `artist_imports` nor `artist_syncs` is `artists/`) and are on the general
- * ceiling as well.
- *
- * Every method below states which of the two it lands in.
+ * `GET /artists` itself (the roster index) is NOT in that bucket and falls
+ * under the general authenticated ceiling of 600/min. `/artists/overview`,
+ * `/artists/:id`, both uploads, `PATCH` and `DELETE` all are. `/artist_imports*`
+ * and `/artist_syncs*` are on the general ceiling as well. Every method below
+ * states which of the two it lands in.
  *
  * ## An OAuth access token cannot reach any of this
  *
- * `Authentication#enforce_oauth_scope!` denies by default: a Doorkeeper token
- * reaches an action only when its controller declared an `oauth_scope` for it.
- * No music controller declares one, so a CLI or MCP host holding an OAuth
- * token gets `403 {"error":"insufficient_scope"}` on every route in this file,
- * whatever scopes it was granted. Use a session token (`POST /sessions`) or,
- * in the browser, the session cookie.
+ * Every route in this file answers `403 {"error":"insufficient_scope"}` to an
+ * OAuth access token, whatever scopes it was granted. Use a session token
+ * (`POST /sessions`) or, in the browser, the session cookie.
  */
 
 import { OmsError } from "../../errors";
@@ -70,9 +60,8 @@ export type ArtistId = number;
 export type ArtistImportId = number;
 
 /**
- * Page size the web roster and the mobile roster both use (FR-37: infinite
- * scroll, 60 a page). Nothing on the server requires it; it is here so the
- * three clients page identically and their caches line up.
+ * Default roster page size, 60. Nothing on the server requires it; it is here
+ * so every caller pages identically and caches line up.
  */
 export const ARTIST_ROSTER_PAGE_SIZE = 60;
 
@@ -80,11 +69,11 @@ export const ARTIST_ROSTER_PAGE_SIZE = 60;
 export const ARTIST_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
 /**
- * Content types `Artists::ImageAttacher` maps directly to a stored extension.
+ * Content types the server maps directly to a stored extension.
  *
- * A file whose type is not in this list is NOT necessarily refused: the
- * attacher falls back to the extension of the filename and only gives up when
- * that is empty too. So `application/octet-stream` + `cover.png` is accepted
+ * A file whose type is not in this list is NOT necessarily refused: the server
+ * falls back to the extension of the filename and only gives up when that is
+ * empty too. So `application/octet-stream` + `cover.png` is accepted
  * and `application/octet-stream` + `cover` is a 400.
  */
 export const ARTIST_IMAGE_CONTENT_TYPES = [
@@ -95,8 +84,7 @@ export const ARTIST_IMAGE_CONTENT_TYPES = [
 ] as const;
 
 /**
- * An artist, as `GET /artists` renders it (the blueprint's default view plus
- * two computed fields).
+ * An artist, as `GET /artists` renders it.
  *
  * ## Every image field, and which of them can be trusted
  *
@@ -111,13 +99,12 @@ export const ARTIST_IMAGE_CONTENT_TYPES = [
  *   it - it is written only by `GET /songs/artist_pictures`, which lives in the
  *   songs namespace. See {@link Artist.pictures_fetched_at} for why a fresh
  *   timestamp there is not a promise.
- * - `external_image_url` comes from Last.fm through `ArtistResolver`, and is
- *   usually null on purpose: Last.fm retired artist images and now answers with
- *   one grey-star placeholder for everybody, which the resolver filters out
- *   rather than store.
+ * - `external_image_url` comes from Last.fm, and is usually null on purpose:
+ *   Last.fm retired artist images and now answers with one grey-star
+ *   placeholder for everybody, which is filtered out rather than stored.
  * - `gallery_image_urls` (extended view only) is Wikipedia/Wikimedia.
  *
- * The resolution chain all three clients implement, in order:
+ * The resolution chain, in order:
  * `compressed_image_media_id` -> `image_media_id` -> the size-appropriate
  * `picture_*` (medium for an avatar, `picture_xl` for a hero) -> `picture` ->
  * `gallery_image_urls[0]` -> `fallback_artwork_media_id` -> `external_image_url`
@@ -125,10 +112,8 @@ export const ARTIST_IMAGE_CONTENT_TYPES = [
  *
  * ## `*_media_id` and `*_fs_node_id` are the same value, twice
  *
- * `ApplicationBlueprint.media_id_fields` emits both keys with an identical
- * value for every attachment, because the old web frontend still reads the
- * legacy `_fs_node_id` name. Read `_media_id`; the twin is scheduled to go.
- * Both docs in `oms-music/docs` document only the legacy name.
+ * Both keys carry an identical value for every attachment. Read `_media_id`;
+ * the `_fs_node_id` twin is a legacy alias scheduled to go.
  */
 export interface Artist {
   /** Integer, and unique only within one user's library. */
@@ -155,9 +140,8 @@ export interface Artist {
   /** Legacy twin of {@link Artist.image_media_id}. Same value. */
   readonly image_fs_node_id: string | null;
   /**
-   * Legacy compressed variant. Only the `artists:merge` rake helpers ever
-   * adopt one; nothing generates new ones, and an upload purges the stale
-   * companion, so on a modern row this is null.
+   * Legacy compressed variant. Nothing generates new ones, and an upload
+   * purges the stale companion, so on a modern row this is null.
    */
   readonly compressed_image_media_id: string | null;
   /** Legacy twin of {@link Artist.compressed_image_media_id}. */
@@ -189,21 +173,18 @@ export interface Artist {
    * When the Deezer picture set was last WRITTEN - which is not the same as
    * when it was last checked.
    *
-   * `ArtistPicturesFetcher` stamps this only on a successful answer (a hit, or
-   * a genuine "not on Deezer" miss). A failure - and a quota refusal is a
-   * failure that arrives as `HTTP 200` with an `{"error": ...}` body - stamps
-   * NOTHING and only sets a 30-minute in-cache guard, precisely so an
-   * over-quota sweep cannot mark a whole library as "fetched, no picture" for
-   * three days. That is the shape of the bug this behaviour exists to prevent,
-   * so do not read a stale timestamp as "Deezer has nothing for this artist".
+   * It is stamped only on a successful answer (a hit, or a genuine "not on
+   * Deezer" miss). A failure - a Deezer quota refusal included - stamps NOTHING
+   * and only pauses retries for 30 minutes, precisely so an over-quota sweep
+   * cannot mark a whole library as "fetched, no picture" for three days. So do
+   * not read a stale timestamp as "Deezer has nothing for this artist".
    */
   readonly pictures_fetched_at: Timestamp | null;
   /**
    * When Last.fm's biography was last fetched, successfully OR NOT.
    *
-   * `ArtistResolver#populate!` rescues every transport failure and then stamps
-   * all three `*_fetched_at` columns anyway, so the freshness gate stops
-   * hammering an upstream that is down. The row therefore looks populated
+   * A failed fetch still stamps all three `*_fetched_at` fields, so an
+   * upstream that is down is not hammered. The row therefore looks populated
    * while `bio_html` is still null. A null `bio_html` next to a recent
    * `bio_fetched_at` means "we tried and got nothing", not "never tried".
    */
@@ -211,25 +192,21 @@ export interface Artist {
   /** Same semantics as {@link Artist.bio_fetched_at}, for the similar list. */
   readonly similar_fetched_at: Timestamp | null;
   /**
-   * Number of `song_artists` join rows, counting every credit (primary,
-   * featured and with), not distinct songs.
+   * Number of credits (primary, featured and with), not distinct songs.
    *
-   * Computed per response, never stored. On `GET /artists` it comes from one
-   * grouped `COUNT` for the whole page; everywhere else the blueprint runs its
-   * own `COUNT(*)`. Always present.
+   * Computed per response, never stored. Always present.
    */
   readonly songs_count: number;
   /**
    * Artwork of one of this artist's own lead songs, for a card that has no
-   * picture at all. A media id, resolvable through `oms.media` (the canonical
-   * `/media/:id/data`); `/fs_nodes/:id/data` is the alias kept for the web
-   * frontend and reaches the same bytes.
+   * picture at all. A media id, resolvable through `oms.media`
+   * (`/media/:id/data`); `/fs_nodes/:id/data` is a legacy alias that reaches
+   * the same bytes.
    *
-   * NON-NULL ONLY ON `GET /artists` AND `GET /artists/:id`, where the
-   * controller precomputes the whole page with a single `DISTINCT ON` query.
-   * `PATCH` and both uploads render the blueprint standalone and answer null
-   * here even for an artist that has one - so a card redrawn from an upload
-   * response loses its fallback. Keep the value you already had.
+   * NON-NULL ONLY ON `GET /artists` AND `GET /artists/:id`. `PATCH` and both
+   * uploads answer null here even for an artist that has one - so a card
+   * redrawn from an upload response loses its fallback. Keep the value you
+   * already had.
    */
   readonly fallback_artwork_media_id: string | null;
   /** Legacy twin of {@link Artist.fallback_artwork_media_id}. */
@@ -239,29 +216,20 @@ export interface Artist {
 /** One entry of Last.fm's similar-artists list. */
 export interface ArtistSimilarEntry {
   readonly name: string;
-  /**
-   * Last.fm's similarity score, `0..1`. A NUMBER: the resolver runs `to_f`
-   * before storing it. The web frontend types the whole `similar` field as an
-   * object with an `artists` array, which is the DATABASE column's shape and
-   * not the payload's - the blueprint flattens it to this array.
-   */
+  /** Last.fm's similarity score, `0..1`. A number. */
   readonly match: number | null;
   readonly mbid: string | null;
 }
 
 /**
- * The `:extended` view: everything in {@link Artist} plus three fields.
- *
- * Blueprinter views INHERIT the base fields, so this is a superset and never a
- * subset. Returned by `GET /artists/:id`, `PATCH /artists/:id` and both upload
- * endpoints. `oms-music/docs/api-music.md` describes `:compact` and `:card` as
- * narrow subsets; they are not, for the same inheritance reason, and
- * `docs/API.md` says so correctly.
+ * The extended artist: everything in {@link Artist} plus three fields, a
+ * superset and never a subset. Returned by `GET /artists/:id`,
+ * `PATCH /artists/:id` and both upload endpoints.
  */
 export interface ArtistExtended extends Artist {
   /**
    * Last.fm biography summary. Contains HTML (and a trailing "Read more"
-   * anchor); sanitised on the `/artist_metadata` shim but NOT here, so treat it
+   * anchor); sanitised on `/artist_metadata/:name` but NOT here, so treat it
    * as untrusted markup and sanitise before injecting it.
    */
   readonly bio_html: string | null;
@@ -269,15 +237,15 @@ export interface ArtistExtended extends Artist {
    * Wikipedia/Wikimedia photos of the artist.
    *
    * Writable through {@link MusicArtistsNamespace.update}, and OVERWRITTEN
-   * without warning by the next metadata refresh: `ArtistResolver#populate!`
-   * always assigns `gallery_image_urls` from `Artists::GalleryFetcher`, so a
-   * hand-curated list survives only until the artist's gallery TTL (30 days,
-   * jittered by up to 7) expires and someone opens the artist page. There is
+   * without warning by the next metadata refresh, which always replaces it
+   * with what Wikimedia returns. A hand-curated list survives only until the
+   * artist's gallery TTL (30 days, jittered by up to 7) expires and someone
+   * opens the artist page. There is
    * no "pinned" flag. If a client offers gallery editing, it has to be
    * prepared to re-apply it.
    */
   readonly gallery_image_urls: string[];
-  /** Flattened from the stored `similar_json`. Empty array, never null. */
+  /** Empty array, never null. */
   readonly similar: ArtistSimilarEntry[];
 }
 
@@ -286,9 +254,9 @@ export interface ArtistExtended extends Artist {
  *
  * The server's allowlist for this index is exactly `id`, `name`, `slug`,
  * `canonical_name`, `created_at` and `updated_at`. Any other key inside
- * `search` / `exact_search` is a **400**, not a silently ignored filter -
- * `CrudActions#reject_unknown_filter_keys!` fails closed on purpose, because
- * the alternative (dropping the key) answers with the UNFILTERED table.
+ * `search` / `exact_search` is a **400**, not a silently ignored filter: the
+ * allowlist fails closed on purpose, because the alternative (dropping the
+ * key) would answer with the UNFILTERED list.
  */
 export const ARTIST_FILTER_COLUMNS = Object.freeze(["id", "name", "slug", "canonical_name", "created_at"] as const);
 
@@ -297,14 +265,13 @@ export interface ListArtistsParams extends ListParams<(typeof ARTIST_FILTER_COLU
    * Substring match on the display name - `search[name]`. This is the roster
    * search box.
    *
-   * `QuerySearcher#string_search` slugifies BOTH sides before comparing:
-   * lowercase, accents transliterated, every run of anything outside
-   * `[a-z0-9-]` replaced by a hyphen, then wrapped in `%`. So the query is
-   * really `slug(name) LIKE %slug(input)%`, and three consequences follow:
-   * `"Beyoncé"` finds `"Beyonce"` and the reverse; `"chico buarque"` and
-   * `"chico-buarque"` are the SAME query; and punctuation is erased on both
-   * sides, so `"P!nk"` matches `"P nk"` too. An accent this table's
-   * `TRANSLATE` map does not list survives as a hyphen, which still matches.
+   * The server slugifies BOTH sides before comparing: lowercase, accents
+   * transliterated, every run of anything outside `[a-z0-9-]` replaced by a
+   * hyphen, then a substring match. Three consequences follow: `"Beyoncé"`
+   * finds `"Beyonce"` and the reverse; `"chico buarque"` and `"chico-buarque"`
+   * are the SAME query; and punctuation is erased on both sides, so `"P!nk"`
+   * matches `"P nk"` too. An accent the transliteration does not know survives
+   * as a hyphen, which still matches.
    */
   readonly name?: string;
   /** Exact slug. Cheaper and less surprising than a `name` search. */
@@ -322,12 +289,11 @@ export interface ListArtistsParams extends ListParams<(typeof ARTIST_FILTER_COLU
    * `"column:asc"` / `"column:desc"`.
    *
    * PASS ONE. The index has no default order, so paging without it is paging
-   * an unordered relation: Postgres may hand back the same row on two pages
-   * and never hand back another. `name:asc` and `created_at:desc` are what the
-   * clients use.
+   * an unordered set: the server may hand back the same row on two pages
+   * and never hand back another. `name:asc` and `created_at:desc` are the
+   * usual choices.
    *
-   * `QueryModifier#apply_ordering` checks the column against
-   * `model.column_names` and SILENTLY IGNORES anything else, so
+   * A column the record does not have is SILENTLY IGNORED, so
    * `songs_count:desc` is not an error and is not an ordering either - that
    * field is computed per response and cannot be sorted on. Sort client-side,
    * or read {@link MusicArtistsNamespace.overview}, which ranks for you.
@@ -403,11 +369,8 @@ export interface ArtistNeglectedEntry {
 
 /**
  * The editorial header of the Artists page: five aggregate queries answered as
- * one document.
- *
- * The artists inside are rendered with the blueprint's `:card` view, which
- * inherits the base fields, so each one is a whole {@link Artist} - including
- * `fallback_artwork_media_id`, which the controller precomputes here.
+ * one document. Each artist inside is a whole {@link Artist},
+ * `fallback_artwork_media_id` included.
  */
 export interface ArtistOverview {
   readonly stats: ArtistOverviewStats;
@@ -438,15 +401,15 @@ export interface ArtistOverview {
   readonly neglected: ArtistNeglectedEntry[];
 }
 
-/** `ArtistImport::STATES`. */
+/** Every state an artist import can be in. */
 export const ARTIST_IMPORT_STATES = ["queued", "running", "complete", "failed"] as const;
 
 /** State of a bulk artist import. */
 export type ArtistImportState = (typeof ARTIST_IMPORT_STATES)[number];
 
 /**
- * Cadence the three clients poll an in-flight import at, from
- * `oms-music/docs/API.md` section 14. There is no cable channel for imports.
+ * Sensible cadence to poll an in-flight import at. Nothing pushes import
+ * progress over the realtime stream.
  */
 export const ARTIST_IMPORT_POLL_INTERVAL_MS = 1500;
 
@@ -464,10 +427,8 @@ export function isArtistImportTerminal(state: ArtistImportState | string): boole
 /**
  * One bulk import of an artist's Spotify catalogue into the library.
  *
- * The counters exist because the pre-refactor flow swallowed Spotify errors
- * inside the job and left the user watching a spinner. Read them together:
- * `processed_albums` of `total_albums` is progress, and
- * `queued + skipped + failed` is what became of the tracks.
+ * Read the counters together: `processed_albums` of `total_albums` is
+ * progress, and `queued + skipped + failed` is what became of the tracks.
  */
 export interface ArtistImport {
   readonly id: ArtistImportId;
@@ -482,7 +443,7 @@ export interface ArtistImport {
   readonly album_ids: string[];
   readonly state: ArtistImportState;
   readonly total_albums: number | null;
-  /** Null until the job has expanded the albums into tracks. */
+  /** Null until the albums have been expanded into tracks. */
   readonly total_tracks: number | null;
   readonly processed_albums: number;
   /** Tracks handed to the song-import pipeline. */
@@ -505,11 +466,7 @@ export interface ArtistImportRosterMatch {
   readonly id: ArtistId;
   readonly name: string;
   readonly slug: string;
-  /**
-   * A real URL (`picture_medium`, then `external_image_url`), or null. An
-   * earlier version put a raw storage node id in this field, which no client
-   * could load as an image.
-   */
+  /** A real URL (`picture_medium`, then `external_image_url`), or null. */
   readonly image_url: string | null;
 }
 
@@ -584,9 +541,9 @@ export interface ListArtistImportsParams {
  *
  * ## Every route here needs a LINKED SPOTIFY IDENTITY, not a flag
  *
- * The gate is `Current.user.identities.find_by(provider: "spotify")`. Without
- * one the answer is `400 "Connect Spotify first."`, and when the stored refresh
- * token no longer works it is `400 "Spotify connection needs to be relinked."`
+ * Without one the answer is `400 "Connect Spotify first."`, and when the
+ * stored refresh token no longer works it is
+ * `400 "Spotify connection needs to be relinked."`
  * Both are plain JSON strings, both arrive as an {@link OmsApiError} with
  * status 400, and the only way to tell them apart is the message - so match on
  * it if the UI needs to distinguish "connect" from "reconnect".
@@ -595,11 +552,10 @@ export interface ListArtistImportsParams {
  *
  * ## These calls are SLOW and they are on the general ceiling
  *
- * `/artist_imports*` does not match the 60/min proxy bucket, so it sits under
- * the general authenticated ceiling (600/min). What bounds it in practice is
- * Spotify: {@link search} and {@link albums} both call out synchronously on the
- * request thread, and {@link albums} pages through an entire discography. The
- * app allows 60 seconds for each, and so does this namespace.
+ * `/artist_imports*` sits under the general authenticated ceiling (600/min).
+ * What bounds it in practice is Spotify: {@link search} and {@link albums}
+ * both call out synchronously, and {@link albums} pages through an entire
+ * discography. This namespace allows 60 seconds for each.
  */
 export class MusicArtistImportsNamespace extends Resource {
   /**
@@ -635,12 +591,9 @@ export class MusicArtistImportsNamespace extends Resource {
    *
    * The server wraps the array in `{ items: [...] }`; this returns the array.
    *
-   * `spotifyArtistId` is validated here rather than sent empty, because the
-   * controller uses `params.require` and a missing key raises
-   * `ActionController::ParameterMissing`. That escapes the API's own error
-   * convention - it is a framework 400 with a framework body rather than a
-   * bare JSON string - and it trips `ErrorReporting`, which pages the owner on
-   * Discord for what is really a client bug.
+   * `spotifyArtistId` is validated here rather than sent empty: a missing key
+   * answers a generic 400 whose body is not one of the API's bare JSON
+   * strings.
    *
    * @throws {OmsError} `invalid_request` when `spotifyArtistId` is blank.
    * @throws {OmsApiError} 400 `"Connect Spotify first."` with no linked
@@ -662,21 +615,21 @@ export class MusicArtistImportsNamespace extends Resource {
   /**
    * `POST /artist_imports` - queues every track of the chosen albums.
    *
-   * Answers `201` immediately with a `queued` record; the work happens in
-   * `ArtistImportJob`. Watch it with {@link list} at
+   * Answers `201` immediately with a `queued` record; the work happens in the
+   * background. Watch it with {@link list} at
    * {@link ARTIST_IMPORT_POLL_INTERVAL_MS} - THERE IS NO `GET
    * /artist_imports/:id`, so polling means re-reading the recent list and
    * finding your id in it.
    *
    * Not retried, and this one matters more than most: a replay does not
-   * deduplicate, it creates a second `ArtistImport` row and runs the whole
-   * catalogue through the pipeline again. Pass `retry: {}` only if you are
+   * deduplicate, it creates a second import and runs the whole catalogue
+   * through the pipeline again. Pass `retry: {}` only if you are
    * prepared to explain the duplicate.
    *
    * @throws {OmsError} `invalid_request` when `spotifyArtistId` is blank or
-   *   `albumIds` is empty. The first would raise `ParameterMissing` on the
-   *   server (see {@link albums}); the second is a clean
-   *   `400 "album_ids required"`, checked here only so the round trip is saved.
+   *   `albumIds` is empty. The first would answer a generic 400 (see
+   *   {@link albums}); the second is a clean `400 "album_ids required"`,
+   *   checked here only so the round trip is saved.
    * @throws {OmsApiError} 400 for the two Spotify-identity messages.
    */
   async create(input: CreateArtistImportInput, options: RequestOptions = {}): Promise<ArtistImport> {
@@ -707,7 +660,7 @@ export class MusicArtistImportsNamespace extends Resource {
    *
    * This is also the poll: filter for a `state` that
    * {@link isArtistImportTerminal} rejects to know whether anything is still
-   * running. Nothing pushes import progress over the cable.
+   * running. Nothing pushes import progress over the realtime stream.
    */
   async list(params: ListArtistImportsParams = {}, options: RequestOptions = {}): Promise<ArtistImport[]> {
     const body = await this.http.get<{ items: ArtistImport[] }>("/artist_imports", {
@@ -722,7 +675,7 @@ export class MusicArtistImportsNamespace extends Resource {
 /**
  * Primary key of an artist sync. An integer, like {@link ArtistId} and
  * {@link ArtistImportId}, and interchangeable with NEITHER: a sync is keyed on
- * a SPOTIFY artist id and never references a local `Artist` row at all. Three
+ * a SPOTIFY artist id and never references a local artist at all. Three
  * integer id spaces meet in this file and only the field name tells them apart.
  */
 export type ArtistSyncId = number;
@@ -730,18 +683,15 @@ export type ArtistSyncId = number;
 /**
  * A followed artist, as `/artist_syncs` renders it.
  *
- * ## This payload is hand-built, so the base fields you expect are MISSING
+ * ## The base fields you expect are MISSING
  *
- * There is no `ArtistSyncBlueprint`. `ArtistSyncsController#serialize` writes
- * the hash literally, which is why this is the one music record with no
- * `created_at` and no `updated_at` - the convention that every payload carries
- * them holds everywhere a Blueprinter view is involved and stops here. Do not
- * sort a list of these by `created_at` client-side; the server already returns
- * them newest-first and that ordering is the only one available.
+ * This is the one music record with no `created_at` and no `updated_at`. Do
+ * not sort a list of these by `created_at` client-side; the server already
+ * returns them newest-first and that ordering is the only one available.
  *
- * `known_album_ids` is likewise not exposed. The row stores the full array of
- * Spotify album ids (a `jsonb` column) and only its SIZE crosses the wire, so
- * the SDK cannot tell you WHICH albums are already known - only how many.
+ * The known album ids themselves are not exposed either: only their COUNT
+ * crosses the wire, so the SDK cannot tell you WHICH albums are already known
+ * - only how many.
  */
 export interface ArtistSync {
   readonly id: ArtistSyncId;
@@ -757,12 +707,11 @@ export interface ArtistSync {
    */
   readonly artist_name: string | null;
   /**
-   * Whether `ArtistDailySyncDispatcherJob` will pick this row up (its scope is
-   * `where(enabled: true)`).
+   * Whether the daily check will pick this row up.
    *
    * Always `true` on anything this SDK can produce: `create` sets it, and there
    * is no update route to turn it off. A `false` here can only have been
-   * written by the console, and the only way a client can stop a sync is
+   * written by an administrator, and the only way a client can stop a sync is
    * {@link MusicArtistSyncsNamespace.delete}. Render it, do not offer a toggle.
    */
   readonly enabled: boolean;
@@ -770,21 +719,20 @@ export interface ArtistSync {
    * When the daily check last ran, ISO-8601, or `null` in the vanishingly
    * short window before `create` saves the row.
    *
-   * A TOUCH, not a success marker. `ArtistSyncCheckJob` writes it on the happy
-   * path AND in both of its rescue arms (dead refresh token, Spotify upstream
-   * error), so a fresh timestamp proves the job ran, never that Spotify
-   * answered. There is no field that records the last failure - it is a
-   * `Rails.logger.warn` and nothing else - so a UI cannot honestly say "last
+   * A TOUCH, not a success marker. It is written whether the check succeeded
+   * or failed (dead refresh token, Spotify upstream error), so a fresh
+   * timestamp proves the check ran, never that Spotify answered. There is no
+   * field that records the last failure, so a UI cannot honestly say "last
    * checked, all good".
    */
   readonly last_checked_at: Timestamp | null;
   /**
-   * How many Spotify album ids the snapshot holds. `Array(known_album_ids).size`.
+   * How many Spotify album ids the snapshot holds.
    *
    * This is the baseline the daily diff runs against, not a count of songs
-   * imported. It GROWS and never shrinks, because the job stores the union
-   * (`known | current_ids`) precisely so an album Spotify hides and later shows
-   * again cannot re-import as new.
+   * imported. It GROWS and never shrinks, because each check stores the union
+   * of what it knew and what it saw, precisely so an album Spotify hides and
+   * later shows again cannot re-import as new.
    */
   readonly known_album_count: number;
 }
@@ -819,7 +767,7 @@ export interface CreateArtistSyncInput {
  * | --- | --- | --- |
  * | what it does | imports the albums you CHOSE, now | watches for albums released LATER |
  * | back catalogue | yes, that is the point | never |
- * | when work happens | immediately, `ArtistImportJob` | daily, 05:00 server time |
+ * | when work happens | immediately | daily, 05:00 server time |
  * | you pick albums | yes, `albumIds` is required | no, there is no album argument |
  * | repeating the call | duplicates the whole import | idempotent, one row per artist |
  *
@@ -831,40 +779,35 @@ export interface CreateArtistSyncInput {
  *
  * ## What the sync produces is an ArtistImport, so watch it there
  *
- * `ArtistDailySyncDispatcherJob` runs at 05:00, walks every enabled row and
- * schedules each check at a random offset inside a 30-minute window (the same
- * anti-stampede discipline as the Spotify sync). Each `ArtistSyncCheckJob`
- * re-walks the artist's catalogue, diffs it against the snapshot and, when
- * something is new, creates an ordinary `ArtistImport` holding ONLY the new
- * album ids - `last_message` starts as `"Novo lançamento detectado pelo sync
- * diário…"`, which is the marker that tells an automatic import from one a
- * person asked for.
+ * The daily check runs at 05:00 server time, at a random offset inside a
+ * 30-minute window. It re-walks the artist's catalogue, diffs it against the
+ * snapshot and, when something is new, creates an ordinary
+ * {@link ArtistImport} holding ONLY the new album ids - `last_message` starts
+ * as `"Novo lançamento detectado pelo sync diário…"`, which is the marker that
+ * tells an automatic import from one a person asked for.
  *
  * So there is no progress on this namespace and nothing to poll here. Progress
  * lives in {@link MusicArtistImportsNamespace.list}, mixed in with manual
- * imports. Nothing pushes either over the cable.
+ * imports. Nothing pushes either over the realtime stream.
  *
  * ## A LINKED SPOTIFY IDENTITY is required to write, not to read
  *
- * {@link create} is gated on `Current.user.identities.find_by(provider:
- * "spotify")` and answers `400 "Connect Spotify first."` without one. {@link
+ * {@link create} answers `400 "Connect Spotify first."` without one. {@link
  * list} and {@link delete} are not gated, which matters after an unlink: the
- * rows survive, they still list, they can still be deleted, and the daily job
- * quietly skips them (`return unless identity`) without recording that it did.
+ * rows survive, they still list, they can still be deleted, and the daily
+ * check quietly skips them without recording that it did.
  *
  * ## Ceilings and cost
  *
  * Every route here is on the GENERAL authenticated ceiling of 600/min.
- * `/artist_syncs` does not match the 60/min `\A/(lyrics|artists/|...)` bucket -
- * the underscore breaks the `artists/` prefix - and it is not in
- * `EXPENSIVE_TOOL_PATHS` either, even though {@link create} is by far the
- * slowest call in this file.
+ * `/artist_syncs` is not in the 60/min `/artists/*` bucket and has no budget
+ * of its own, even though {@link create} is by far the slowest call in this
+ * file.
  *
  * ## An OAuth access token cannot reach any of this
  *
- * `ArtistSyncsController` declares no `oauth_scope`, and the gate denies by
- * default, so a Doorkeeper token gets `403 {"error":"insufficient_scope"}`
- * here as it does everywhere else in `music`. Session token or cookie only.
+ * An OAuth access token gets `403 {"error":"insufficient_scope"}` here as it
+ * does everywhere else in `music`. Session token or cookie only.
  */
 export class MusicArtistSyncsNamespace extends Resource {
   /**
@@ -880,8 +823,8 @@ export class MusicArtistSyncsNamespace extends Resource {
    * `/artist_imports` uses and the opposite of the bare arrays the rest of the
    * API returns - and is unwrapped here.
    *
-   * Safe to retry, and scoped to the caller: `ArtistSync.viewable_by` is
-   * `where(user:)`, so there is no way to read anyone else's follows.
+   * Safe to retry, and scoped to the caller: there is no way to read anyone
+   * else's follows.
    */
   async list(options: RequestOptions = {}): Promise<ArtistSync[]> {
     const body = await this.http.get<{ items: ArtistSync[] }>("/artist_syncs", options);
@@ -898,35 +841,31 @@ export class MusicArtistSyncsNamespace extends Resource {
    *
    * ## Idempotent, unlike its neighbour
    *
-   * `find_or_initialize_by(user:, spotify_artist_id:)` behind a unique index,
-   * so calling this twice for one artist updates a single row instead of
-   * creating a second - it re-enables the sync, overwrites the name if one was
-   * sent, and touches `last_checked_at`. It does NOT re-snapshot: the Spotify
-   * walk is guarded by `if sync.known_album_ids.blank?`, so a second create is
-   * cheap and, more importantly, cannot silently widen the baseline and swallow
-   * releases that arrived in between.
+   * One row per artist per account, so calling this twice for one artist
+   * updates a single row instead of creating a second - it re-enables the
+   * sync, overwrites the name if one was sent, and touches `last_checked_at`.
+   * It does NOT re-snapshot when a snapshot already exists, so a second create
+   * is cheap and, more importantly, cannot silently widen the baseline and
+   * swallow releases that arrived in between.
    *
    * That is why this one opts INTO retries (`retry: {}`) while
    * {@link MusicArtistImportsNamespace.create} refuses them: a replayed follow
    * converges on the same row, a replayed import runs a whole discography
    * twice. Pass `retry: false` to opt back out.
    *
-   * ## It is slow, because it walks the discography on the request thread
+   * ## It is slow, because it walks the discography before answering
    *
-   * `SpotifyClient#each_artist_album` pages through every album before the
-   * response is written, exactly like
+   * Every album is paged through before the response is written, exactly like
    * {@link MusicArtistImportsNamespace.albums}. Sixty seconds by default. The
    * one case that is instant is a re-create over a row that already has a
    * snapshot.
    *
    * An artist with a genuinely EMPTY catalogue never stops paying that cost:
-   * `[]` is `blank?`, so every create for it walks Spotify again.
+   * an empty snapshot counts as no snapshot, so every create for it walks
+   * Spotify again.
    *
    * @throws {OmsError} `invalid_request` when `spotifyArtistId` is blank. The
-   *   server would answer `400` for it too - `params.require` raises
-   *   `ParameterMissing` and this controller, unlike the import one, RESCUES it
-   *   into a normal bad request, so it does not page the owner - but the round
-   *   trip buys nothing.
+   *   server would answer `400` for it too, but the round trip buys nothing.
    * @throws {OmsApiError} 400 `"Connect Spotify first."` with no linked
    *   identity, `"Spotify connection needs to be relinked."` on a dead refresh
    *   token, or `"Spotify upstream error: ..."` (truncated to 200 characters).
@@ -965,8 +904,8 @@ export class MusicArtistSyncsNamespace extends Resource {
    * would find nothing and report `404` for a row it had just removed.
    *
    * @throws {OmsApiError} 404 `"Artist sync not found"` for an id that is not
-   *   yours or no longer exists. A non-numeric id lands here too, cast to `0`
-   *   by the column type rather than rejected.
+   *   yours or no longer exists. A non-numeric id lands here too rather than
+   *   being rejected.
    */
   async delete(id: ArtistSyncId, options: RequestOptions = {}): Promise<void> {
     await this.http.delete<void>(`/artist_syncs/${id}`, options);
@@ -989,14 +928,12 @@ export class MusicArtistsNamespace extends Resource {
   /**
    * `GET /artists` - the roster.
    *
-   * On the GENERAL ceiling (600/min), not the 60/min artist bucket: the
-   * throttle's pattern is `/artists/` with a trailing slash and the index path
-   * is normalised to `/artists`. It is the only route in this namespace with
-   * that luxury.
+   * On the GENERAL ceiling (600/min), not the 60/min artist bucket. It is the
+   * only route in this namespace with that luxury.
    *
-   * Rows are the blueprint's default view: no `bio_html`, no
-   * `gallery_image_urls`, no `similar`. `songs_count` and
-   * `fallback_artwork_media_id` ARE filled in here.
+   * Rows are the base {@link Artist}: no `bio_html`, no `gallery_image_urls`,
+   * no `similar`. `songs_count` and `fallback_artwork_media_id` ARE filled in
+   * here.
    *
    * ALWAYS PASS `order`. See {@link ListArtistsParams.order} - the relation
    * has no order of its own, and paging an unordered relation loses rows.
@@ -1029,17 +966,16 @@ export class MusicArtistsNamespace extends Resource {
    * Three lookups in order: a purely numeric segment is an id, otherwise a
    * slug, otherwise a canonical name. So `get(42)`, `get("chico-buarque")` and
    * `get("Chico Buarque")` all work, and an artist whose slug is all digits
-   * would be unreachable by slug - a case the backend does not handle and
+   * would be unreachable by slug - a case the server does not handle and
    * nothing in practice produces.
    *
    * ## This call can be slow the FIRST time, and it is not the network
    *
-   * The controller runs `ArtistResolver.refresh_if_stale`, which is
-   * stale-while-revalidate with one exception. A row that has never been
-   * populated is filled in INLINE, on the request thread: a MusicBrainz search,
-   * two Last.fm calls and a Wikimedia gallery fetch before the response is
-   * written. A row that merely went stale is served immediately and refreshed
-   * by a background job, deduplicated to one job per artist per ten minutes.
+   * Metadata is refreshed stale-while-revalidate, with one exception. A row
+   * that has never been populated is filled in INLINE, before the response: a
+   * MusicBrainz search, two Last.fm calls and a Wikimedia gallery fetch. A row
+   * that merely went stale is served immediately and refreshed in the
+   * background, at most once per artist per ten minutes.
    *
    * So budget a generous `timeoutMs` for a cold artist, and do not read a
    * slow first load as a broken server. What you must NOT do is retry it fast:
@@ -1047,7 +983,7 @@ export class MusicArtistsNamespace extends Resource {
    *
    * ## What null metadata means
    *
-   * If every external call fails, the resolver still stamps `bio_fetched_at`,
+   * If every external call fails, the server still stamps `bio_fetched_at`,
    * `similar_fetched_at` and the gallery timestamp, so the upstream is not
    * hammered on every page view. The response is a normal `200` with
    * `bio_html: null` and `similar: []`, and it will stay that way until the TTL
@@ -1070,8 +1006,8 @@ export class MusicArtistsNamespace extends Resource {
   /**
    * `GET /artists/overview` - the whole Artists page header in one request.
    *
-   * **Cached server-side for one hour, per user**, under
-   * `artists_overview:v2:<user id>`. Two consequences worth designing around:
+   * **Cached server-side for one hour, per user.** Two consequences worth
+   * designing around:
    * polling it is pointless, and an artist you just renamed or gave a new
    * picture keeps its old card here for up to an hour while
    * {@link MusicArtistsNamespace.get} already shows the new one. A client that
@@ -1089,12 +1025,10 @@ export class MusicArtistsNamespace extends Resource {
    *
    * ## The body is FLAT
    *
-   * `{ name, gallery_image_urls }` at the top level. The web frontend sends
-   * `{ artist: { ... } }`, which `params.permit(:name, gallery_image_urls: [])`
-   * permits nothing out of: the update then assigns an empty hash, saves
-   * successfully and answers `200` with the record UNCHANGED. A nested body is
-   * not an error, it is a silent no-op, and it is the reason this method takes
-   * the fields rather than a body.
+   * `{ name, gallery_image_urls }` at the top level. A body nested under an
+   * `artist` key is not an error, it is a silent no-op: the server answers
+   * `200` with the record UNCHANGED. That is the reason this method takes the
+   * fields rather than a body.
    *
    * Fields outside those two are dropped in silence as well (the fail-closed
    * 400 applies to filter buckets, not to update params), so read the returned
@@ -1102,8 +1036,8 @@ export class MusicArtistsNamespace extends Resource {
    *
    * ## Addressed by NUMERIC ID ONLY
    *
-   * Unlike {@link get}, this goes through the generic CRUD lookup
-   * (`find_by(id:)`), so a slug 404s - and with a different message,
+   * Unlike {@link get}, this is addressed by id only, so a slug 404s - and
+   * with a different message,
    * `"Resource not found"` rather than `"Artist not found"`. Resolve the slug
    * with {@link get} first.
    *
@@ -1127,8 +1061,8 @@ export class MusicArtistsNamespace extends Resource {
    *
    * ## A refusal arrives as 401, not 400
    *
-   * `Artist#destroyable_by?` is `owner && song_artists.empty?`, and the CRUD
-   * action turns a false there into
+   * An artist can be destroyed only by its owner and only when it has no
+   * credits left; anything else is
    * `401 "You are not authorized to destroy this resource"`. So "this artist
    * still has songs" and "this artist is not yours" are the SAME response, and
    * the SDK surfaces both as an {@link OmsAuthError}.
@@ -1179,8 +1113,8 @@ export class MusicArtistsNamespace extends Resource {
   /**
    * `POST /artists/:id/upload_banner` - multipart, field name **`banner`**.
    *
-   * The field is `banner`, NOT `image`. The web frontend sends `image` to this
-   * route and gets `400 "banner required"` for it; do not copy that.
+   * The field is `banner`, NOT `image`; sending `image` here answers
+   * `400 "banner required"`.
    *
    * ## Shared rules for both uploads
    *
@@ -1200,13 +1134,13 @@ export class MusicArtistsNamespace extends Resource {
    * - Uploading purges the legacy `compressed_*` companion, because nothing
    *   regenerates it for artists and a leftover copy would keep rendering the
    *   OLD picture. Expect `compressed_banner_media_id` to be null afterwards.
-   * - The response is the `:extended` view rendered STANDALONE, so
-   *   `fallback_artwork_media_id` comes back null even for an artist that has
-   *   one. Merge the response into what you already had; do not replace it.
+   * - The response is an {@link ArtistExtended} whose
+   *   `fallback_artwork_media_id` is null even for an artist that has one.
+   *   Merge the response into what you already had; do not replace it.
    * - Addressed like {@link get}, not like {@link update}: id, slug or
    *   canonical name all resolve, and the 404 message is `"Artist not found"`.
    *
-   * ## The three clients
+   * ## The three runtimes
    *
    * React Native passes the picked `{ uri, name, type }` straight through; the
    * transport appends it verbatim, which is the only thing that works there.

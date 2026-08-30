@@ -1,15 +1,14 @@
 /**
  * Background removal: cuts the subject out of an image.
  *
- * `POST /background_removals` enqueues a proxy job and answers immediately with
- * a row plus a `job_id` and, for an anonymous caller, a `watch_token`. Poll
+ * `POST /background_removals` enqueues a job and answers immediately with a
+ * row plus a `job_id` and, for an anonymous caller, a `watch_token`. Poll
  * through `oms.jobs` with that handle, or use {@link BackgroundRemovalNamespace.run}.
  *
- * Backend limits: 15 MiB, and an image bomb (absurd pixel count for its byte
- * size) is rejected with a 400 before any work starts.
+ * Limits: 15 MiB, and an image bomb (absurd pixel count for its byte size) is
+ * rejected with a 400 before any work starts.
  *
- * This tool has no daily quota - it is one of the two that the `Quotas`
- * catalogue does not meter - so there is no `quota()` here to call first.
+ * This tool has no daily quota, so there is no `quota()` here to call first.
  */
 
 import { Resource } from "../../http";
@@ -30,12 +29,12 @@ import {
  * A background removal run.
  *
  * Both routes that answer with one - `POST /background_removals` and
- * `GET /background_removals/:id` - render the `:extended` view, so `result_url`
- * is always PRESENT and simply `null` until the run completes.
+ * `GET /background_removals/:id` - answer the same shape, so `result_url` is
+ * always PRESENT and simply `null` until the run completes.
  *
  * `progress_percent`, inherited from {@link ToolRecord}, is never sent for this
- * tool: `BackgroundRemovalBlueprint` has no such field. Progress lives on the
- * {@link Job} row that {@link BackgroundRemovalCreated.job_id} names.
+ * tool. Progress lives on the {@link Job} row that
+ * {@link BackgroundRemovalCreated.job_id} names.
  */
 export interface BackgroundRemoval extends ToolRecord {
   /**
@@ -52,7 +51,7 @@ export type BackgroundRemovalCreated = BackgroundRemoval & ToolJobHandle;
 
 /** Arguments for starting a run. */
 export interface CreateBackgroundRemovalInput extends ToolCaptcha {
-  /** The image. Backend cap: 15 MiB. */
+  /** The image. Cap: 15 MiB. */
   readonly file: FileInput;
 }
 
@@ -72,8 +71,7 @@ export class BackgroundRemovalNamespace extends Resource {
    *
    * NOT retried by default, unlike most of the SDK. The transport's policy
    * replays a `POST` that died with a 502, and here that would re-upload the
-   * image and start a second run on a sidecar that serialises them. Pass
-   * `retry: {}` to opt back in.
+   * image and start a second run. Pass `retry: {}` to opt back in.
    *
    * @throws {OmsApiError} 400 when the image is too large or looks like a bomb.
    * @throws {OmsAuthError} 401 when anonymous and the captcha is missing or bad.

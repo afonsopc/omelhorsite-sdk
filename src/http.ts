@@ -8,11 +8,10 @@
  *
  * ## Three runtimes, and where they stop agreeing
  *
- * The same transport runs in a browser (the Next.js frontend), in React Native
- * (the Expo app) and in Bun (the CLI and the MCP server). They agree on
- * `fetch`, `AbortController`, `Headers`, `FormData` and `setTimeout`. They do
- * NOT agree on three things, each of which has a named capability check here
- * rather than a `try` and a shrug:
+ * The same transport runs in a browser, in React Native and in Bun or a Worker
+ * isolate. They agree on `fetch`, `AbortController`, `Headers`, `FormData` and
+ * `setTimeout`. They do NOT agree on three things, each of which has a named
+ * capability check here rather than a `try` and a shrug:
  *
  * | capability                        | browser | React Native | Worker / Bun |
  * | --------------------------------- | ------- | ------------ | ------------ |
@@ -58,7 +57,7 @@ export const DEFAULT_BASE_URL = "https://backend.omelhorsite.pt";
  *
  * Answered by probing the globals, never by sniffing a platform name, and
  * recomputed on every call so a polyfill installed after import is seen. See
- * the table in the module note for how the three clients score.
+ * the table in the module note for how the three runtimes score.
  */
 export interface TransportCapabilities {
   /** `fetch` hands back a readable body that can be consumed as it arrives. */
@@ -85,9 +84,7 @@ export function transportCapabilities(): TransportCapabilities {
  * UI, and it has a hard "no" on React Native. RN's `fetch` is its
  * `XMLHttpRequest` with a whatwg-fetch shim over it: the whole body is
  * accumulated by the native layer and handed over at the end, `response.body`
- * is `undefined`, and there is no `ReadableStream` in the runtime at all -
- * confirmed by grep over `oms-music/src`, which mentions neither
- * `ReadableStream` nor `getReader` anywhere.
+ * is `undefined`, and there is no `ReadableStream` in the runtime at all.
  *
  * That is not a gap to polyfill. Nothing that runs in JS can make the native
  * networking layer emit partial bodies, and the shims that claim to (RN's
@@ -113,10 +110,9 @@ export function transportCapabilities(): TransportCapabilities {
  * is to call it and use this only to decide what the UI PROMISES: a typing
  * indicator that never types is worse than a spinner that admits it is waiting.
  *
- * The consumer this was designed against is the frontend's `BookChatService`,
- * which reads an SSE-shaped body (`data: {"delta": "..."}` lines) off
- * `POST /books/:id/chat`. Framing the lines is the domain's job; this and
- * `streamText` only promise decoded text in order.
+ * The typical consumer reads an SSE-shaped body (`data: {"delta": "..."}`
+ * lines) off `POST /books/:id/chat`. Framing the lines is the caller's job;
+ * this and `streamText` only promise decoded text in order.
  *
  * The three probes are all needed. `ReadableStream` existing does not mean
  * `fetch` produces one (a polyfilled global over RN's fetch is exactly that
@@ -137,7 +133,7 @@ export function supportsResponseStreaming(): boolean {
 
 /**
  * Whether `XMLHttpRequest` is available, which is the only route to byte-level
- * UPLOAD progress in any of the three clients.
+ * UPLOAD progress on any runtime.
  *
  * True in a browser and in React Native (RN's networking is XHR underneath and
  * `xhr.upload.onprogress` fires there); false in a Worker-class isolate and in
@@ -269,7 +265,7 @@ export type FormFieldValue = string | number | boolean | FileInput | NativeFile 
 
 /**
  * Fields of a multipart form. An array value is appended once per entry with a
- * `[]` suffix, which is how Rails reads a list (`clips[]`).
+ * `[]` suffix (`clips[]`), which is how the API reads a list.
  */
 export type FormFields = Record<string, FormFieldValue | FormFieldValue[]>;
 
@@ -300,12 +296,11 @@ export interface GetOptions extends RequestOptions {
  * it never saw, so replaying it is how one `create` call becomes two records.
  * Safe methods carry no such risk, which is the whole reason the split exists.
  *
- * `429` is the exception, and it is safe on every method because of how this
- * particular backend produces one. It comes either from `Rack::Attack`, which
- * answers from middleware before the router is reached, or from a
- * `too_many_requests!` guard that every controller places BEFORE the write it
- * protects. A 429 is therefore proof the request was refused rather than
- * performed, and waiting out `Retry-After` and trying again is exactly right.
+ * `429` is the exception, and it is safe on every method because this API only
+ * ever answers one BEFORE performing the request: a rate-limited request is
+ * refused, never carried out. A 429 is therefore proof the request was refused
+ * rather than performed, and waiting out `Retry-After` and trying again is
+ * exactly right.
  *
  * ## Opting a mutator back in
  *
@@ -324,45 +319,18 @@ export interface GetOptions extends RequestOptions {
  * notepad) under a fresh random identifier on each attempt.
  *
  * This is narrower than the SDK's 0.2.0 behaviour, which retried 5xx on every
- * verb. Nothing in `resources/` relied on that: every call site that mentions
- * retry is turning it OFF.
+ * verb.
  *
- * ## Why this and not the mobile app's rule
+ * ## Rate limits and wall clock
  *
- * `oms-music/src/api/retryPolicy.ts` states the rule the app arrived at after
- * the empty-Home bug: **retry for TIME, never for a RESPONSE**. A transport
- * failure (a `fetch` that throws, DNS, the iOS radio still waking) is time and
- * is worth asking again; a `4xx` is an answer and asking again does not change
- * it; a `5xx` gets one extra go for a deploy or a blinking proxy; `429` gets
- * none. Two attempts, `error.status >= 500` as the whole predicate.
- *
- * That rule is right for what it governs and wrong to copy here, for one
- * reason: it sits under react-query, where every retried operation is a QUERY.
- * "Repeat any transport error" is safe when the thing being repeated is a read.
- * This SDK carries the writes too, and the app's own mutations do NOT go
- * through that policy. Applying it verbatim would replay a `POST /songs` whose
- * answer was lost on a lift ride and mint the record twice, which is precisely
- * the failure the method split above exists to prevent. So the SDK keeps the
- * axis the app does not have to think about (the METHOD) and agrees with it on
- * the axis it does: a `4xx` is never retried anywhere.
- *
- * On `429` the two genuinely disagree, and the disagreement is deliberate on
- * both sides. The app declines because its ceiling-aware screens would rather
- * show "slow down" at once than sit on a hidden `Retry-After` sleep, and
- * because react-query re-throws a parked error before the network is even
- * consulted. The SDK retries because it also serves the CLI and the MCP server,
- * where the right move on a rate limit is to wait the header out and continue,
- * and because this backend's `429` provably precedes the write (Rack::Attack in
- * middleware, `too_many_requests!` ahead of every guarded action). A mobile
- * host that wants the app's behaviour asks for it per call - `retry: false` -
- * or, at the client, gets the closest match with `new Oms({ retry: { maxAttempts: 2 } })`:
- * one extra attempt, safe methods only, exactly the app's shape.
- *
- * One consequence to design around rather than discover: a retried `429` obeys
- * `Retry-After`, this API sets it from a one-minute window, and `timeoutMs`
- * bounds ONE attempt rather than the call. A rate-limited call can therefore
- * take minutes of wall clock. Anything with a user watching it should pass a
- * `signal` it can abort, or turn retrying off.
+ * A retried `429` obeys `Retry-After`, this API sets it from a one-minute
+ * window, and `timeoutMs` bounds ONE attempt rather than the call. A
+ * rate-limited call can therefore take minutes of wall clock. A UI with a
+ * person watching it may rather show "slow down" at once than sit on a hidden
+ * sleep: pass a `signal` it can abort, turn retrying off per call with
+ * `retry: false`, or cap it at the client with
+ * `new Oms({ retry: { maxAttempts: 2 } })` - one extra attempt, safe methods
+ * only.
  */
 export class ApiClient {
   /** API root with no trailing slash. */
@@ -431,7 +399,7 @@ export class ApiClient {
 
   /**
    * `POST` a `multipart/form-data` body, parsed as JSON. Use this for every
-   * endpoint that takes an upload through Rails (the tools). Storage uploads
+   * endpoint that takes a multipart upload (the tools). Storage uploads
    * do NOT go through here - they are presigned and go straight to the object
    * store; see `resources/storage/upload.ts`.
    *
@@ -453,7 +421,7 @@ export class ApiClient {
    *
    * `response.body` is NOT a promise this method can make: React Native has no
    * `ReadableStream` and leaves it undefined, so any code reaching for
-   * `.body.getReader()` here works in the browser and the CLI and throws on a
+   * `.body.getReader()` here works in a browser and in Bun and throws on a
    * phone. Test with {@link supportsResponseStreaming} first, or use
    * {@link ApiClient.streamText}, which contains that fork already.
    */
@@ -472,7 +440,7 @@ export class ApiClient {
    * This is the primitive a streaming endpoint is built on. It promises exactly
    * two things - decoded text, in order, with nothing lost - and deliberately
    * promises nothing about chunk boundaries, because they are not the same on
-   * the three clients:
+   * the three runtimes:
    *
    * - browser and Bun: one yield per network chunk, as it lands;
    * - React Native: ONE yield, containing everything, after the server has
@@ -483,20 +451,18 @@ export class ApiClient {
    * So a caller must not assume a chunk is a frame, a line, or a whole
    * anything: a `data:` line can arrive split across two chunks, and on RN a
    * hundred of them arrive as one string. Buffer, then split on your own
-   * delimiter. `BookChatService` in the frontend is the reference reader (SSE
-   * `data:` lines carrying `{ delta, done, error }`) and shows the shape of it;
-   * framing belongs to the domain module, not here.
+   * delimiter. The book chat endpoint, for instance, answers SSE `data:` lines
+   * carrying `{ delta, done, error }`; framing them belongs to the caller, not
+   * here.
    *
-   * ## The silence limit exists because of an outage
+   * ## The silence limit
    *
-   * A stalled sidecar answered `200` and then said nothing for two minutes at a
-   * time, and `await reader.read()` has no deadline of its own, so the chat
-   * panel span for as long as the tab stayed open. `timeoutMs` does not help:
-   * it is disposed once the headers arrive (it has to be, or no stream could
-   * outlive it). `silenceTimeoutMs` bounds the gap BETWEEN chunks instead and
-   * raises {@link OmsTimeoutError} when nothing arrives for that long. It has
-   * to sit well clear of a cold model's first token; 45s is the number the
-   * frontend settled on and the default here.
+   * A server can answer `200` and then say nothing for minutes, and
+   * `await reader.read()` has no deadline of its own. `timeoutMs` does not
+   * help: it is disposed once the headers arrive (it has to be, or no stream
+   * could outlive it). `silenceTimeoutMs` bounds the gap BETWEEN chunks instead
+   * and raises {@link OmsTimeoutError} when nothing arrives for that long. It
+   * has to sit well clear of a cold model's first token; 45s is the default.
    *
    * Pass `0` to disable it, and mean it: an unbounded read is a spinner with no
    * way out. It does not apply on the buffered path, where the single `text()`
@@ -646,10 +612,9 @@ export class ApiClient {
       }
 
       const headers = headerRecord(response.headers);
-      // 429 needs no `replayable`: this API only ever produces one from
-      // Rack::Attack (middleware, before the router) or from a
-      // `too_many_requests!` guard placed ahead of the write, so the request
-      // provably did not happen. A 5xx carries no such promise.
+      // 429 needs no `replayable`: this API only ever answers one before
+      // performing the request, so the request provably did not happen. A 5xx
+      // carries no such promise.
       const shouldRetry =
         retry !== false &&
         attempt < maxAttempts &&
@@ -733,22 +698,18 @@ export abstract class Resource {
 }
 
 /**
- * The backend's null sentinel: a single backspace character, `U+0008`.
+ * The API's null sentinel: a single backspace character, `U+0008`.
  *
  * A query string has no way to say `null`. `?parent_id=` is the empty string,
  * `?parent_id=null` is the four-letter word "null", and omitting the key
  * entirely says something else again. So the API picked a character no real
- * value ever contains and decodes it back to `nil` on arrival:
- * `CrudActions#define_option_param_getter` runs
- * `value.transform_values! { |v| v == "\b" ? nil : v }` over every filter
- * bucket, and `GroupChatsController`, `GroupChatMessagesController` and
- * `BookServices::Creator` each repeat the same test on the fields they read by
- * hand.
+ * value ever contains and decodes it back to null on arrival, inside every
+ * filter bucket and in the handful of body fields that accept it.
  *
- * Where that `nil` lands is what makes it worth having. `Searchable.exact_search`
- * is `where(params)`, so `exact_search[parent_id]` set to the sentinel becomes
- * `WHERE parent_id IS NULL` - the only way to ask for the storage root nodes,
- * for a comment with no parent, for anything unassigned.
+ * Where that null lands is what makes it worth having: `exact_search[parent_id]`
+ * set to the sentinel becomes `WHERE parent_id IS NULL` - the only way to ask
+ * for the storage root nodes, for a comment with no parent, for anything
+ * unassigned.
  *
  * Exported because it is part of the wire format, not because you should need
  * it: {@link encodeQuery} writes it for you whenever a query value is `null`.
@@ -756,7 +717,7 @@ export abstract class Resource {
 export const NULL_SENTINEL = "\b";
 
 /**
- * Encodes query parameters the way Rails parses them.
+ * Encodes query parameters the way the API parses them.
  *
  * - `{ page: 2 }`                     -> `page=2`
  * - `{ ids: ["a", "b"] }`             -> `ids%5B%5D=a&ids%5B%5D=b`
@@ -773,16 +734,14 @@ export const NULL_SENTINEL = "\b";
  * - `undefined` means "I am not filtering on this column". Dropping the key is
  *   the correct encoding.
  * - `null` means "filter where this column IS NULL". There is no literal for
- *   that in a URL, so it goes out as {@link NULL_SENTINEL} and the backend
- *   turns it back into `nil`.
+ *   that in a URL, so it goes out as {@link NULL_SENTINEL} and the server
+ *   turns it back into null.
  *
- * Encoding `null` as "drop the key" - which this function used to do - is the
- * dangerous direction. The filter simply vanishes and `Searchable.exact_search`
- * returns early (`return self unless params.present?`), so the endpoint answers
- * with the UNFILTERED set: a request for the root of somebody's drive comes
- * back as their entire tree. That failure has bitten this API before, from the
- * other end, and is why `CrudActions#reject_unknown_filter_keys!` now 400s on a
- * key it does not recognise rather than quietly widening the query.
+ * Encoding `null` as "drop the key" is the dangerous direction. The filter
+ * simply vanishes and the endpoint answers with the UNFILTERED set: a request
+ * for the root of somebody's drive comes back as their entire tree. For the
+ * same reason the API answers `400` to a filter key it does not recognise
+ * rather than quietly widening the query.
  *
  * The sentinel is written at every depth, even though the server only decodes
  * it one level inside a filter bucket (`search`, `exact_search`, `modifiers`,
@@ -792,20 +751,17 @@ export const NULL_SENTINEL = "\b";
  *
  * ## Dates
  *
- * A `Date` reaches `typeof value === "object"` like anything else, and
- * `Object.entries(new Date())` is `[]`, so before this branch existed a date
- * filter did not merely arrive malformed - the key disappeared and the listing
- * came back unfiltered. ISO-8601 is what the server reads:
- * `QuerySearcher#date_search` runs `String#to_date_safe` (`Date.parse`) over
- * the value and turns an unparseable one into `nil`, which silently drops that
- * side of the range. Bodies need no equivalent branch, because `JSON.stringify`
- * already calls `Date.prototype.toJSON` and emits the same string.
+ * A `Date` is sent as its ISO-8601 string, which is what the server's date
+ * filters parse. An unparseable value is silently treated as absent, which
+ * drops that side of the range. Bodies need no equivalent branch, because
+ * `JSON.stringify` already calls `Date.prototype.toJSON` and emits the same
+ * string.
  *
  * ## The brackets are percent-encoded, and that is load-bearing
  *
  * `search[title]` goes out as `search%5Btitle%5D`, never as raw `[` and `]`.
- * Both parse identically in Rails, so this looks like the kind of noise someone
- * tidies away on a quiet afternoon. It is not, and the reason is iOS.
+ * Both parse identically on the server, so this looks like the kind of noise
+ * someone tidies away on a quiet afternoon. It is not, and the reason is iOS.
  *
  * `[` and `]` are not legal in a URI query (RFC 3986 reserves them for the host
  * component). Every browser tolerates them; Apple's URL stack does not. Give
@@ -860,10 +816,10 @@ export function encodeQuery(params: QueryParams): string {
  * asked for again.
  *
  * `PUT` and `DELETE` are idempotent by RFC 9110 and are still absent, because
- * idempotent is not the same as harmless to replay HERE. Rails' `destroy` is
- * behind a `find_by` that answers `404` the second time, so a `DELETE` retried
- * after a torn connection reports "not found" for a row it deleted perfectly
- * well - a success turned into an error the caller then acts on.
+ * idempotent is not the same as harmless to replay HERE. A `DELETE` answers
+ * `404` the second time, so one retried after a torn connection reports "not
+ * found" for a row it deleted perfectly well - a success turned into an error
+ * the caller then acts on.
  */
 export const SAFE_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
 
@@ -873,7 +829,7 @@ export function isSafeMethod(method: string): boolean {
 }
 
 /**
- * Builds the `modifiers[page]` string the backend expects (`"2:100"`).
+ * Builds the `modifiers[page]` string the API expects (`"2:100"`).
  *
  * Both halves go through `resolvePageSize` / `resolvePageNumber`, which is the
  * same pair `createPage` uses. That is the point: the size on the wire and the
@@ -882,9 +838,8 @@ export function isSafeMethod(method: string): boolean {
  * told `hasMore: false` while 700 rows sit behind it.
  *
  * @throws {TypeError} for a page size that is not a finite number of at least
- *   1. `"1:NaN"` on the wire reads as size `0` in
- *   `QueryModifier#apply_pagination`, which skips `limit`/`offset` altogether
- *   and returns the entire table.
+ *   1. `"1:NaN"` on the wire reads as size `0` on the server, which then skips
+ *   pagination altogether and returns the entire table.
  */
 export function pageModifier(page = 1, pageSize: number = DEFAULT_PAGE_SIZE): string {
   return `${resolvePageNumber(page)}:${resolvePageSize(pageSize)}`;
@@ -896,8 +851,8 @@ export function pageModifier(page = 1, pageSize: number = DEFAULT_PAGE_SIZE): st
  * `null` and `undefined` fields are OMITTED, which is the opposite of what
  * {@link encodeQuery} does with `null` and is right for the same reason it is
  * right there: what the receiver reads from an absent field. A multipart body
- * only ever feeds a create here, and an absent field means `params[:x]` is
- * `nil` - already the value a sentinel would decode to, so writing one would
+ * only ever feeds a create here, and an absent field is read as null on the
+ * server - already the value a sentinel would decode to, so writing one would
  * add a step that changes nothing. In a query the absent key means "no filter",
  * which is a different answer entirely.
  *
@@ -1052,7 +1007,7 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * How long {@link ApiClient.streamText} will wait for the NEXT chunk before it
- * gives up: 45 seconds, the number the frontend's `BookChatService` arrived at.
+ * gives up: 45 seconds.
  *
  * It is a silence limit, not a total: a stream that keeps producing runs as
  * long as it likes. The value has to clear a cold model's first token (the
@@ -1066,8 +1021,8 @@ export const DEFAULT_STREAM_SILENCE_MS = 45_000;
  * One `reader.read()`, bounded by a silence limit and by the caller's signal.
  *
  * `read()` has no timeout of its own and never rejects on its own when the
- * server simply stops writing, which is how a stalled sidecar turns into a
- * spinner that outlives the tab. The race gives it one.
+ * server simply stops writing, which is how a stalled server turns into a
+ * spinner that never ends. The race gives it one.
  *
  * The timer is always cleared, including on the winning read, or a long stream
  * would leave one pending handle per chunk.

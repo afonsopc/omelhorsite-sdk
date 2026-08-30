@@ -20,9 +20,8 @@
  * 2. **System playlists are half read-only.** A playlist whose `source_kind`
  *    is present and not `"manual"` is maintained by an external sync
  *    (Spotify today). Renaming it, re-arting it and reordering it are refused
- *    with `401`; adding, removing, hiding and copying are NOT. That split is
- *    newer than `docs/api-music.md`, which still says every structural edit is
- *    refused. Test with {@link isSystemPlaylist}.
+ *    with `401`; adding, removing, hiding and copying are NOT. Test with
+ *    {@link isSystemPlaylist}.
  * 3. **Removing a song from a synced playlist does not delete anything.** The
  *    sync would just put it back, so the row is marked `hidden` instead and
  *    the API still answers `204`. The row keeps coming back in listings for
@@ -30,7 +29,7 @@
  *    {@link PlaylistSongsNamespace.remove}.
  * 4. **`/music_radios/*` is throttled at 60 requests per minute**, and the
  *    bucket is keyed by the `Authorization` header - or by the client IP when
- *    there is none. A cookie-authenticated web client therefore shares one
+ *    there is none. A cookie-authenticated browser therefore shares one
  *    budget with every other visitor behind the same address. See
  *    {@link MusicRadiosNamespace}.
  */
@@ -72,7 +71,7 @@ export type PlaylistVisibility = "private" | "friends";
 /**
  * Where a playlist came from. `"manual"` (or `null` on very old rows) is a
  * playlist the user built; anything else marks it as maintained by a sync and
- * makes {@link isSystemPlaylist} true. The column is a free string, so treat
+ * makes {@link isSystemPlaylist} true. The field is a free string, so treat
  * unknown values as system rather than as a bug.
  */
 export type PlaylistSourceKind = "manual" | "imported" | "spotify_sync" | (string & {});
@@ -90,14 +89,13 @@ export type PlaylistSongOrigin = "sync" | "manual";
  * The sync numbers its own rows from 1 upwards and never reaches here, so a
  * user's additions to a synced playlist are parked above the floor and the
  * next sync run can renumber its own rows without colliding with them.
- * Mirrors `PlaylistSong::MANUAL_BLOCK_FLOOR`.
  */
 export const PLAYLIST_MANUAL_BLOCK_FLOOR = 100_000;
 
 /**
- * Most songs `POST /playlists` will seed from `song_ids` in one call. Mirrors
- * `PlaylistsController::SEED_CAP`; the server takes the first 500 and drops
- * the rest in silence, so the SDK raises instead.
+ * Most songs `POST /playlists` will seed from `song_ids` in one call. The
+ * server takes the first 500 and drops the rest in silence, so the SDK raises
+ * instead.
  */
 export const PLAYLIST_SEED_CAP = 500;
 
@@ -110,14 +108,14 @@ export const MUSIC_RADIO_RATE_LIMIT_PER_MINUTE = 60;
 
 /**
  * Window in which a repeat play of the same song is swallowed rather than
- * recorded. Mirrors `PlayEvent::DEDUPE_WINDOW`.
+ * recorded.
  */
 export const PLAY_EVENT_DEDUPE_WINDOW_MS = 30_000;
 
 /**
- * Client labels the backend will store on a play event.
+ * Client labels the server will store on a play event.
  *
- * A value outside this list does NOT fail the request: the controller records
+ * A value outside this list does NOT fail the request: the server records
  * the play with a `null` source rather than losing real listening history over
  * a typo. So a misspelt label is invisible until somebody audits by origin and
  * finds a pile of unlabelled rows.
@@ -155,13 +153,10 @@ export const MIX_KINDS = [
 export type MixKind = (typeof MIX_KINDS)[number] | (string & {});
 
 /**
- * The compact `ArtistBlueprint` view, as it is embedded in mixes and in the
- * album/artist rows of the history endpoints.
- *
- * Blueprinter views ADD to the base rather than replace it, so `compact`
- * carries `id`, `created_at` and `updated_at` too. The `*_fs_node_id` keys are
- * a deliberate duplicate of the `*_media_id` ones, kept for the old web
- * frontend; read the `_media_id` form in new code.
+ * The compact artist, as it is embedded in mixes and in the album/artist rows
+ * of the history endpoints. It carries `id`, `created_at` and `updated_at`
+ * too. The `*_fs_node_id` keys are a legacy duplicate of the `*_media_id`
+ * ones; read the `_media_id` form in new code.
  */
 export interface MusicArtistPayload {
   readonly id: number;
@@ -177,7 +172,7 @@ export interface MusicArtistPayload {
   readonly compressed_image_fs_node_id?: string | null;
 }
 
-/** One artist credit on a song, as `SongArtistBlueprint` renders it. */
+/** One artist credit on a song. */
 export interface MusicSongArtistPayload {
   readonly id: number;
   readonly created_at: Timestamp;
@@ -200,9 +195,9 @@ export interface MusicSongArtistPayload {
 /**
  * A song, as it is embedded in playlist rows, mixes, radios and history.
  *
- * This is a deliberate SUBSET of what `SongBlueprint` sends: the fields every
+ * This is a deliberate SUBSET of what the server sends: the fields every
  * consumer in this file needs, and no more. The full song type belongs to the
- * songs namespace, and duplicating thirty audio-metadata columns in two places
+ * songs namespace, and duplicating thirty audio-metadata fields in two places
  * is how the two copies drift apart. Extra keys ARE on the wire - cast when
  * you need `isrc`, the codec fields or the stem media ids.
  */
@@ -224,12 +219,8 @@ export interface MusicSongPayload {
 }
 
 /**
- * A playlist.
- *
- * `visibility` and `owned` are newer than `docs/api-music.md` and than the
- * `Playlist` type in `oms-music/src/domain/playlist.ts`; both are on the wire
- * today. `owned` is computed against the ASKING user, which is what makes a
- * followed playlist distinguishable from your own in one listing.
+ * A playlist. `owned` is computed against the ASKING user, which is what makes
+ * a followed playlist distinguishable from your own in one listing.
  */
 export interface MusicPlaylist {
   readonly id: MusicPlaylistId;
@@ -276,9 +267,8 @@ export interface MusicPlaylistSong {
   readonly origin: PlaylistSongOrigin;
   /**
    * A `sync` row the owner removed. It stays so the next sync run finds it and
-   * leaves it alone. Only the OWNER ever sees a hidden row: the listing filters
-   * `hidden = FALSE OR playlists.user_id = <you>`, so a follower's page count
-   * and the owner's differ for the same playlist.
+   * leaves it alone. Only the OWNER ever sees a hidden row, so a follower's
+   * page count and the owner's differ for the same playlist.
    */
   readonly hidden: boolean;
   /** The full song. Present on every row of every view. */
@@ -374,14 +364,7 @@ export interface RecentSongPlay {
 /** One row of `GET /play_events/recent?group_by=album`. */
 export interface RecentAlbumPlay {
   readonly album: string | null;
-  /**
-   * Lead artist of the album, compact view, or `null`.
-   *
-   * `oms-music/src/api/endpoints/playEvents.ts` types this as
-   * `Artist | string | null` and calls the string case "legacy rows". No such
-   * case exists in the Rails this was checked against: the album grouping joins
-   * `song_artists` and renders a blueprint or `nil`, never a bare name.
-   */
+  /** Lead artist of the album, compact view, or `null`. Never a bare name. */
   readonly artist: MusicArtistPayload | null;
   readonly artwork_media_id: string | null;
   /** @deprecated Legacy twin of `artwork_media_id`, same value. */
@@ -419,14 +402,14 @@ export interface ListPlaylistsParams extends ListParams<(typeof PLAYLIST_FILTER_
   /**
    * Partial, accent-insensitive match on the name, sent as `search[name]`.
    *
-   * There is no filter for the owner and none for the visibility: the
-   * controller's allowlist is `id`, `name`, `created_at`, `updated_at` and
-   * nothing else, and an unrecognised filter key is a `400`, not a wider
+   * There is no filter for the owner and none for the visibility: the filter
+   * allowlist is `id`, `name`, `created_at`, `updated_at` and nothing else,
+   * and an unrecognised filter key is a `400`, not a wider
    * result. Use the `owned` flag on each row to tell yours from the ones you
    * follow.
    */
   readonly name?: string;
-  /** Exact ids, sent as `exact_search[id][]`, which the backend turns into `IN`. */
+  /** Exact ids, sent as `exact_search[id][]`; any of them matches. */
   readonly ids?: readonly MusicPlaylistId[];
 }
 
@@ -464,9 +447,8 @@ export interface UpdatePlaylistInput {
    * Point the cover at an existing attachment, or pass `null` to purge the
    * current one. Refused with `401` on a system playlist.
    *
-   * Omitting the key and passing `null` are different requests: the server
-   * tests `params.key?`, so an absent key leaves the artwork alone and an
-   * explicit `null` deletes it.
+   * Omitting the key and passing `null` are different requests: an absent key
+   * leaves the artwork alone and an explicit `null` deletes it.
    */
   readonly artworkMediaId?: string | null;
 }
@@ -530,7 +512,7 @@ export interface TopPlaysParams {
 /** Arguments for {@link PlayEventsNamespace.topSongs}. */
 export interface TopSongsParams extends TopPlaysParams {
   /**
-   * Narrow to one artist by NAME - the backend canonicalises it and looks it
+   * Narrow to one artist by NAME - the server canonicalises it and looks it
    * up in your own roster. A name that matches nothing yields an empty array
    * rather than a `404`, so an empty result does not tell you which of the two
    * happened. Only `scope=song` honours this.
@@ -615,9 +597,9 @@ export class MusicPlaylistsNamespace extends Resource {
    * playlist you have not followed is readable by id but never enumerated here.
    *
    * The default order is `created_at:desc` rather than the server's, which is
-   * unspecified. Offset pagination over an unordered query in Postgres can
-   * repeat a row on one page and skip it on the next, so the SDK always sends
-   * an order. Pass `order` to choose another one.
+   * unspecified. Offset pagination over an unordered query can repeat a row on
+   * one page and skip it on the next, so the SDK always sends an order. Pass
+   * `order` to choose another one.
    *
    * Filters are `name` and `ids` and nothing else - see
    * {@link ListPlaylistsParams.name} for why. Indexes carry an `ETag`, so a
@@ -661,7 +643,7 @@ export class MusicPlaylistsNamespace extends Resource {
    *
    * Not retried on a lost answer (the transport's default for a `POST`), because
    * a replay mints a second playlist. A `429` is still retried, and safely so:
-   * this backend refuses before it writes.
+   * the server refuses before it writes.
    *
    * Ceiling: the general authenticated 600/min.
    *
@@ -756,8 +738,8 @@ export class MusicPlaylistsNamespace extends Resource {
    * renumbered densely from 1.
    *
    * Two things it will not do. It only copies a playlist you OWN - a friend's
-   * playlist that {@link get} opens happily answers `401 "not yours"` here,
-   * which `docs/api-music.md` does not mention. And the new name is built
+   * playlist that {@link get} opens happily answers `401 "not yours"` here.
+   * And the new name is built
    * server-side as `"<name> (cópia)"`, in Portuguese, whatever the client's
    * locale; rename it afterwards with {@link update} if that matters.
    *
@@ -779,13 +761,7 @@ export class MusicPlaylistsNamespace extends Resource {
    * `POST /playlists/:id/reorder` - rewrites the order of the playlist.
    *
    * Read this before calling it. The endpoint is not "move song X to slot N";
-   * it is "here is the complete order", and the implementation is one line that
-   * makes three things true at once:
-   *
-   * ```ruby
-   * new_position = @song_ids.index(ps.song_id)
-   * ps.update(position: new_position) if new_position
-   * ```
+   * it is "here is the complete order", and three things are true at once:
    *
    * 1. **Positions become the INDEX in your array, so they start at 0.** Every
    *    other path numbers from 1 (seeding) or from `max + 1` (appending). After
@@ -795,20 +771,19 @@ export class MusicPlaylistsNamespace extends Resource {
    *    interleaves with, or collides with, the renumbered rows. So send the
    *    complete order, always. Ordering by `position` after a partial reorder
    *    gives an arrangement nobody asked for.
-   * 3. **The ids are matched with `Array#index`, which is `==` on Integers.**
-   *    A string id matches nothing, so `["12","5"]` moves NOTHING and still
-   *    answers `200`. This is the silent failure this method exists to prevent:
-   *    it coerces to numbers and throws on anything that is not an integer.
+   * 3. **The ids are matched by identity against integers.** A string id
+   *    matches nothing, so `["12","5"]` moves NOTHING and still answers `200`.
+   *    This is the silent failure this method exists to prevent: it coerces to
+   *    numbers and throws on anything that is not an integer.
    *
-   * The response body is the reorderer's internal output (raw ActiveRecord JSON
-   * of the join rows, not the blueprint) and is not part of the contract, so
-   * this resolves to `undefined`. Refetch with
-   * {@link PlaylistSongsNamespace.list} if you need the new state.
+   * The response body is not part of the contract, so this resolves to
+   * `undefined`. Refetch with {@link PlaylistSongsNamespace.list} if you need
+   * the new state.
    *
    * Ceiling: the general authenticated 600/min.
    *
-   * @throws {TypeError} on an empty array (the service raises `ArgumentError`
-   *   for it, which is a 500, not a 400) or on an id that is not an integer.
+   * @throws {TypeError} on an empty array (the server answers a 500 for it,
+   *   not a 400) or on an id that is not an integer.
    * @throws {OmsApiError} 404 when the playlist is not visible, 401 `"not yours"`
    *   when it is visible but somebody else's - following it is not enough - and
    *   401 with the "make a copy first" sentence on a system playlist.
@@ -821,8 +796,8 @@ export class MusicPlaylistsNamespace extends Resource {
     const ids = integerIds(songIds, "songIds");
     if (ids.length === 0) {
       throw new TypeError(
-        "reorder needs the complete desired order and refuses an empty array: the backend raises ArgumentError " +
-          "for it, which surfaces as a 500 rather than a 400.",
+        "reorder needs the complete desired order and refuses an empty array: the server answers 500 for it, " +
+          "not 400.",
       );
     }
     await this.http.post<unknown>(
@@ -846,12 +821,12 @@ export class MusicPlaylistsNamespace extends Resource {
    * a 200 with no file in it.
    *
    * The bytes go through the music quota funnel, and replacing a cover
-   * `purge_later`s the previous blob rather than leaking it. Note that this is
-   * the only artwork path that spends quota: pointing `artworkMediaId` at an
+   * discards the previous blob rather than leaking it. Note that this is the
+   * only artwork path that spends quota: pointing `artworkMediaId` at an
    * existing attachment reuses the blob and costs nothing.
    *
    * Uploads are capped at roughly 100 MB by the CDN in front of the API, well
-   * above anything an image crop produces; the app sends a JPEG of about 2 MB.
+   * above anything an image crop produces.
    *
    * Ceiling: the general authenticated 600/min.
    *
@@ -891,11 +866,10 @@ export class PlaylistSongsNamespace extends Resource {
    * "add to playlist" dialogue needs: one request tells you which playlists
    * already contain the song.
    *
-   * The scope is `Playlist.viewable_by`, so this also lists a friend's `friends`
-   * playlist. What a follower does NOT see is the hidden rows: the query is
-   * `hidden = FALSE OR playlists.user_id = <you>`, so the same playlist has a
-   * different length depending on who is asking. Do not use a row count from
-   * here as the owner's row count.
+   * This also lists a friend's `friends` playlist. What a follower does NOT
+   * see is the hidden rows, so the same playlist has a different length
+   * depending on who is asking. Do not use a row count from here as the
+   * owner's row count.
    *
    * Every row carries a fully preloaded song (artists, artwork, audio and stem
    * media ids), so a page of 100 is a large payload. Ask for the page size you
@@ -933,10 +907,9 @@ export class PlaylistSongsNamespace extends Resource {
    * least {@link PLAYLIST_MANUAL_BLOCK_FLOOR} with `origin: "manual"`, so the
    * addition sits in a block the sync never renumbers.
    *
-   * Adding to a system playlist WORKS. `docs/api-music.md` still says this is a
-   * `401`, and it was before semi-sync landed; the current controller only
-   * requires that you own the playlist. What is still refused on a system
-   * playlist is renaming it, re-arting it and reordering it.
+   * Adding to a system playlist WORKS; the only requirement is that you own
+   * the playlist. What is still refused on a system playlist is renaming it,
+   * re-arting it and reordering it.
    *
    * Not retried on a lost answer: the unique index would turn the replay into a
    * `400`, reporting a failure for a row that was in fact created.
@@ -989,10 +962,7 @@ export class PlaylistSongsNamespace extends Resource {
    * with the updated row.
    *
    * This is what {@link remove} does implicitly to a sync row, made explicit and
-   * available for manual rows too. Included even though it is not in the route
-   * list this module was commissioned from, because exposing the hiding half of
-   * the mechanism without {@link unhide} would leave a caller unable to undo a
-   * `remove`.
+   * available for manual rows too.
    *
    * @throws {OmsApiError} 404 when the row is not visible, 401 when the playlist
    *   is not yours.
@@ -1049,7 +1019,7 @@ export class MusicMixesNamespace extends Resource {
    *
    * Titles come twice over. `title` and `description` are an English fallback;
    * `title_key`/`title_params` and their description twins are the i18n
-   * template the UI should actually render, so the shelf follows the app
+   * template the UI should actually render, so the shelf follows the caller's
    * language instead of being permanently one language. The embedded `artist`
    * is resolved at render time rather than cached with the shelf, so a picture
    * that lands today shows up today.
@@ -1089,14 +1059,13 @@ export class MusicMixesNamespace extends Resource {
  * Artist and song radios: about 40 tracks built by intersecting Last.fm
  * similar-artist data with what the caller actually owns.
  *
- * **This is the throttled family.** `/music_radios/*` sits behind
- * rack-attack's `external_proxy/by_session` rule at
+ * **This is the throttled family.** `/music_radios/*` is limited to
  * {@link MUSIC_RADIO_RATE_LIMIT_PER_MINUTE} requests per minute, shared with
  * `/lyrics`, `/artists/*` and `/artist_metadata/*`. The bucket key is the
  * `Authorization` HEADER when there is one and the client IP when there is not,
- * which has a consequence worth planning around: a cookie-authenticated web
- * client sends no `Authorization`, so every visitor behind one address shares a
- * single 60/min budget. Token clients get a bucket per token.
+ * which has a consequence worth planning around: a cookie-authenticated
+ * browser sends no `Authorization`, so every visitor behind one address shares
+ * a single 60/min budget. Token clients get a bucket per token.
  *
  * Over the limit the API answers `429` with a `Retry-After`, which the transport
  * honours by sleeping and retrying - a rate-limited call can therefore take most
@@ -1108,20 +1077,19 @@ export class MusicRadiosNamespace extends Resource {
   /**
    * `GET /music_radios/artist/:artist` - a radio seeded on one artist.
    *
-   * Takes the artist's SLUG or their name: the backend canonicalises what you
-   * send and tries `canonical_name` first, then `slug`. `docs/api-music.md` says
-   * slug only, which understates it. Either way the lookup is against the
-   * caller's own roster and never creates an artist, so an artist you do not
-   * have is a `404` rather than an empty radio.
+   * Takes the artist's SLUG or their name: the server canonicalises what you
+   * send and tries `canonical_name` first, then `slug`. Either way the lookup
+   * is against the caller's own roster and never creates an artist, so an
+   * artist you do not have is a `404` rather than an empty radio.
    *
    * Roughly 30% of the tracks come from the seed artist and the rest from
-   * similar artists you own, shuffled. The mix is drawn with `RANDOM()` on the
-   * first build and then frozen for 7 days, so calling twice gives the same
-   * radio, not a reshuffle.
+   * similar artists you own, shuffled. The mix is drawn at random on the first
+   * build and then frozen for 7 days, so calling twice gives the same radio,
+   * not a reshuffle.
    *
    * Ceiling: {@link MUSIC_RADIO_RATE_LIMIT_PER_MINUTE} per minute. A cold build
-   * runs several queries over the whole library; the mobile app allows 60
-   * seconds for it, and passing `timeoutMs` is reasonable here.
+   * runs several queries over the whole library; a `timeoutMs` of around 60
+   * seconds is reasonable here.
    *
    * @throws {OmsApiError} 404 `"Could not build radio for <artist>"` - the same
    *   answer for "no such artist in your library" and for "nothing similar to
@@ -1186,9 +1154,8 @@ export class PlayEventsNamespace extends Resource {
    * doubled. The transport still will not replay a `POST` by default, so pass
    * `retry: {}` if a lost answer on a flaky connection should be tried again.
    *
-   * Hosts usually treat this as fire-and-forget - the app does, with no error
-   * UI - because a lost play event is worth less than an error toast during
-   * playback.
+   * Treat this as fire-and-forget: a lost play event is worth less than an
+   * error toast during playback.
    *
    * `listenedSeconds` is clamped server-side rather than validated: `0` is the
    * floor and three times the track's duration is the ceiling, or 24 hours when
@@ -1198,8 +1165,8 @@ export class PlayEventsNamespace extends Resource {
    * Ceiling: the general authenticated 600/min. A client that posts one event
    * per track is nowhere near it; one that posts on every seek is not.
    *
-   * @throws {OmsApiError} 400 when `songId` is missing (`ParameterMissing`), 404
-   *   `"Song not found"` when the song is not visible to you.
+   * @throws {OmsApiError} 400 when `songId` is missing, 404 `"Song not found"`
+   *   when the song is not visible to you.
    */
   async record(input: RecordPlayInput, options: RequestOptions = {}): Promise<RecordPlayResult> {
     return this.http.post<RecordPlayResult>(
@@ -1242,9 +1209,9 @@ export class PlayEventsNamespace extends Resource {
    * `GET /play_events/recent?group_by=album` - recently played albums.
    *
    * Grouped by album name AND lead artist, so two albums with the same title by
-   * different artists stay apart. Songs with no album are excluded entirely -
-   * the query filters `album NOT IN (NULL, '')` - so a library of loose singles
-   * produces an empty shelf here while {@link recentSongs} is full.
+   * different artists stay apart. Songs with no album (null or empty) are
+   * excluded entirely, so a library of loose singles produces an empty shelf
+   * here while {@link recentSongs} is full.
    *
    * Ceiling: the general authenticated 600/min.
    */
@@ -1338,11 +1305,11 @@ export class PlayEventsNamespace extends Resource {
 /**
  * Validates and clamps a `limit` for the history endpoints.
  *
- * The server's own handling is `value.to_i`, then "fall back to the default if
- * it is not positive", then "take the smaller of it and the maximum" - so `0`,
- * a negative and a word all quietly become the default, and 5000 quietly becomes
- * 100. Both silences hide a caller bug, so the SDK rejects what cannot be meant
- * and clamps what merely overshoots.
+ * The server reads it as an integer, falls back to the default when it is not
+ * positive, then takes the smaller of it and the maximum - so `0`, a negative
+ * and a word all quietly become the default, and 5000 quietly becomes 100.
+ * Both silences hide a caller bug, so the SDK rejects what cannot be meant and
+ * clamps what merely overshoots.
  *
  * @throws {TypeError} when the limit is not a finite integer of at least 1.
  */
@@ -1365,10 +1332,10 @@ function sinceQuery(since: PlayEventWindow | undefined): QueryParams {
 /**
  * Coerces a list of song ids to integers, or explains why it will not.
  *
- * This exists because of `reorder`. The backend matches ids with `Array#index`,
- * which compares an Integer column against whatever you sent: a numeric string
- * matches NOTHING, and the endpoint answers `200` having moved nothing at all.
- * A failure that looks exactly like a success is worth a local throw.
+ * This exists because of `reorder`. The server matches ids by identity
+ * against integers: a numeric string matches NOTHING, and the endpoint answers
+ * `200` having moved nothing at all. A failure that looks exactly like a
+ * success is worth a local throw.
  *
  * Numeric strings are accepted and converted, since ids arrive as strings from
  * routers and forms often enough that refusing them would be pedantry; anything
@@ -1380,8 +1347,8 @@ function integerIds(ids: readonly number[], field: string): number[] {
     if (typeof value !== "number" || !Number.isInteger(value)) {
       throw new TypeError(
         `${field}[${index}] is ${JSON.stringify(raw)}, which is not an integer id. Song ids are integers on this ` +
-          "API, and the backend matches them by identity: a string id matches no row, so the request would " +
-          "succeed and change nothing.",
+          "API and are matched by identity: a string id matches no row, so the request would succeed and " +
+          "change nothing.",
       );
     }
     return value;

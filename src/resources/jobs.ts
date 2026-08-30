@@ -11,11 +11,10 @@
  * {@link JobsNamespace.wait}, so the polling policy lives here once. Do not
  * write a second polling loop inside a tool module.
  *
- * Only two tools enqueue through the generic `jobs` table - background removal
- * and upscale. The other five are polled by re-reading their own row, which is
- * still not a reason to write a loop there: {@link pollUntilTerminal} is the
- * same engine with a different `poll` function, and that is what those modules
- * call.
+ * Only two tools hand back a generic job - background removal and upscale.
+ * The other five are polled by re-reading their own record, which is still not
+ * a reason to write a loop there: {@link pollUntilTerminal} is the same engine
+ * with a different `poll` function, and that is what those modules call.
  *
  * The loop is deliberately dumb and bounded:
  *
@@ -63,7 +62,7 @@ import type {
 } from "../types";
 
 /**
- * The five status strings, spelled the way the backend spells them.
+ * The five status strings, spelled the way the API spells them.
  *
  * `complete`, not `completed`. `canceled`, one L. Reach for this object instead
  * of typing the literal: a loop that waits for `"completed"` waits forever.
@@ -96,31 +95,24 @@ export function isJobTerminal(status: string): boolean {
 /**
  * A background job.
  *
- * `JobBlueprint` declares thirteen fields and nothing else, so EVERY key below
- * is present on every response. A `?` here would mean "the server sometimes
- * leaves this out", and it never does; what varies is the VALUE, because most
- * of these are nullable columns that fill in as the job moves.
+ * EVERY key below is present on every response. A `?` here would mean "the
+ * server sometimes leaves this out", and it never does; what varies is the
+ * VALUE, because most of these are nullable and fill in as the job moves.
  *
- * Two keys are deliberately NOT here, and a client migrating off the old web
- * service will expect them: `updater_id` and `destroyer_id`. Both columns
- * exist on the `jobs` table and both are indexed, but `JobBlueprint` renders
- * NEITHER, so anything declaring them has been reading `undefined` for as long
- * as it has existed. Declaring them here would only move the lie.
+ * There is no `updater_id` and no `destroyer_id`; anything declaring them
+ * reads `undefined`.
  */
 export interface Job extends BaseRecord {
   readonly status: JobStatus;
   /**
-   * Feature-level kind of the run. `Job::JOB_TYPES` holds exactly two strings:
-   * `"omsvs"` (vocal separation) and `"unknown"`, which is the column default
-   * every generic enqueue gets - the upscale and background-removal proxies
-   * included. It is NOT the worker's class name, and a third value cannot
-   * appear without a model change, because an inclusion validation rejects it.
+   * Feature-level kind of the run: `"omsvs"` (vocal separation) or
+   * `"unknown"`, which is what every generic enqueue gets - the upscale and
+   * background-removal runs included. It is NOT the name of the work done.
    */
   readonly job_type: string;
   /**
-   * Enqueue-time arguments. The column is `jsonb DEFAULT '{}'`, so a row whose
-   * enqueuer wrote nothing carries `{}` rather than `null`. Shape depends on
-   * `job_type`.
+   * Enqueue-time arguments. `{}` rather than `null` when the enqueuer wrote
+   * nothing. Shape depends on `job_type`.
    */
   readonly payload: Json;
   /** Set when a worker claimed the job; `null` while it is still `"pending"`. */
@@ -128,22 +120,20 @@ export interface Job extends BaseRecord {
   /** Set when the job reached a terminal state, cancellation included. */
   readonly finished_at: Timestamp | null;
   /**
-   * Percentage, an integer in `[0, 100]`. The column is `NOT NULL DEFAULT 0`
-   * and the model validates the range, so this is a real number from the
-   * moment the row exists: `0` means "not started", never "unknown".
+   * Percentage, an integer in `[0, 100]`. A real number from the moment the
+   * row exists: `0` means "not started", never "unknown".
    */
   readonly progress: number;
   /**
    * Failure message once `status === "failed"` - and ALSO the reason once
-   * `"canceled"`, because `Job#cancel!` writes it into this same column. A
+   * `"canceled"`, because a cancellation writes its reason here too. A
    * non-null `error` therefore does not by itself mean the work failed. Read
    * `status`.
    */
   readonly error: string | null;
   /**
-   * Whatever the worker returned, stored by `ApplicationJob`'s
-   * `around_perform`. Shape depends on `job_type`, and the two proxies worth
-   * naming both answer an object carrying a signed download link:
+   * Whatever the work returned. Shape depends on `job_type`, and the two
+   * tools worth naming both answer an object carrying a signed download link:
    *
    * - upscale: `{ upscale_id, result_url }`;
    * - background removal: `{ background_removal_id, result_url }`.
@@ -304,9 +294,8 @@ export class JobsNamespace extends Resource {
    * an anonymous caller sees an empty page - never a 401, because the scope is
    * empty rather than forbidden.
    *
-   * @throws {OmsApiError} 400 naming the key when a filter is not on the
-   *   controller's allowlist (`id`, `job_type`, `status`, `created_at`,
-   *   `updated_at`, `finished_at`).
+   * @throws {OmsApiError} 400 naming the key when a filter is not one of
+   *   `id`, `job_type`, `status`, `created_at`, `updated_at`, `finished_at`.
    */
   async list(params: ListJobsParams = {}, options: RequestOptions = {}): Promise<Paginated<Job>> {
     const base = { exactSearch: { status: params.status, job_type: params.jobType } };
@@ -328,7 +317,7 @@ export class JobsNamespace extends Resource {
    *
    * @throws {OmsApiError} 404 when the job is gone, which for a finished job
    *   also happens once its retention window expires. A wrong, expired or
-   *   missing watch token is the same 404, not a 401: the controller never says
+   *   missing watch token is the same 404, not a 401: the server never says
    *   whether the id exists.
    */
   async get(ref: JobRef | Id, options: RequestOptions = {}): Promise<Job> {
@@ -392,14 +381,13 @@ export function jobRef(ref: JobRef | Id): JobRef {
  * Renders a job as a {@link Progress}.
  *
  * `total` is 100 rather than `undefined` because `progress` is a percentage the
- * server always has: the column is `NOT NULL DEFAULT 0`, so there is no
- * "unknown" to be honest about.
+ * server always has: there is no "unknown" to be honest about.
  *
  * The `typeof` guard is not defensive typing for its own sake. `Job.progress`
- * is declared non-nullable because the column is, but this function is also
- * handed rows that came off `JobChannel` and rows a host deserialised itself,
- * and reading `undefined` as `NaN%` would put a broken number on a progress
- * bar rather than a zero.
+ * is declared non-nullable, but this function is also handed rows that came
+ * off the realtime job channel and rows a host deserialised itself, and
+ * reading `undefined` as `NaN%` would put a broken number on a progress bar
+ * rather than a zero.
  */
 export function jobProgress(job: Job): Progress {
   return {
@@ -420,7 +408,7 @@ function requestPartOf(options: WaitOptions): RequestOptions {
   };
 }
 
-/** One filter value, as either a scalar or the array form Rails reads. */
+/** One filter value, as either a scalar or the array form the API reads. */
 function asFilter(value: string | readonly string[]): QueryValue {
   return Array.isArray(value) ? [...value] : (value as string);
 }

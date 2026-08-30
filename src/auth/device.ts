@@ -1,7 +1,7 @@
 /**
  * OAuth 2.0 Device Authorization Grant (RFC 8628).
  *
- * This is how a CLI or an MCP server signs a person in without ever handling
+ * This is how a terminal or a headless client signs a person in without ever handling
  * their password: the client asks for a code, the person opens a URL in a real
  * browser and approves, and the client polls the token endpoint until the
  * approval lands.

@@ -16,7 +16,7 @@
  * handing back a busy row would just guarantee the caller's next call is the
  * 409. Use {@link CaptionsNamespace.get} to poll a job somebody else started.
  *
- * Limits, all enforced by the backend:
+ * Limits, all enforced server-side:
  *
  * | | |
  * |---|---|
@@ -39,8 +39,8 @@
  * window that would cross the ceiling rather than truncating it.
  *
  * **The 250 MiB ceiling is not reachable through {@link CaptionsNamespace.create}.**
- * Cloudflare rejects any request body over 100 MB with a 413 of its own before
- * Rails ever sees it, so the backend also exposes a three-call chunked upload -
+ * Any single request body over roughly 100 MB is answered 413 before the API
+ * sees it, so the API also exposes a three-call chunked upload -
  * `POST /caption_jobs/uploads` opens a session and returns a signed
  * `upload_token` plus a `part_size` (32 MiB), `POST /caption_jobs/uploads/parts?offset=`
  * streams each raw part under an `X-Upload-Token` header, and
@@ -53,12 +53,9 @@
  * be small, and for the three methods under `upload` only to drive the parts
  * yourself.
  *
- * One caveat that is the backend's and not the SDK's: the three chunked routes
- * carry no `oauth_scope` declaration, and scopes there are default-deny, so an
- * OAuth access token gets `403 insufficient_scope` on all three (and on
- * `fonts`). A session or a first-party bearer token reaches them; a token
- * minted through the OIDC provider does not, and for one of those only
- * `create` is open.
+ * One caveat: an OAuth access token gets `403 insufficient_scope` on the three
+ * chunked routes and on `fonts`; of the upload paths, only `create` is open to
+ * one. A session token reaches them all.
  */
 
 import { OmsError } from "../../errors";
@@ -84,7 +81,7 @@ import {
 export type CaptionStatus = "uploaded" | "transcribing" | "transcribed" | "rendering" | "complete" | "failed";
 
 /**
- * The two statuses with a sidecar call in flight.
+ * The two statuses with work in flight.
  *
  * A job in one of these refuses new work with a 409. Note this is NOT the
  * complement of "terminal": `"uploaded"` and `"transcribed"` are idle but not
@@ -101,12 +98,12 @@ export function isCaptionBusy(status: string): boolean {
  * One timed word of the transcript.
  *
  * `text`, `t0`, `t1` - NOT `word`, `start`, `end`. These are the keys the
- * render endpoint permits and the keys the transcriber writes onto the row, so
+ * render endpoint permits and the keys a transcription writes onto the row, so
  * a word object built any other way is silently dropped server-side and the
  * render fails with "No words to render".
  *
  * Timings are seconds from the START OF THE VIDEO, not from the start of the
- * transcribed window: the backend shifts them onto the video clock before
+ * transcribed window: the server shifts them onto the video clock before
  * saving, so an edited list can be sent straight back.
  */
 export interface CaptionWord {
@@ -121,8 +118,8 @@ export interface CaptionWord {
 /**
  * An RGB triple, each channel clamped to `[0, 255]` server-side.
  *
- * The controller reads the key only when the array has EXACTLY three entries;
- * two or four is dropped in silence, which costs a whole render to discover.
+ * The server reads the key only when the array has EXACTLY three entries; two
+ * or four is dropped in silence, which costs a whole render to discover.
  */
 export type CaptionRgb = readonly [number, number, number] | readonly number[];
 
@@ -131,19 +128,19 @@ export type CaptionRgb = readonly [number, number, number] | readonly number[];
  *
  * Open bag, because the renderer gains options without an SDK release and
  * unknown keys are dropped server-side rather than rejected. The named keys are
- * the ones the controller's allow-list actually permits today; anything else -
- * a font name, a hex colour - is accepted by the request and then thrown away,
- * which is worth knowing before spending a render on it.
+ * the ones the server permits today; anything else - a font name, a hex
+ * colour - is accepted by the request and then thrown away, which is worth
+ * knowing before spending a render on it.
  *
  * Every numeric key is CLAMPED, not validated: a value outside the range comes
  * back as the nearest end of it rather than as a 400.
  */
 export interface CaptionStyle {
   /**
-   * A font KEY from {@link CaptionsNamespace.fonts}, never a path: the sidecar
-   * resolves the key against the faces installed in its image, so a caller
-   * cannot point the renderer at a file. Must match `/\A[a-z0-9_-]{1,40}\z/`;
-   * anything else is dropped and the renderer uses its own default.
+   * A font KEY from {@link CaptionsNamespace.fonts}, never a path: the
+   * renderer resolves the key against its installed faces, so a caller cannot
+   * point it at a file. Must match `/\A[a-z0-9_-]{1,40}\z/`; anything else is
+   * dropped and the renderer uses its own default.
    */
   readonly font?: string;
   /** Font size as a fraction of the video height. Clamped to `[0.03, 0.09]`. */
@@ -151,8 +148,8 @@ export interface CaptionStyle {
   /**
    * Outline thickness as a fraction of the font size. Clamped to `[0, 0.3]`,
    * and `0` is a legitimate choice meaning no outline at all - which is why
-   * the controller reads this key whenever it is PRESENT rather than when it
-   * is truthy, unlike every other numeric key here.
+   * the server reads this key whenever it is PRESENT rather than when it is
+   * truthy, unlike every other numeric key here.
    */
   readonly stroke_factor?: number;
   /** Vertical placement, `0` top to `1` bottom. Clamped to `[0.3, 0.9]`. */
@@ -182,25 +179,22 @@ export interface CaptionStyle {
  * A caption job.
  *
  * Every route that answers with one - create, the chunked upload's finish
- * call, show, transcribe and render - renders the `:extended` view, so every
- * key below is present on every response.
+ * call, show, transcribe and render - answers the same shape, so every key
+ * below is present on every response.
  *
- * Five of the columns are `NOT NULL` with a numeric default, so `width`,
- * `height`, `fps`, `duration` and `transcribed_seconds` are always real
- * numbers. On a row whose upload has only just been probed they are the probed
- * values; the sidecar's precise metadata overwrites them a moment later.
+ * `width`, `height`, `fps`, `duration` and `transcribed_seconds` are always
+ * real numbers: `0` until the probe fills them in.
  */
 export interface CaptionJob extends ToolRecord {
   readonly status: CaptionStatus;
-  /** Original upload name. The controller substitutes `"video.mp4"` for a
-   * blank one, so this is never empty in practice. */
+  /** Original upload name. The server substitutes `"video.mp4"` for a blank
+   * one, so this is never empty in practice. */
   readonly filename: string;
-  /** Pixels. `NOT NULL DEFAULT 0`, so `0` means "not probed yet", not unknown. */
+  /** Pixels. `0` means "not probed yet", not unknown. */
   readonly width: number;
   readonly height: number;
-  /** `NOT NULL DEFAULT 0.0`. */
   readonly fps: number;
-  /** Seconds of video, probed at upload. `NOT NULL DEFAULT 0.0`. */
+  /** Seconds of video, probed at upload. */
   readonly duration: number;
   /** Language of the last transcribe call, `"auto"` included. `null` before the first. */
   readonly language: string | null;
@@ -209,20 +203,18 @@ export interface CaptionJob extends ToolRecord {
   readonly window_end: number | null;
   /**
    * Seconds charged against the quota so far, accumulated across every window
-   * transcribed on this job. `NOT NULL DEFAULT 0`.
+   * transcribed on this job.
    */
   readonly transcribed_seconds: number;
   /**
    * Timed words, from `"transcribed"` onwards.
    *
-   * `null` and not `[]` when there are none: the column is `NOT NULL DEFAULT
-   * '[]'`, but the blueprint renders `words.presence`, and `[].presence` is
-   * `nil` in Ruby. So an empty list arrives as `null`, and the key is present
-   * either way.
+   * `null` and not `[]` when there are none, and the key is present either
+   * way.
    */
   readonly words: CaptionWord[] | null;
-  /** What the renderer is doing right now, read live off the sidecar. `null`
-   * unless the status is `"rendering"`. */
+  /** What the renderer is doing right now, read live. `null` unless the
+   * status is `"rendering"`. */
   readonly render_stage: string | null;
   /** Signed URL of the finished video once complete and attached, `null` otherwise. */
   readonly output_url: string | null;
@@ -230,7 +222,7 @@ export interface CaptionJob extends ToolRecord {
 
 /** Arguments for uploading a video. */
 export interface CreateCaptionJobInput extends ToolCaptcha {
-  /** The video. Sent as the `video` form field. Backend caps: 250 MiB, 20 minutes. */
+  /** The video. Sent as the `video` form field. Caps: 250 MiB, 20 minutes. */
   readonly video: FileInput;
 }
 
@@ -248,7 +240,7 @@ export interface TranscribeCaptionInput {
 export interface RenderCaptionInput {
   /**
    * Words to burn in. Omit to use the words already on the row; pass an edited
-   * array to fix what the model misheard. Backend cap: 3000 words, 80
+   * array to fix what the transcription misheard. Cap: 3000 words, 80
    * characters each.
    *
    * Omitting costs one extra `GET`: the render endpoint has no fallback of its
@@ -263,7 +255,7 @@ export interface RenderCaptionInput {
  * Renders a caption job as a {@link Progress}, render stage included.
  *
  * Same liberty as the vocal separator takes with the queue position: the
- * sidecar's stage is folded into `status` - `"rendering (encoding)"` - because
+ * render stage is folded into `status` - `"rendering (encoding)"` - because
  * `status` is the only part of a {@link Progress} a host renders as text, and a
  * whole-file re-encode is long enough that "rendering" alone tells a person
  * nothing.
@@ -278,31 +270,31 @@ export function captionProgress(record: CaptionJob): Progress {
 // ---------------------------------------------------------------------------
 // The chunked upload
 //
-// The other half of step 1, and the reason it has to exist: Cloudflare sits in
-// front of the API and answers 413 to any request body over roughly 100 MB,
-// with a message that never mentions captions. A single `POST /caption_jobs`
-// therefore cannot carry the 250 MiB the backend is willing to accept, so the
-// same upload is also reachable as three calls:
+// The other half of step 1, and the reason it has to exist: any request body
+// over roughly 100 MB is answered 413 before the API sees it, with a message
+// that never mentions captions. A single `POST /caption_jobs` therefore cannot
+// carry the 250 MiB the server is willing to accept, so the same upload is
+// also reachable as three calls:
 //
 //   POST /caption_jobs/uploads               -> { upload_token, part_size, part_count }
 //   POST /caption_jobs/uploads/parts?offset= -> { received }, raw bytes, N times
 //   POST /caption_jobs/uploads/finish        -> the CaptionJob row
 //
-// No upload state lives in Rails between them. The (job_id, size, filename)
-// triple travels inside the signed `upload_token` the caller carries from call
-// to call, which is also why a torn run is resumable for as long as the token
-// lives - see CAPTION_UPLOAD_TOKEN_TTL_MS.
+// No upload state lives on the server between them. The (job_id, size,
+// filename) triple travels inside the signed `upload_token` the caller carries
+// from call to call, which is also why a torn run is resumable for as long as
+// the token lives - see CAPTION_UPLOAD_TOKEN_TTL_MS.
 //
 // ## How this differs from the storage tier's multipart, deliberately
 //
 // `storage/upload.ts` drives a multipart upload with the same 32 MiB part, and
 // the two are NOT the same protocol. Four differences decide the code here:
 //
-//  - these parts go to RAILS, not to a presigned object-store URL. They ride
+//  - these parts go to the API, not to a presigned object-store URL. They ride
 //    the client's own transport, so the credential, the retry policy, the 429
 //    `Retry-After` handling and the per-attempt deadline all apply as usual,
 //    and there is no "must not carry an Authorization header" rule to respect;
-//  - a part is addressed by BYTE OFFSET, not by a part number, and the sidecar
+//  - a part is addressed by BYTE OFFSET, not by a part number, and the server
 //    writes it at that offset. Re-sending one is the same bytes in the same
 //    place, so this is the rare `POST` that is genuinely safe to replay -
 //    which is why {@link CaptionsNamespace.uploadPart} opts INTO the
@@ -311,27 +303,27 @@ export function captionProgress(record: CaptionJob): Progress {
 //  - there is no per-part ETag to collect and nothing to assemble by hand. The
 //    `finish` call carries the token and nothing else;
 //  - nothing is checksummed. The storage tier's direct tier binds a base64 MD5
-//    into the presigned signature; here the sidecar simply keeps what arrived
+//    into the presigned signature; here the server simply keeps what arrived
 //    and the only integrity check is `finish` probing the assembled file, which
 //    answers 400 "Could not read video" when it does not decode.
 //
 // What the two DO share is the 32 MiB part and the rule that comes with it:
-// never send a part longer than the size the server named. The controller
-// rejects an over-long part with a 400 whose whole text is "Invalid part".
+// never send a part longer than the size the server named. The server rejects
+// an over-long part with a 400 whose whole text is "Invalid part".
 //
 // There is also no rate gate here, unlike the storage driver's
 // `StorageRateGate`. Only the session-opening call is throttled as an
 // expensive tool (20 a minute); the parts and the finish fall under the plain
-// ceiling, and the largest file the backend accepts is eight parts.
+// ceiling, and the largest file the server accepts is eight parts.
 // ---------------------------------------------------------------------------
 
 /**
- * Largest file the backend will accept, chunked or not: 250 MiB exactly.
+ * Largest file the server will accept, chunked or not: 250 MiB exactly.
  *
- * Mirrors `CaptionJobsController::MAX_FILE_SIZE`. Not checked client-side on
- * purpose - the server owns the number, and the chunked path finds out in one
- * cheap round trip because {@link CaptionsNamespace.startUpload} is given the
- * size before a single byte moves.
+ * Not checked client-side on purpose - the server owns the number, and the
+ * chunked path finds out in one cheap round trip because
+ * {@link CaptionsNamespace.startUpload} is given the size before a single byte
+ * moves.
  */
 export const CAPTION_MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
 
@@ -339,12 +331,11 @@ export const CAPTION_MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
  * Where {@link CaptionsNamespace.upload} stops using one `POST` and starts
  * using the three-call path: 64 MiB.
  *
- * This is a CLIENT-SIDE choice, not a protocol constant, and it is the same
- * one the web tool makes (`frontend/services/CaptionsService.ts`). Cloudflare's
- * ceiling is on the whole request, and a `multipart/form-data` envelope rides
- * on top of the file's own bytes, so the switch sits well under the cap rather
- * than at it. Below it a single request is one round trip and one probe; above
- * it a single request is a 413 that says nothing useful.
+ * This is a CLIENT-SIDE choice, not a protocol constant. The ~100 MB ceiling
+ * is on the whole request, and a `multipart/form-data` envelope rides on top
+ * of the file's own bytes, so the switch sits well under the cap rather than
+ * at it. Below it a single request is one round trip and one probe; above it
+ * a single request is a 413 that says nothing useful.
  *
  * Override it per call with {@link UploadCaptionVideoInput.chunkedThreshold} -
  * for instance `0`, to exercise the chunked path on a small file.
@@ -352,30 +343,27 @@ export const CAPTION_MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
 export const CAPTION_CHUNKED_THRESHOLD = 64 * 1024 * 1024;
 
 /**
- * Part size, 32 MiB. The same number as the storage tier's, and by coincidence
- * rather than by sharing: `CaptionJobsController::PART_SIZE` copied it.
+ * Part size, 32 MiB. The same number as the storage tier's, by coincidence
+ * rather than by sharing.
  *
  * It is BOTH the size the server reports in the session and the ceiling the
- * server validates each part against, and the controller validates against its
- * own constant rather than against the session it minted. See
- * {@link resolveCaptionPartSize} for what that means when the two disagree.
+ * server validates each part against. See {@link resolveCaptionPartSize} for
+ * what that means when the two disagree.
  */
 export const CAPTION_PART_SIZE = 32 * 1024 * 1024;
 
 /**
  * Parts in flight at once by default.
  *
- * Three, as the web tool uses. A single sequential stream leaves a home
- * connection idle between round trips; three fills it without holding an unfair
- * number of the API's threads, and every part in flight parks one Rails thread
- * for as long as it takes to arrive - these bytes pass THROUGH Rails on their
- * way to the sidecar, unlike a storage upload.
+ * Three. A single sequential stream leaves a home connection idle between
+ * round trips; three fills it without holding an unfair share of the API,
+ * since these bytes pass THROUGH the API on their way to storage, unlike a
+ * storage upload.
  */
 export const CAPTION_UPLOAD_CONCURRENCY = 3;
 
 /**
- * How long an upload session stays usable: six hours, from
- * `CaptionJobsController::UPLOAD_TOKEN_TTL`.
+ * How long an upload session stays usable: six hours.
  *
  * The window for a resume. Past it the token verifies as expired and every
  * call answers 400 "Invalid or expired upload session", parts already sent
@@ -410,7 +398,7 @@ export interface StartCaptionUploadInput extends ToolCaptcha {
    * Not an estimate and not a ceiling: the number is sealed into the token and
    * every part is checked against it, so a declared size below the real one
    * makes the last part fail with 400 "Part exceeds declared size", and a
-   * declared size above it leaves the sidecar waiting for bytes that never
+   * declared size above it leaves the server waiting for bytes that never
    * come and `finish` probing a truncated file.
    */
   readonly size: number;
@@ -454,7 +442,7 @@ export interface CaptionUploadResume {
    * Keep the whole session where you can. A bare token has no `part_size`, so
    * the driver slices with {@link CAPTION_PART_SIZE} instead - which is the
    * server's own number today, and therefore the same offsets, but it stops
-   * being true the day the backend changes it.
+   * being true the day the server changes it.
    */
   readonly session: CaptionUploadSession | string;
   /**
@@ -514,18 +502,16 @@ export function captionUploadSize(video: FileInput): number | undefined {
  * Follows the storage driver's rule - slice with the number the SERVER named,
  * never with the SDK's copy of it - but with a ceiling the storage tier does
  * not need, because the two ends of this protocol read the number from
- * different places. `start_upload` reports `PART_SIZE` from the session it is
- * minting, while `upload_part` validates `length <= PART_SIZE` against the
- * CONTROLLER CONSTANT. They are the same constant today and can only disagree
- * mid-deploy, and the disagreement is one-sided: honouring a larger reported
- * size would make every part a 400 "Invalid part", while capping at the size
- * this SDK knows the validator uses only sends smaller parts, which is always
- * legal. So the reported number wins downwards and loses upwards.
+ * different places: the session reports a `part_size`, while each part is
+ * validated against the server's own constant. They are the same today and
+ * can only disagree mid-deploy, and the disagreement is one-sided: honouring
+ * a larger reported size would make every part a 400 "Invalid part", while
+ * capping at the size this SDK knows the validator uses only sends smaller
+ * parts, which is always legal. So the reported number wins downwards and
+ * loses upwards.
  *
  * A missing, zero or nonsense `part_size` falls back to
- * {@link CAPTION_PART_SIZE}. Note the web tool falls back to its 64 MiB
- * threshold instead, which is above the validator's ceiling - a fallback that
- * would reject every part if it ever fired.
+ * {@link CAPTION_PART_SIZE}.
  */
 export function resolveCaptionPartSize(reported: number | undefined): number {
   if (typeof reported !== "number" || !Number.isFinite(reported) || reported <= 0) return CAPTION_PART_SIZE;
@@ -594,15 +580,15 @@ export class CaptionsNamespace extends Resource {
    * {@link CaptionStyle.font}.
    *
    * Plain strings, not objects and not display names: they are the keys the
-   * sidecar resolves against the faces installed in its image, which is the
-   * whole reason a caller cannot pass a path.
+   * renderer resolves against its installed faces, which is the whole reason
+   * a caller cannot pass a path.
    *
-   * The controller answers `{ fonts: [...] }`; this unwraps it. It also
-   * NEVER fails: a sidecar that is down or slow is caught and answered as an
-   * empty list with a 200, so `[]` means "could not ask right now" just as
-   * much as it means "no fonts", and the two are not distinguishable. Do not
-   * treat an empty answer as a reason to refuse a render - omitting `font`
-   * lets the renderer use its own default.
+   * The endpoint answers `{ fonts: [...] }`; this unwraps it. It also NEVER
+   * fails: a renderer that is down or slow is answered as an empty list with
+   * a 200, so `[]` means "could not ask right now" just as much as it means
+   * "no fonts", and the two are not distinguishable. Do not treat an empty
+   * answer as a reason to refuse a render - omitting `font` lets the renderer
+   * use its own default.
    *
    * Cached server-side for ten minutes, so polling it buys nothing.
    */
@@ -614,11 +600,6 @@ export class CaptionsNamespace extends Resource {
   /**
    * `POST /caption_jobs` - step 1. Uploads the video and probes it.
    *
-   * The bytes go to the captions sidecar, which keeps the file; Rails stores
-   * only the row and, at the end, the rendered output. That is also why a
-   * caption job cannot be resumed after the sidecar's volume is wiped: the row
-   * survives and the video does not, and step 2 then fails.
-   *
    * Answers with the row in `"uploaded"`, carrying the probed `width`,
    * `height`, `fps` and `duration`. Nothing is running yet, so this call does
    * not wait.
@@ -627,8 +608,8 @@ export class CaptionsNamespace extends Resource {
    * 250 MiB and leaves an orphan job behind. Pass `retry: {}` to opt back in.
    *
    * @throws {OmsApiError} 413 over 250 MiB, 400 over 20 minutes or when the
-   *   file cannot be read, 503 when the captions sidecar is down - in which
-   *   case the row is destroyed rather than left dangling.
+   *   file cannot be read, 503 when the captions service is unavailable - in
+   *   which case no job is left behind.
    * @throws {OmsQuotaError} 429 from the expensive-tools throttle. The upload
    *   itself spends no daily quota.
    * @throws {OmsAuthError} 401 when anonymous and the captcha is missing or bad.
@@ -668,8 +649,8 @@ export class CaptionsNamespace extends Resource {
    * new window's words and ADDS its seconds to `transcribed_seconds`, so
    * re-transcribing costs quota every time and does not give you both windows.
    *
-   * `language` defaults to `"auto"` server-side. Whisper detects well enough
-   * that a hint is worth passing only when it has already got it wrong.
+   * `language` defaults to `"auto"` server-side. Detection is good enough that
+   * a hint is worth passing only when it has already got it wrong.
    *
    * Resolves with a `"failed"` row rather than throwing when the transcription
    * itself failed - including the common case of a window with no speech in
@@ -698,9 +679,7 @@ export class CaptionsNamespace extends Resource {
   }
 
   /**
-   * `POST /caption_jobs/:id/render` - step 3. Named `render` here even though
-   * the route is `start_render`, because `render` clashes with Rails' own
-   * method and that is the backend's problem, not the SDK's.
+   * `POST /caption_jobs/:id/render` - step 3.
    *
    * WAITS, like {@link transcribe}, and for the same reason.
    *
@@ -746,11 +725,10 @@ export class CaptionsNamespace extends Resource {
   }
 
   /**
-   * `DELETE /caption_jobs/:id` - drops the row and the sidecar's copy.
+   * `DELETE /caption_jobs/:id` - drops the job and its uploaded video.
    *
-   * Best effort on the sidecar's side: the row goes either way. Worth calling
-   * on a job you have finished with, because the uploaded video sits on the
-   * sidecar's disk until the 24-hour sweep otherwise.
+   * Worth calling on a job you have finished with; otherwise the video is
+   * kept until the 24-hour sweep.
    *
    * @throws {OmsApiError} 404 when it is already gone.
    * @throws {OmsAuthError} 401 when the job belongs to someone else.
@@ -794,8 +772,8 @@ export class CaptionsNamespace extends Resource {
    * Under {@link CAPTION_CHUNKED_THRESHOLD} it is exactly {@link create}: one
    * `POST`, one probe, one round trip. At or above it, it is
    * {@link createChunked}. The answer is the same `"uploaded"` row either way,
-   * because `finish` and `create` render the same `:extended` view - so the
-   * caller's step 2 does not need to know which path ran.
+   * because `finish` and `create` answer the same shape - so the caller's
+   * step 2 does not need to know which path ran.
    *
    * The size comes from {@link captionUploadSize}, which cannot always find
    * one: a `ReadableStream` and some React Native picks have no length until
@@ -839,20 +817,19 @@ export class CaptionsNamespace extends Resource {
    * the assembled file and creates the row, so this resolves with the same
    * `"uploaded"` row {@link create} would have answered.
    *
-   * Nothing is cleaned up on failure and nothing needs to be: the controller
-   * deletes the sidecar's copy itself when `finish` rejects the file, and a run
-   * abandoned before `finish` leaves only a partial file on the sidecar's disk
-   * with no row pointing at it. There is no client-visible way to abort a
-   * session - the backend has `CaptionsClient.abort_upload` but no route onto
-   * it - so an abandoned upload is simply abandoned.
+   * Nothing is cleaned up on failure and nothing needs to be: the server
+   * discards the parts itself when `finish` rejects the file, and a run
+   * abandoned before `finish` leaves no job behind. There is no way to abort
+   * a session, so an abandoned upload is simply abandoned.
    *
    * **React Native cannot take this path.** The bytes have to be sliced, and a
    * picked `{ uri, name, type }` is a handle into the device that only a native
    * module can open - so this throws for one rather than uploading an empty
    * file with a 200 on it. What works on a phone is {@link create} (the
    * transport hands the descriptor to RN's own `FormData` verbatim and the
-   * platform streams it off disk), which caps out at Cloudflare's ~100 MB. Past
-   * that the only ways through are reading the file into a `Uint8Array` first -
+   * platform streams it off disk), which caps out at the ~100 MB request
+   * limit. Past that the only ways through are reading the file into a
+   * `Uint8Array` first -
    * Expo's `new File(uri).bytes()`, which means the whole video in the JS heap,
    * so it is not a plan for 250 MiB - or shrinking the video on the device.
    *
@@ -878,7 +855,7 @@ export class CaptionsNamespace extends Resource {
       throw new OmsError(
         `Cannot chunk-upload "${input.video.filename}": it is a React Native file descriptor ` +
           `(${input.video.data.uri}), and the chunked path has to slice the bytes. Use create() for a file ` +
-          "under Cloudflare's ~100 MB request cap, or read the video into a Uint8Array first " +
+          "under the ~100 MB request cap, or read the video into a Uint8Array first " +
           "(Expo: `new File(uri).bytes()`) and pass that.",
         "invalid_request",
       );
@@ -939,20 +916,19 @@ export class CaptionsNamespace extends Resource {
    *
    * Three things happen here and nowhere else in the flow: the captcha is
    * verified, the 250 MiB ceiling is checked against the DECLARED size, and the
-   * job id is minted - early, because the sidecar needs an id to write parts
-   * under and the row cannot exist until the file is whole. So a session is not
-   * a job: nothing is in the database yet, and {@link get} has nothing to find
-   * until {@link finishUpload} returns.
+   * job id is minted - early, but the job itself does not exist until the file
+   * is whole. So a session is not a job: {@link get} has nothing to find until
+   * {@link finishUpload} returns.
    *
-   * NOT retried by default. A replay opens a SECOND sidecar upload under a
-   * second job id and hands back a second token, and the first is then orphaned
-   * on the sidecar's disk with no route to abort it.
+   * NOT retried by default. A replay opens a SECOND session under a second job
+   * id and hands back a second token, and the first is then orphaned with no
+   * way to abort it.
    *
    * Rate limit: 20 a minute, shared with every other expensive tool - the same
    * bucket `POST /caption_jobs` counts against, since this is its twin.
    *
    * @throws {OmsApiError} 413 when `size` is over 250 MiB, 400 when it is not
-   *   positive, 503 when the captions sidecar is down.
+   *   positive, 503 when the captions service is unavailable.
    * @throws {OmsAuthError} 401 when anonymous and the captcha is missing or bad.
    * @throws {OmsQuotaError} 429 from the expensive-tools throttle. No daily
    *   quota is spent by an upload - only a transcribed window is metered.
@@ -973,10 +949,7 @@ export class CaptionsNamespace extends Resource {
    * `POST /caption_jobs/uploads/parts?offset=` - one part, as raw bytes.
    *
    * The body is the part itself, `application/octet-stream`, with no envelope:
-   * not a form field, not base64, not JSON. Rails never reads it into a string
-   * - it streams the request body straight through to the sidecar - so a 32 MiB
-   * part costs 32 MiB of socket rather than 32 MiB of Ruby heap, and that is
-   * why the endpoint takes bytes rather than a multipart part.
+   * not a form field, not base64, not JSON.
    *
    * RETRIED BY DEFAULT, which no other writing method in this SDK is. The
    * server writes the part at the offset the query names, so a replay is the
@@ -992,10 +965,10 @@ export class CaptionsNamespace extends Resource {
    *
    * @param session The session from {@link startUpload}, or its token.
    * @param offset Byte offset of this part in the whole file, from `0`.
-   * @returns The byte count the sidecar acknowledged, from `{ received }`.
+   * @returns The byte count the server acknowledged, from `{ received }`.
    * @throws {OmsApiError} 400 for an over-long part, an offset past the
    *   declared size, or a token that has expired (six hours); 503 when the
-   *   sidecar is down.
+   *   captions service is unavailable.
    */
   async uploadPart(
     session: CaptionUploadSession | string,
@@ -1020,15 +993,14 @@ export class CaptionsNamespace extends Resource {
   /**
    * `POST /caption_jobs/uploads/finish` - assembles, probes and creates the row.
    *
-   * This is where a chunked upload becomes a job: the sidecar joins the parts,
-   * ffprobe reads the result, and only then is a `CaptionJob` written, with the
-   * id that was sealed into the token at the start. The answer is the same
-   * `:extended` view {@link create} returns, in `"uploaded"`.
+   * This is where a chunked upload becomes a job: the parts are joined and
+   * probed, and only then is a `CaptionJob` created, with the id that was
+   * sealed into the token at the start. The answer is the same shape
+   * {@link create} returns, in `"uploaded"`.
    *
    * It is also where a bad upload is caught. A file that does not decode, or
-   * one over 20 minutes, is a 400 - and the controller deletes the sidecar's
-   * copy before answering, so there is nothing to clean up and nothing to
-   * retry: the parts are gone with it.
+   * one over 20 minutes, is a 400 - and the server discards the parts before
+   * answering, so there is nothing to clean up and nothing to retry.
    *
    * NOT retried by default. The row is created with a fixed id, so a replay
    * that lands after a lost answer fails on the id already existing and reports
@@ -1036,7 +1008,7 @@ export class CaptionsNamespace extends Resource {
    *
    * @throws {OmsApiError} 400 when the assembled file cannot be read or runs
    *   past 20 minutes, 400 "Invalid or expired upload session" for a token that
-   *   is over six hours old, 503 when the sidecar is down.
+   *   is over six hours old, 503 when the captions service is unavailable.
    */
   async finishUpload(session: CaptionUploadSession | string, options: RequestOptions = {}): Promise<CaptionJob> {
     return this.http.post<CaptionJob>(

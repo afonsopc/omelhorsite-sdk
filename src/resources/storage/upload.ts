@@ -1,13 +1,12 @@
 /**
  * The direct-upload driver.
  *
- * Bytes never pass through Rails. The flow the backend implements, and the one
- * this module follows exactly:
+ * Bytes never pass through the API. The flow:
  *
  * 1. `POST /fs_nodes/batch_upload_urls` with a manifest of up to 100 files
  *    (`client_id`, `name`, `size`, and optionally `relative_path`,
  *    `content_type`, `checksum`). ONE request does directory resolution, one
- *    quota reservation under a single lock, node creation and plan minting.
+ *    quota reservation, node creation and plan minting.
  * 2. Per file the server answers a {@link UploadPlan}:
  *    - `strategy: "direct"` below 32 MiB: PUT the whole body to a presigned URL
  *      with the exact headers returned, then remember `blob_signed_id`;
@@ -25,27 +24,21 @@
  *   self-contained implementation - see the note there.
  * - The presigned PUTs go to the object store, NOT to the API. They must be
  *   sent with the injected fetch but WITHOUT the `Authorization` header, or
- *   MinIO rejects the request for having two authentication schemes.
+ *   the store rejects the request for having two authentication schemes.
  *
  * A node whose bytes never landed is adopted on the next attempt rather than
  * failing, so a torn batch is simply retried with the same manifest.
  *
- * Multipart is not an optimisation. The object store sits behind Cloudflare on
- * a plan that caps a request body at roughly 100 MB, so anything larger has no
- * other way in.
+ * Multipart is not an optimisation. A single request to the object store is
+ * capped at roughly 100 MB, so anything larger has no other way in.
  *
  * ## Progress, and why it ticks per transfer rather than per byte
  *
- * The bytes go to a presigned MinIO URL. Rails is never in the data path, and
- * neither is rack-attack - so a progress bar here is a pure client-side
- * problem, and the SDK solves it as far as `fetch` allows and no further.
+ * `fetch` has no upload-progress event, and the two ways around it were both
+ * rejected for the core:
  *
- * `fetch` has no upload-progress event. The two ways out were weighed and both
- * were rejected for the core:
- *
- * - **XHR**, which is what the web frontend's axios uses today, is the only API
- *   that reports request bytes as they leave. It does not exist in a
- *   Cloudflare-Worker-class isolate, and this package must load there.
+ * - **XHR** is the only API that reports request bytes as they leave. It does
+ *   not exist in a Worker-class isolate, and this package must load there.
  * - **A counting `ReadableStream` request body** would run in an isolate, and
  *   still does not work HERE. A stream body forces chunked transfer encoding,
  *   while a presigned PUT is signed over a fixed `Content-Length` (and, on the
@@ -93,37 +86,30 @@ import type { FsNode } from "../storage";
  * import { MULTIPART_THRESHOLD } from "@omelhorsite/sdk";
  * ```
  *
- * The number was verified in all three places it is currently written down, and
- * as of this writing they agree:
- *
- * - `FsServices::NodeBatchCreator::MULTIPART_THRESHOLD = 32.megabytes`, which
- *   is the only one that decides anything. The server compares
- *   `entry[:size] >= MULTIPART_THRESHOLD` and puts `strategy` in the plan.
- * - the web frontend's `lib/upload_core.ts`, which keeps its own literal.
- * - here.
- *
- * The client-side copies exist because the CHECKSUM has to be in the manifest
- * before the server has decided anything: below the threshold the digest is
- * mandatory (it is Content-MD5-bound into the presigned signature), at or above
- * it is pointless (multipart verifies per-part ETags). So the comparison is
- * made twice, and {@link manifestEntryFor} uses `<` against exactly the
- * server's `>=`.
+ * The server decides the strategy per file with `size >= 32 MiB` and puts it
+ * in the plan. The client-side copy exists because the CHECKSUM has to be in
+ * the manifest before the server has decided anything: below the threshold
+ * the digest is mandatory (it is Content-MD5-bound into the presigned
+ * signature), at or above it is pointless (multipart verifies per-part ETags).
+ * So the comparison is made twice, and {@link manifestEntryFor} uses `<`
+ * against exactly the server's `>=`.
  *
  * Drift is expensive and silent in one direction: a client that thinks the
  * threshold is HIGHER than the server's omits the checksum on a file the server
- * still plans as direct, and the upload dies at MinIO with a signature error
- * that never mentions checksums. That is the whole reason this is exported.
+ * still plans as direct, and the upload dies at the object store with a
+ * signature error that never mentions checksums. That is the whole reason this
+ * is exported.
  */
 export const MULTIPART_THRESHOLD = 32 * 1024 * 1024;
 
 /**
- * Part size for the multipart path. Mirrors the backend, but it is only a
+ * Part size for the multipart path. The server's default, but only a
  * fallback: the real part size is whatever `multipart/start` answered, and that
  * is the number the driver slices with.
  */
 export const MULTIPART_PART_SIZE = 32 * 1024 * 1024;
 
-/** Maximum files in one `batch_upload_urls` call. Mirrors the backend. */
+/** Maximum files in one `batch_upload_urls` call. Server limit. */
 export const MAX_BATCH = 100;
 
 /**
@@ -135,30 +121,30 @@ export const MAX_BATCH = 100;
  */
 export const DEFAULT_BATCH_SIZE = 50;
 
-/** Maximum part URLs requested in one call. Mirrors the backend. */
+/** Maximum part URLs requested in one call. Server limit. */
 export const MAX_PART_URLS = 100;
 
-/** Parts one multipart upload may have. Mirrors the backend's `MAX_PARTS`. */
+/** Parts one multipart upload may have. Server limit. */
 export const MAX_PARTS = 10_000;
 
 /** Part URLs asked for in one round trip. Below {@link MAX_PART_URLS} on purpose. */
 export const PART_URL_WINDOW = 32;
 
-/** Parallel presigned PUTs in flight by default. The store is a Pi behind Cloudflare. */
+/** Parallel presigned PUTs in flight by default. Keep it modest. */
 export const DEFAULT_UPLOAD_CONCURRENCY = 4;
 
 /**
- * The `fs_upload/authed` throttle: `batch_upload_urls`, `batch_attach_blobs`
- * and every `multipart/*` call share 300 requests a minute, keyed by session.
- * {@link UploadManager} paces itself against this so a large run degrades into
- * waiting rather than into a wall of 429s.
+ * `batch_upload_urls`, `batch_attach_blobs` and every `multipart/*` call
+ * share 300 requests a minute, keyed by session. {@link UploadManager} paces
+ * itself against this so a large run degrades into waiting rather than into a
+ * wall of 429s.
  */
 export const FS_UPLOAD_RATE_LIMIT = 300;
 
 /**
- * The `fs_bulk_job/authed` throttle: `copy`, `create_directories`,
- * `empty_trash` and `move_to_trash` share TWELVE requests a minute. It is the
- * tightest limit in the API and the easiest one to trip by looping.
+ * `copy`, `create_directories`, `empty_trash` and `move_to_trash` share
+ * TWELVE requests a minute. It is the tightest limit in the API and the
+ * easiest one to trip by looping.
  */
 export const FS_BULK_JOB_RATE_LIMIT = 12;
 
@@ -276,7 +262,7 @@ export interface UploadInput {
    * folder upload costs no extra round trips. A `..` segment is a 400.
    */
   readonly relativePaths?: string[];
-  /** Parallel PUTs in flight. Keep it modest: the store is a Pi behind Cloudflare. */
+  /** Parallel PUTs in flight. Keep it modest. */
   readonly concurrency?: number;
   /** Files per `batch_upload_urls` call. Clamped to {@link MAX_BATCH}. */
   readonly batchSize?: number;
@@ -384,7 +370,7 @@ export interface UploadManagerOptions {
    *
    * Two things the wrapper MUST get right, both of which the SDK's own
    * transport already does. It must not add an `Authorization` header or a
-   * cookie: the presigned signature is the credential and MinIO rejects a
+   * cookie: the presigned signature is the credential and the store rejects a
    * request carrying two authentication schemes. And it must expose `ETag` on
    * the `Response` it builds, or the multipart tier has nothing to complete
    * with - in a browser that additionally needs `ETag` in the bucket's
@@ -403,7 +389,7 @@ export interface UploadManagerOptions {
  * steps, for instance to resume a torn multipart.
  */
 export class UploadManager extends Resource {
-  /** Paces every control-plane call against the `fs_upload` throttle. */
+  /** Paces every control-plane call against the 300-a-minute upload limit. */
   readonly gate: StorageRateGate;
 
   private readonly transport: FetchLike;
@@ -523,8 +509,7 @@ export class UploadManager extends Resource {
               if (plan.strategy === "multipart") {
                 // `concurrency` deliberately does NOT reach the part pool: it
                 // already bounds how many FILES run at once, and forwarding it
-                // would square the number of PUTs in flight at a store that is
-                // a Raspberry Pi behind Cloudflare.
+                // would square the number of PUTs in flight at the store.
                 await this.uploadMultipart(plan.fs_node_id, entry.blob, {
                   ...transfer,
                   onPart: (bytes) => report(bytes),
@@ -609,9 +594,9 @@ export class UploadManager extends Resource {
    * progress accounting drives `createBatch` -> {@link putDirect} /
    * {@link uploadMultipart} -> {@link attachBlobs} itself, and this is where it
    * learns the per-file strategy and the byte counts it will be reporting
-   * against. Whatever it does, it must pace itself against `fs_upload` (300
-   * requests a minute, shared by every call in this class) - {@link gate} is
-   * exposed for exactly that.
+   * against. Whatever it does, it must pace itself against the 300 requests a
+   * minute shared by every call in this class - {@link gate} is exposed for
+   * exactly that.
    *
    * @throws {OmsApiError} 400 on a structural problem, 404 when the parent is
    *   not a directory the caller may write to.
@@ -650,8 +635,8 @@ export class UploadManager extends Resource {
    * PUTs one whole body to a presigned URL.
    *
    * Sends the plan's headers verbatim and NO `Authorization`: this request goes
-   * to the object store, not to the API. MinIO refuses a request that carries
-   * both a presigned signature and a bearer header.
+   * to the object store, not to the API, and the store refuses a request that
+   * carries both a presigned signature and a bearer header.
    *
    * Retries a network fault or a 5xx from the store. A 4xx is never retried: an
    * expired signature or a checksum mismatch is deterministic and a retry only
@@ -690,7 +675,7 @@ export class UploadManager extends Resource {
    * with per-item results even when every item failed: read `attached` on each
    * one, and never infer success from the status. A caller driving the flow by
    * hand must not skip this - a node with no blob is invisible in listings and
-   * is eventually swept by `FsNodeUploadReaperJob`.
+   * is eventually swept by the server.
    */
   async attachBlobs(
     attachments: Array<{ fs_node_id: Id; blob_signed_id: string }>,
@@ -805,7 +790,7 @@ export class UploadManager extends Resource {
    * parts, PUT them in parallel, complete.
    *
    * Parts are sliced with the size the SERVER reported, never with
-   * {@link MULTIPART_PART_SIZE}, so a change on the backend does not silently
+   * {@link MULTIPART_PART_SIZE}, so a server-side change does not silently
    * corrupt an upload here.
    *
    * Phases 2 and 3 at once for a file at or above {@link MULTIPART_THRESHOLD}:
@@ -940,8 +925,8 @@ export class UploadManager extends Resource {
           body,
           ...(options.signal ? { signal: options.signal } : {}),
           // The presigned signature IS the credential. A cookie or a bearer
-          // header alongside it makes MinIO reject the request for carrying
-          // two authentication schemes.
+          // header alongside it makes the store reject the request for
+          // carrying two authentication schemes.
           credentials: "omit",
           redirect: "follow",
         });
@@ -1021,7 +1006,7 @@ export class UploadManager extends Resource {
 /**
  * Base64 MD5 of a blob, in the exact form `Content-MD5` wants.
  *
- * The algorithm is not negotiable: the backend binds this digest into the
+ * The algorithm is not negotiable: the server binds this digest into the
  * presigned PUT signature as `Content-MD5`, so anything else makes the object
  * store reject the upload with a signature error that never mentions checksums.
  *
@@ -1089,7 +1074,7 @@ async function buildManifestEntry(
 
   // The server picks the strategy, but the checksum has to be in the manifest
   // BEFORE it decides, so the threshold is evaluated here too. Same comparison
-  // as NodeBatchCreator: at or above the threshold is multipart, and multipart
+  // the server makes: at or above the threshold is multipart, and multipart
   // verifies per-part ETags instead of a whole-file digest.
   const checksum = blob.size < MULTIPART_THRESHOLD ? await (input.md5 ?? md5Base64)(blob) : undefined;
 
@@ -1149,7 +1134,7 @@ async function runPool<T>(items: T[], limit: number, worker: (item: T) => Promis
 async function readStoreError(response: Response): Promise<string> {
   try {
     const text = await response.text();
-    // S3 and MinIO answer XML. One line of it is all a caller needs.
+    // The store answers S3-style XML. One line of it is all a caller needs.
     const message = /<Message>([^<]*)<\/Message>/.exec(text)?.[1];
     return (message ?? text).slice(0, 400);
   } catch {

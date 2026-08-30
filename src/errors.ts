@@ -8,8 +8,8 @@
  * The API answers with at least four different error body shapes, so anything
  * that reads an error body must go through {@link normalizeErrorBody}:
  *
- * - a bare JSON string:            `"Image too large"`            (ResponseHelpers)
- * - a sentence from ActiveModel:   `"Name can't be blank and ..."` (error_messages)
+ * - a bare JSON string:            `"Image too large"`
+ * - a validation sentence:         `"Name can't be blank and ..."`
  * - an object with `error`:        `{"error":"rate_limited","retry_after":37}`
  * - an object of field errors:     `{"errors":{"url":["is invalid"]}}`
  * - plain text / HTML:             short-link 404 pages, proxy errors
@@ -32,7 +32,7 @@ export type OmsErrorCode =
   | "unsupported"
   | "unknown";
 
-/** Extra context attached to an error, useful for logs and for the CLI. */
+/** Extra context attached to an error, useful for logs. */
 export interface OmsErrorContext {
   /** HTTP method of the failing request, when there was one. */
   readonly method?: string;
@@ -55,9 +55,9 @@ export class OmsError extends Error {
    * This class's own name, as a LITERAL.
    *
    * `this.name = new.target.name` would be the obvious way to do this and it
-   * is wrong here: `bun build --minify` renames the classes, so the shipped
-   * `oms` binary reported `name: "A"` in its JSON error envelope while a dev
-   * run reported `OmsNetworkError`. A minifier renames identifiers, never
+   * is wrong here: `bun build --minify` renames the classes, so a minified
+   * build reported `name: "A"` in its JSON error envelope while a dev run
+   * reported `OmsNetworkError`. A minifier renames identifiers, never
    * string literals or property names, so a static literal survives the build.
    *
    * Every subclass shadows this, and `new.target` is the constructor that was
@@ -146,9 +146,6 @@ export class OmsApiError extends OmsError {
 
 /**
  * 401 or 403: the credential is missing, expired, or not allowed to do this.
- *
- * The CLI turns this into "run `oms auth login`"; the MCP server turns it into
- * a device-flow prompt.
  */
 export class OmsAuthError extends OmsApiError {
   static override readonly errorName: string = "OmsAuthError";
@@ -162,10 +159,10 @@ export class OmsAuthError extends OmsApiError {
 /**
  * 429, or a documented daily-quota rejection.
  *
- * Two different producers land here and they do not look alike:
- * rack-attack answers `{"error":"rate_limited","retry_after":37}` with a
- * `Retry-After` header, while a controller quota gate answers a bare string
- * such as `"Daily edit quota reached (5/day)"` with no header at all. Read
+ * Two different producers land here and they do not look alike: a rate limit
+ * answers `{"error":"rate_limited","retry_after":37}` with a `Retry-After`
+ * header, while a daily quota answers a bare string such as
+ * `"Daily edit quota reached (5/day)"` with no header at all. Read
  * {@link retryAfterMs}; it is `undefined` in the second case.
  */
 export class OmsQuotaError extends OmsApiError {
@@ -247,7 +244,7 @@ export interface NormalizedError {
   readonly message: string;
   /** A code the server named itself (`{"error":"rate_limited"}`), if any. */
   readonly serverCode: string | undefined;
-  /** Per-field messages, when the body was shaped like ActiveModel errors. */
+  /** Per-field messages, when the body was a field-to-messages map. */
   readonly fieldErrors: Record<string, string[]> | undefined;
 }
 
@@ -293,7 +290,7 @@ function flattenMessage(value: unknown, depth = 0): string {
       const flattened = flattenMessage(record[key], depth + 1);
       if (flattened.length > 0) return flattened;
     }
-    // ActiveModel-shaped map: { url: ["is invalid"], name: ["can't be blank"] }
+    // Field map: { url: ["is invalid"], name: ["can't be blank"] }
     const pairs = Object.entries(record)
       .map(([key, entry]) => {
         const flattened = flattenMessage(entry, depth + 1);
@@ -340,7 +337,7 @@ function readFieldErrors(body: unknown): Record<string, string[]> | undefined {
 
 /**
  * Reads a `Retry-After` header. RFC 9110 allows both delay-seconds and an
- * HTTP-date; rack-attack sends seconds, but a proxy in front may not.
+ * HTTP-date; the API sends seconds, but a proxy in front may not.
  *
  * @returns Milliseconds to wait, or `undefined` when the header is absent or junk.
  */

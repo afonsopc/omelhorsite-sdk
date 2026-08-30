@@ -1,13 +1,12 @@
 /**
- * The `realtime` namespace: ActionCable over a raw WebSocket.
+ * The `realtime` namespace: Action Cable over a raw WebSocket.
  *
- * This is the only transport in the SDK that is not HTTP, and it is the reason
- * "the frontend uses 100% of the SDK" can be true rather than nearly true.
- * Everything else here talks to `/`-rooted JSON endpoints through
- * {@link ApiClient}; this talks the ActionCable v1 wire protocol to `/cable`,
- * and it deliberately does NOT depend on `@rails/actioncable` - that package
- * assumes a browser, pulls in its own global logger, and is bigger than the
- * eighty lines of protocol it implements.
+ * This is the only transport in the SDK that is not HTTP. Everything else
+ * talks to `/`-rooted JSON endpoints through {@link ApiClient}; this talks the
+ * Action Cable v1 wire protocol to `/cable`, and it deliberately does NOT
+ * depend on `@rails/actioncable` - that package assumes a browser, pulls in
+ * its own global logger, and is bigger than the eighty lines of protocol it
+ * implements.
  *
  * ## The protocol, in full
  *
@@ -36,46 +35,41 @@
  * ## The identifier is a string, and it is compared as one
  *
  * `identifier` is a JSON-encoded string such as `'{"channel":"PlaybackChannel"}'`.
- * The server echoes back the exact bytes it received and Rails routes incoming
- * frames by looking that string up in a map. Re-serialising with the keys in a
+ * The server echoes back the exact bytes it received and routes incoming
+ * frames by looking that string up. Re-serialising with the keys in a
  * different order produces a different string, the lookup misses, and the
  * symptom is not an error: it is a subscription that confirms and then never
  * receives anything. So this module builds the identifier ONCE per
  * subscription, keys its own registry by that same string, and never rebuilds
  * it - including across a reconnect.
  *
- * ## Four traps, all of them confirmed against the Rails source
+ * ## Four traps
  *
  * 1. **The handshake authenticates on the FIRST candidate, with no fallback.**
- *    `ApplicationCable::Connection#find_session` calls
- *    `Session.token_from_request`, which is `candidate_tokens(request).first`:
- *    the `Authorization` header, then `?token=`, then the session cookie, and
- *    it takes the first one that is merely NON-BLANK. Contrast the HTTP path,
- *    which uses `Session.resolve_from_request` and tries each candidate until
- *    one resolves to a live session. A stale `Authorization` header therefore
- *    shadows a perfectly good cookie on the cable and on the cable only. This
- *    module never sends an `Authorization` header on the handshake (browsers
- *    cannot attach one to a WebSocket anyway) and puts the token in the query
- *    string, exactly as `oms-music` does.
- * 2. **Anonymous connections are ACCEPTED.** `connect` sets `current_user` to
- *    `nil` and returns; it does not `reject_unauthorized_connection`. A bad
- *    token, an expired token, or no token at all produces a perfectly healthy
- *    socket that says `welcome` and then pings forever. The identity failure
- *    surfaces ONE LEVEL DOWN, as `reject_subscription` on each channel that
- *    needs a user. A client that only handles connection errors will sit there
- *    believing it is signed in. Handle {@link CableHandlers.onReject}, always.
- * 3. **Only legacy `Session` tokens work.** `find_session` ends in
- *    `Session.find_by(token:)` - it never looks at `oauth_access_tokens`. An
- *    OAuth access token that authenticates every REST call in this SDK
- *    produces an ANONYMOUS cable connection, i.e. trap 2. There is no scope
- *    that fixes this and no error that says it; you get silent rejections on
- *    every channel. Cable access needs a session token or the session cookie.
- * 4. **`/cable` is exempt from the rate limits.** It is on rack-attack's
- *    allowlist, so neither the 600/min authed ceiling nor the 120/min anonymous
- *    one applies to the handshake or to anything sent over the socket. That is
- *    a convenience for `position_tick` at 1 Hz, not a licence: the reconnect
- *    backoff below exists because an unthrottled reconnect loop against a
- *    restarting server is a self-inflicted denial of service.
+ *    The `Authorization` header, then `?token=`, then the session cookie: the
+ *    handshake takes the first one that is merely NON-BLANK. The HTTP API
+ *    tries each candidate until one resolves to a live session; the cable does
+ *    not. A stale `Authorization` header therefore shadows a perfectly good
+ *    cookie on the cable and on the cable only. This module never sends an
+ *    `Authorization` header on the handshake (browsers cannot attach one to a
+ *    WebSocket anyway) and puts the token in the query string.
+ * 2. **Anonymous connections are ACCEPTED.** A bad token, an expired token, or
+ *    no token at all produces a perfectly healthy socket that says `welcome`
+ *    and then pings forever. The identity failure surfaces ONE LEVEL DOWN, as
+ *    `reject_subscription` on each channel that needs a user. A client that
+ *    only handles connection errors will sit there believing it is signed in.
+ *    Handle {@link CableHandlers.onReject}, always.
+ * 3. **Only session tokens work.** An OAuth access token that authenticates
+ *    every REST call in this SDK produces an ANONYMOUS cable connection, i.e.
+ *    trap 2. There is no scope that fixes this and no error that says it; you
+ *    get silent rejections on every channel. Cable access needs a session
+ *    token or the session cookie.
+ * 4. **`/cable` is exempt from the rate limits.** Neither the 600 requests a
+ *    minute authed ceiling nor the 120 a minute anonymous one applies to the
+ *    handshake or to anything sent over the socket. That is a convenience for
+ *    `position_tick` at 1 Hz, not a licence: the reconnect backoff below
+ *    exists because an unthrottled reconnect loop against a restarting server
+ *    is a self-inflicted denial of service.
  *
  * ## Injecting the socket
  *
@@ -280,7 +274,7 @@ export interface CableSubscription {
 // ---------------------------------------------------------------------------
 
 /**
- * Every channel class under `backend/app/channels`, as of this writing.
+ * Every channel the server exposes, as of this writing.
  *
  * There are exactly five, and none of them is generic: each has its own
  * subscription params, its own rejection rule, and its own message vocabulary.
@@ -309,26 +303,22 @@ export type CableChannelName = (typeof CABLE_CHANNELS)[number];
 /**
  * The playback state as the cable serialises it.
  *
- * **The id types here are not the ones the app docs promise.** `oms-music`'s
- * `API.md` says flatly that "on the cable, song ids and queue entries are
- * STRINGS". Half of that is true and the Rails source says which half:
+ * **Two id fields, two types.**
  *
- * - `queue` is a `jsonb` column that the channel writes as
- *   `Array(attrs["queue"]).map(&:to_s)`, so it really is `string[]` coming
- *   back, whatever the client sent;
- * - `song_id` is a `bigint` COLUMN (`db/schema.rb`, `playback_states`). You
- *   send it as a string, Rails casts it on write, and it comes back as a JSON
- *   NUMBER. It is not a string, and code that does `state.song_id === queue[i]`
- *   compares a number to a string and silently never matches.
+ * - `queue` really is `string[]` coming back, whatever the client sent: the
+ *   server stringifies it on write;
+ * - `song_id` is sent as a string and comes back as a JSON NUMBER. Code that
+ *   does `state.song_id === queue[i]` compares a number to a string and
+ *   silently never matches.
  *
  * The rule that does hold everywhere is: normalise with `String(...)` at the
  * boundary and compare strings. This SDK types the fields as the wire actually
- * carries them rather than as the doc wishes they were, so the mismatch is a
- * type error at your call site instead of a bug at runtime.
+ * carries them, so the mismatch is a type error at your call site instead of a
+ * bug at runtime.
  */
 export interface PlaybackSnapshotState {
   readonly active_device_id: string | null;
-  /** v1 shim, dies with the column-prune migration. */
+  /** v1 shim, scheduled for removal. */
   readonly active_session_id: string | null;
   /** A NUMBER, not a string. See the note on this interface. */
   readonly song_id: number | null;
@@ -357,7 +347,7 @@ export interface PlaybackSnapshotState {
   readonly vocal_volume: number;
   readonly instrumental_volume: number;
   /**
-   * The full blueprint of every queued song - by far the heaviest part of the
+   * The full record of every queued song - by far the heaviest part of the
    * payload, and OMITTED whenever the queue itself did not change.
    *
    * This is the single most misread field on the cable. `state_changed` for a
@@ -487,11 +477,11 @@ export type PlaybackMessage =
     };
 
 /**
- * The remote-control vocabulary, exactly as `COMMAND_SCHEMAS` lists it.
+ * The remote-control vocabulary.
  *
  * A name outside this set is answered with `error: unknown_command` and never
- * reaches a broadcast. `jam_add_song` is missing on purpose: it is server-built
- * in `JamsController` so a client cannot forge a jam proposal.
+ * reaches a broadcast. `jam_add_song` is missing on purpose: the server builds
+ * it itself so a client cannot forge a jam proposal.
  */
 export type PlaybackCommandName =
   | "play"
@@ -542,7 +532,7 @@ export interface PlaybackSubscribeParams {
  * `perform` is still there for anything added server-side before this file
  * catches up, but every action the channel defines today has a method, because
  * the argument shapes are validated strictly and a typo in an action name is
- * silently ignored by ActionCable rather than reported.
+ * silently ignored by the server rather than reported.
  */
 export interface PlaybackSubscription extends CableSubscription {
   /**
@@ -634,13 +624,13 @@ export type JamMessage =
   | { readonly type: "jam_updated"; readonly jam: unknown }
   | {
       readonly type: "song_proposed";
-      /** `song.id` is an INTEGER here - this payload is built by the controller. */
+      /** `song.id` is an INTEGER here. */
       readonly song: { readonly id: number; readonly title: string; readonly artist_names: string };
       readonly proposer: { readonly id: string; readonly handle: string; readonly name: string };
     }
   | {
       readonly type: "skip_votes";
-      /** The host's `PlaybackState#song_id`: a NUMBER, not a string. */
+      /** The host's playback `song_id`: a NUMBER, not a string. */
       readonly song_id: number | null;
       readonly count: number;
       readonly needed: number;
@@ -691,7 +681,7 @@ export type FriendListeningMessage =
 export interface JobMessage {
   /** Always `"snapshot"`, on subscribe and on every change alike. */
   readonly type: "snapshot";
-  /** The `:extended` job blueprint. Finished when `finished_at` is non-null. */
+  /** The job record, as `oms.jobs.get` answers it. Finished when `finished_at` is non-null. */
   readonly job: unknown;
 }
 
@@ -721,7 +711,7 @@ export type NotificationsMessage =
     }
   | {
       readonly type: "created";
-      /** The `:extended` notification blueprint. */
+      /** The notification record. */
       readonly notification: unknown;
       readonly unread_count: number;
     };
@@ -733,9 +723,9 @@ export type NotificationsMessage =
 /**
  * One multiplexed cable connection.
  *
- * All five channels share a single WebSocket, which is what ActionCable is for:
- * the `identifier` is the demultiplexing key. Open one of these per identity
- * and keep it for the lifetime of the session.
+ * All five channels share a single WebSocket; the `identifier` is the
+ * demultiplexing key. Open one of these per identity and keep it for the
+ * lifetime of the session.
  *
  * ## What a reconnect does to your subscriptions
  *
@@ -750,13 +740,13 @@ export type NotificationsMessage =
  * valid across all of it - you never re-subscribe by hand and you must not, or
  * you will end up with the same identifier registered twice.
  *
- * The thing to expect is that server-side subscribe-time work RUNS AGAIN,
- * because `subscribed` runs again. Concretely: `PlaybackChannel` re-registers
- * the device and re-broadcasts `devices_changed`, every channel re-transmits
- * its snapshot, and `FriendListeningChannel` re-reads the friend roster. That
- * last one is load-bearing in the other direction too - the roster is fixed at
- * subscribe time, so a new friend or a privacy flip only appears after a
- * resubscribe, which is why the app resubscribes it on foreground.
+ * The thing to expect is that server-side subscribe-time work RUNS AGAIN.
+ * Concretely: `PlaybackChannel` re-registers the device and re-broadcasts
+ * `devices_changed`, every channel re-transmits its snapshot, and
+ * `FriendListeningChannel` re-reads the friend roster. That last one is
+ * load-bearing in the other direction too - the roster is fixed at subscribe
+ * time, so a new friend or a privacy flip only appears after a resubscribe;
+ * resubscribe it on foreground.
  *
  * The thing that does NOT happen is a replay of anything you sent. Frames sent
  * while disconnected are dropped, not queued: see {@link CableSubscription.perform}.
@@ -895,7 +885,7 @@ class CableConnectionImpl implements CableConnection {
     // open, so say so instead of papering over it.
     if (this.subs.has(identifier)) {
       throw new OmsNetworkError(
-        `Already subscribed to ${identifier}. ActionCable keys subscriptions by identifier, so a second one would shadow the first: reuse the handle, or unsubscribe before resubscribing.`,
+        `Already subscribed to ${identifier}. Subscriptions are keyed by identifier, so a second one would shadow the first: reuse the handle, or unsubscribe before resubscribing.`,
       );
     }
     this.subs.set(identifier, registration);
@@ -912,8 +902,8 @@ class CableConnectionImpl implements CableConnection {
         self.send({
           command: "message",
           identifier,
-          // `data` is a JSON STRING, not an object. Rails parses it a second
-          // time on arrival; an object here is silently ignored.
+          // `data` is a JSON STRING, not an object. The server parses it a
+          // second time on arrival; an object here is silently ignored.
           data: JSON.stringify({ action, ...data }),
         });
       },
@@ -1288,9 +1278,9 @@ export function cableEndpoint(baseUrl: string, path = "/cable"): string {
  *
  * The token goes in the query and NOWHERE else. A browser cannot put a header
  * on a WebSocket handshake at all, and on the runtimes that can, doing so would
- * hit trap 1: `Session.token_from_request` takes the first non-blank candidate,
- * header first, so any header at all - including a stale one - decides the
- * identity and the query param is never consulted.
+ * hit trap 1: the handshake takes the first non-blank candidate, header first,
+ * so any header at all - including a stale one - decides the identity and the
+ * query param is never consulted.
  *
  * An empty string is treated as no credential, which is the cookie-auth case:
  * the handshake goes out bare and the browser attaches the httpOnly session
@@ -1338,29 +1328,26 @@ function defaultTimers(): CableTimers {
  * It holds no socket of its own. {@link connect} builds one and hands it back,
  * so a host that needs two identities (a signed-in user and an anonymous job
  * watcher) gets two connections rather than a hidden singleton it cannot
- * separate. That is the one place this differs from both existing
- * implementations, which each keep a module-level singleton - fine for one app,
- * wrong for a library.
+ * separate.
  *
  * ## Why the credential is passed in and not taken from the client
  *
  * `Oms` already holds a credential, and this namespace deliberately does not
- * reach into it. Two reasons, both from the Rails source rather than from
- * taste:
+ * reach into it. Two reasons:
  *
- * - the cable resolves ONLY `Session` tokens (`Session.find_by(token:)`), so
- *   the OAuth access token an `Oms` may be carrying is not a cable credential
- *   at all - silently reusing it would hand you an anonymous connection;
+ * - the cable resolves ONLY session tokens, so the OAuth access token an `Oms`
+ *   may be carrying is not a cable credential at all - silently reusing it
+ *   would hand you an anonymous connection;
  * - `sessionCookie: true` clients have no token to reuse, and their handshake
  *   needs no `?token=` because the browser sends the cookie. For those, pass
  *   nothing.
  *
  * ## Rate limits
  *
- * None. `/cable` is on rack-attack's allowlist, so neither the 600/min authed
- * ceiling nor the 120/min anonymous one applies to the handshake or to any
- * frame after it. The backoff in {@link CableConnectOptions.reconnectMaxMs} is
- * therefore the only thing standing between a restarting server and a
+ * None. `/cable` is exempt, so neither the 600 requests a minute authed
+ * ceiling nor the 120 a minute anonymous one applies to the handshake or to
+ * any frame after it. The backoff in {@link CableConnectOptions.reconnectMaxMs}
+ * is therefore the only thing standing between a restarting server and a
  * reconnect storm; it is not decorative.
  */
 export class RealtimeNamespace extends Resource {

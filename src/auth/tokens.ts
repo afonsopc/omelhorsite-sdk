@@ -2,15 +2,15 @@
  * Token providers: where the transport gets a bearer token from.
  *
  * The core has no storage. A provider is either a constant, or a thing the
- * host wired to its own store (the CLI's config file, a Worker KV namespace, a
+ * host wired to its own store (a config file, a Worker KV namespace, a
  * browser's memory). Nothing here reads a file or an environment variable.
  *
  * Two credential shapes exist today and both are just bearer tokens on the
  * wire:
- * - a legacy opaque session token (a UUID minted by `Session`), which never
- *   expires and carries no scopes;
- * - an OAuth 2 / OIDC access token from doorkeeper, which does expire and does
- *   carry scopes, and which comes with a refresh token.
+ * - a legacy opaque session token (a UUID), which never expires and carries no
+ *   scopes;
+ * - an OAuth 2 / OIDC access token, which does expire and does carry scopes,
+ *   and which comes with a refresh token.
  *
  * {@link TokenSet} models the second. The first is just a string.
  *
@@ -25,7 +25,7 @@ import { type ApiClient, readJson, type TokenProvider } from "../http";
 import type { RequestOptions } from "../types";
 
 /**
- * An OAuth 2 token response, as doorkeeper returns it.
+ * An OAuth 2 token response, as the token endpoint returns it.
  *
  * `expiresAt` is absolute epoch milliseconds, not the `expires_in` seconds the
  * server sends, so a stored set stays correct across a restart.
@@ -48,8 +48,8 @@ export interface TokenSet {
 /** Claims the SDK reads out of an OIDC id token. */
 export interface IdentityClaims {
   /**
-   * Stable user identifier: `users.id`. Never the handle and never the email,
-   * both of which the user can change.
+   * Stable user identifier: the user's `id`, as `oms.account.me()` reports it.
+   * Never the handle and never the email, both of which the user can change.
    */
   readonly sub: string;
   readonly iss?: string;
@@ -111,8 +111,8 @@ const REFRESH_REUSE_WINDOW_MS = 5_000;
 /**
  * Wraps a constant token. This is what `new Oms({ token })` builds.
  *
- * Accepts both credential kinds: an opaque session UUID and a doorkeeper
- * access token look identical on the wire.
+ * Accepts both credential kinds: an opaque session UUID and an OAuth access
+ * token look identical on the wire.
  */
 export function staticToken(token: string | null): TokenProvider {
   return {
@@ -259,8 +259,8 @@ export class OAuthTokenProvider implements TokenProvider {
         return true;
       }
 
-      // Another process (another CLI invocation) may have refreshed underneath
-      // us. `undefined` means we have never read the store, so there is no
+      // Another process sharing the store may have refreshed underneath us.
+      // `undefined` means we have never read the store, so there is no
       // token of ours to have been superseded and the shortcut does not apply.
       const known = this.cached;
       const stored = await this.read(true);
@@ -562,8 +562,8 @@ export class OmsOAuthError extends OmsError {
  * Recognises an OAuth error inside whatever the transport threw.
  *
  * Deliberately narrow: only 400 and 401 bodies are read as OAuth errors. A 429
- * comes from rack-attack with the body `{"error":"rate_limited"}`, and that
- * `error` key is NOT an OAuth code - reading it as one abandons a perfectly
+ * carries the body `{"error":"rate_limited"}`, and that `error` key is NOT an
+ * OAuth code - reading it as one abandons a perfectly
  * live device flow. It stays an {@link OmsQuotaError} and the caller handles
  * it as a rate limit.
  *
@@ -599,8 +599,8 @@ export function oauthErrorFrom(thrown: unknown): OmsOAuthError | undefined {
 export interface InsufficientScope {
   /**
    * The scopes the endpoint needed. EMPTY when the server named none, which
-   * means the endpoint has not been opened to OAuth clients at all - a backend
-   * gap, not a client bug. The two cases must read differently to the user.
+   * means the endpoint accepts no OAuth token at all - a server-side gap, not
+   * a client bug. The two cases must read differently to the user.
    */
   readonly required: string[];
   /** The `realm` parameter, when present. */
@@ -637,7 +637,7 @@ export function readInsufficientScope(error: unknown): InsufficientScope | undef
  *
  * The OAuth endpoints do not take JSON, which is why this exists next to
  * `ApiClient.post` rather than using it. Blank values are dropped rather than
- * sent empty, because doorkeeper reads `""` as a present-but-invalid parameter.
+ * sent empty, because the server reads `""` as a present-but-invalid parameter.
  *
  * Retries are OFF and stay off. Replaying `POST /oauth/token` after a lost
  * response is not safe: the server may have rotated the refresh token already,

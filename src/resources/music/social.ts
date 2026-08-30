@@ -2,41 +2,24 @@
  * The `music.social` namespace: jams, the music half of a public profile, the
  * music storage meter, the chat assistant and the DJ.
  *
- * Five endpoint families with one thing in common: not one of them is a CRUD
- * resource. Every one is a bespoke controller with a hand-written hash for a
- * body, so nothing here goes through Blueprinter, nothing here carries the
- * `id`/`created_at`/`updated_at` base fields as a matter of course, and none of
- * it accepts the list DSL (`search[...]`, `exact_search[...]`,
- * `modifiers[page]`). What a route sends is exactly what its `ok!({ ... })`
- * literal says, which is why every interface below is documented against the
- * controller rather than against a blueprint view. There is no paging anywhere
- * in this file either: every listing is a whole bare array with a server-side
- * cap, so no method returns a `Paginated`.
+ * None of these is a CRUD resource. The payloads are bespoke, none carries the
+ * `id`/`created_at`/`updated_at` base fields as a matter of course, none
+ * accepts the list DSL (`search[...]`, `exact_search[...]`, `modifiers[page]`),
+ * and there is no paging: every listing is a whole bare array with a
+ * server-side cap, so no method returns a `Paginated`.
  *
- * ## Only two of the five exist in the web frontend
- *
- * `/jams*` and `/users/:id/music_profile` are used by both clients and are the
- * best-tested surface here. **`/music/storage`, `/music_assistant*` and
- * `/music_dj*` are called only by the native app** - the web frontend has no
- * service for any of them. They are in the SDK because the app is one of the
- * three clients it serves, and because the assistant and the DJ are perfectly
- * usable from the CLI and the MCP server. Nothing about them needs a phone; the
- * note is about where the field experience comes from, so treat their shapes as
- * less battle-hardened than the jam ones.
- *
- * ## A jam is half HTTP and half cable, and this file is the HTTP half
+ * ## A jam is half HTTP and half realtime, and this file is the HTTP half
  *
  * Every method below performs an ACTION and returns what that action produced.
  * None of them tells you what the jam is doing right now. The host's current
  * song and position, the queue members are watching, the running skip tally,
- * "somebody joined", "the jam ended" - all of that arrives over ActionCable, on
- * two streams this SDK does not open and has no code for:
+ * "somebody joined", "the jam ended" - all of that arrives over the realtime
+ * WebSocket, on two streams this SDK does not open and has no code for:
  *
  * - `jam:<jam_id>` (see {@link jamStreamName}), carrying `snapshot`,
  *   `state_changed`, `position_tick`, `members_changed`, `jam_updated`,
  *   `song_proposed`, `skip_votes`, `skipped` and `ended`. It is RECEIVE-ONLY:
- *   `JamChannel` declares no client actions at all, which is why every mutation
- *   in a jam is one of the HTTP calls below.
+ *   every mutation in a jam is one of the HTTP calls below.
  * - `playback:user:<host_id>`, the host's own playback stream, where
  *   {@link MusicJamsNamespace.propose} and a passing
  *   {@link MusicJamsNamespace.skipVote} deposit a `command` for the host's
@@ -44,11 +27,10 @@
  *
  * Two consequences to design around:
  *
- * 1. **Join over HTTP first, subscribe second.** `JamChannel` authorizes on
- *    membership, so a subscription opened before `POST /jams/:id/join` has
- *    returned is answered with `reject_subscription`. A rejection later in the
- *    session means the jam ended or you were dropped - clear local state, do
- *    not retry-loop.
+ * 1. **Join over HTTP first, subscribe second.** The jam stream admits members
+ *    only, so a subscription opened before `POST /jams/:id/join` has returned
+ *    is rejected. A rejection later in the session means the jam ended or you
+ *    were dropped - clear local state, do not retry-loop.
  * 2. **A `200` from `propose` means "the message was sent", not "the song is
  *    queued".** The song enters the jam when the HOST's client acts on the
  *    `jam_add_song` command; a host whose app is backgrounded and disconnected
@@ -57,23 +39,18 @@
  *
  * ## Rate limits
  *
- * Not one of these paths has a `Rack::Attack` rule of its own, so all of them
- * sit under the general authenticated ceiling of **600 requests a minute**,
- * keyed by the literal `Authorization` header. The single extra ceiling is
- * application-level and lives in `MusicDjController`: forty generations per
- * user per hour shared between `/music_dj` and `/music_dj/batch`, counted in
- * the Rails cache. It is counted per REQUEST, before the work and before the
- * refusal, which is why {@link MusicDjNamespace} turns retrying off by default -
- * see {@link MUSIC_DJ_HOURLY_CAP}.
+ * Every path here sits under the general authenticated ceiling of **600
+ * requests a minute**, keyed by the `Authorization` header. The single extra
+ * ceiling is forty DJ generations per user per hour, shared between
+ * `/music_dj` and `/music_dj/batch` and counted per REQUEST, refused ones
+ * included, which is why {@link MusicDjNamespace} turns retrying off by
+ * default - see {@link MUSIC_DJ_HOURLY_CAP}.
  *
  * ## An OAuth access token cannot reach any of this
  *
- * `Authentication#enforce_oauth_scope!` denies by default: a Doorkeeper token
- * reaches an action only when its controller declared an `oauth_scope` for it.
- * None of these five controllers declares one, so a CLI or MCP host holding an
- * OAuth token gets `403 {"error":"insufficient_scope"}` on every route in this
- * file, whatever scopes it was granted. Use a session token (`POST /sessions`)
- * or, in the browser, the session cookie.
+ * Every route in this file answers `403 {"error":"insufficient_scope"}` to an
+ * OAuth access token, whatever scopes it was granted. Use a session token
+ * (`POST /sessions`) or, in the browser, the session cookie.
  *
  * ## Errors are bare JSON strings
  *
@@ -81,8 +58,7 @@
  * found"`. There is no `{ error: ... }` object and no envelope; the SDK's
  * `OmsError` carries the string in `message`. One status is worth calling out
  * before it costs somebody a session: **a refused join or a refused host action
- * is `401`, not `403`** - `JamsController` uses `unauthorized!` for
- * authorization failures. A host-wide "on 401, log the user out" interceptor
+ * is `401`, not `403`**. A host-wide "on 401, log the user out" interceptor
  * will sign somebody out for tapping Join on the wrong jam. Test the message,
  * or scope the interceptor to the auth routes.
  */
@@ -96,10 +72,9 @@ import type { Song, SongId } from "./songs";
  * ========================================================================== */
 
 /**
- * Primary key of a jam. An INTEGER (`jams` has a default `bigint` id), like
- * songs, playlists and artists - and unlike `host_id` and the member ids
- * sitting beside it in the very same payload, which are user ids and therefore
- * strings. `MusicListeningSnapshot.jam_id` is the same integer, so a feed row
+ * Primary key of a jam. An INTEGER, like songs, playlists and artists - and
+ * unlike `host_id` and the member ids sitting beside it in the very same
+ * payload, which are user ids and therefore strings. `MusicListeningSnapshot.jam_id` is the same integer, so a feed row
  * can be matched straight against {@link Jam.id}.
  */
 export type JamId = number;
@@ -110,23 +85,22 @@ export type JamQueueMode = "everyone" | "host";
 /** What it takes for a skip to pass. */
 export type JamSkipMode = "majority" | "host" | "anyone";
 
-/** Everything `Jam::QUEUE_MODES` accepts. Anything else is a `400`. */
+/** Every accepted `queue_mode`. Anything else is a `400`. */
 export const JAM_QUEUE_MODES = ["everyone", "host"] as const;
 
-/** Everything `Jam::SKIP_MODES` accepts. Anything else is a `400`. */
+/** Every accepted `skip_mode`. Anything else is a `400`. */
 export const JAM_SKIP_MODES = ["majority", "host", "anyone"] as const;
 
 /**
- * How many upcoming entries the cable's state payload carries
- * (`Jams::Serializer::UPCOMING_LIMIT`). Nothing in this file returns them - it
- * is here so a client sizing its "up next" list uses the server's number rather
- * than a guess.
+ * How many upcoming entries the realtime state payload carries. Nothing in
+ * this file returns them - it is here so a client sizing its "up next" list
+ * uses the server's number rather than a guess.
  */
 export const JAM_UPCOMING_LIMIT = 10;
 
 /**
  * How long a presigned `*_url` in any cross-user payload stays valid, in
- * milliseconds (`MediaUrls::EXPIRY`, six hours).
+ * milliseconds (six hours).
  *
  * The server caches each signature for five hours, so a URL you receive has at
  * least an hour of life left and the SAME string is handed out again across
@@ -148,11 +122,11 @@ export interface JamMember {
 }
 
 /**
- * A jam, as `Jams::Serializer.jam_hash` renders it.
+ * A jam.
  *
- * This is NOT a Blueprinter view. There is no `updated_at` here even though the
- * table has one, and `members` is a bespoke five-key hash rather than a user
- * view, so none of the base-record guarantees the rest of the API makes apply.
+ * There is no `updated_at`, and `members` is a bespoke five-key object rather
+ * than a user record, so none of the base-record guarantees the rest of the
+ * API makes apply.
  *
  * `members` comes back ordered by join time, which normally puts the host
  * first - normally, not always. Find the host with {@link jamHost} rather than
@@ -170,10 +144,10 @@ export interface Jam {
   /**
    * `null` while the jam is live.
    *
-   * Every route here scopes to `Jam.active` (`ended_at IS NULL`), so an ended
-   * jam answers `404` rather than a payload with a timestamp in this field. You
-   * will only ever see a non-null value on a copy you were already holding, or
-   * on one that arrived over the cable.
+   * Every route here only sees live jams, so an ended jam answers `404` rather
+   * than a payload with a timestamp in this field. You will only ever see a
+   * non-null value on a copy you were already holding, or on one that arrived
+   * over the realtime stream.
    */
   readonly ended_at: Timestamp | null;
   readonly members: JamMember[];
@@ -221,26 +195,16 @@ export interface JamSkipVoteResult {
  * ========================================================================== */
 
 /**
- * A song as the cross-user payloads render it
- * (`Listening::Snapshot.song_hash`): the seven fields somebody who does NOT own
- * the track is allowed to see.
+ * A song as the cross-user payloads render it: the seven fields somebody who
+ * does NOT own the track is allowed to see.
  *
- * ## `id` is a number, and every other client says otherwise
- *
- * `oms-music/src/domain/song.ts` types `SnapshotSong.id` as `string`, the web
- * frontend's `ListeningSong.id` is a `string`, and `docs/api-social-jams.md`
- * writes `id: string; // Song id (stringly numeric)` and repeats it in gotcha
- * 1 ("song ids are strings"). **All three are wrong about this payload.**
- * `songs` has a default `bigint` primary key and `Listening::Snapshot` emits
- * `id: song.id` with no cast, so it arrives as a JSON NUMBER exactly like
- * `Song.id` does everywhere else in the REST API. The mistake is invisible
- * while the field is only rendered or used as a cache key; it bites the first
- * time somebody writes `snapshot.song.id === song.id`, which is always false.
- * Song ids become strings on the CABLE (`position_tick.song_id`), which is
- * where that belief comes from.
+ * `id` is a JSON NUMBER here, exactly like `Song.id` everywhere else in the
+ * REST API. Song ids become strings only on the realtime stream
+ * (`position_tick.song_id`); do not stringify this one, or
+ * `snapshot.song.id === song.id` is always false.
  */
 export interface MusicListeningSong {
-  /** Integer song id. See the note above about three clients typing it wrong. */
+  /** Integer song id. */
   readonly id: number;
   readonly title: string;
   readonly album: string | null;
@@ -256,17 +220,16 @@ export interface MusicListeningSong {
    *
    * The viewer does not own the underlying attachment, so `/media/:id/data`
    * would refuse it - use this string verbatim and never try to re-derive one
-   * from the id. `null` is a real outcome: `MediaUrls.for_attachment` swallows
-   * a presign failure and returns nothing rather than raising.
+   * from the id. `null` is a real outcome: a failed presign yields `null`
+   * rather than an error.
    */
   readonly artwork_url: string | null;
 }
 
 /**
- * What a friend may see about somebody's playback
- * (`Listening::Snapshot.for_user`), and the shape the friends feed pushes over
- * `listening:user:<id>` with a `type: "listening_update"` key merged in AT THE
- * TOP LEVEL, not nested.
+ * What a friend may see about somebody's playback, and the shape the friends
+ * feed pushes over `listening:user:<id>` with a `type: "listening_update"` key
+ * merged in AT THE TOP LEVEL, not nested.
  */
 export interface MusicListeningSnapshot {
   readonly user: { readonly id: Id; readonly handle: string; readonly name: string };
@@ -309,12 +272,8 @@ export interface MusicProfileArtist {
 }
 
 /**
- * A profile the viewer is allowed to see.
- *
- * All six keys are always present on a visible profile - `MusicProfiles::Builder`
- * builds one literal with no conditionals - which is why they are required here
- * even though both existing clients type every field as optional. See
- * {@link MusicProfile} for why they had to.
+ * A profile the viewer is allowed to see. All six keys are always present on
+ * a visible profile, which is why they are required here.
  */
 export interface MusicProfileVisible {
   readonly visible: true;
@@ -336,10 +295,10 @@ export interface MusicProfileVisible {
  *
  * This is not an error and must not be handled as one. It is what a signed-in
  * stranger gets, what a friend of somebody with `share_listening` off gets, and
- * what the client contract asks you to render as nothing - a private profile is
- * deliberately indistinguishable from an empty one. A real `404` ("User not
- * found.") means the user does not exist; a `401` means you sent no credential,
- * because `music_profile` is not on the unauthenticated allowlist.
+ * what you should render as nothing - a private profile is deliberately
+ * indistinguishable from an empty one. A real `404` ("User not found.") means
+ * the user does not exist; a `401` means you sent no credential, because the
+ * route requires authentication.
  */
 export interface MusicProfileHidden {
   readonly visible: false;
@@ -348,13 +307,9 @@ export interface MusicProfileHidden {
 /**
  * `GET /users/:idOrHandle/music_profile`.
  *
- * A discriminated union rather than the "everything optional" object both
- * existing clients use (`MusicProfile` in `oms-music/src/domain/social.ts` and
- * in the frontend's `SocialMusicService.ts`, both with `visible: boolean` and
- * five `?` fields). Those types are not wrong about the wire - they simply
- * cannot say that the five fields are present together or absent together, so
- * every read site needs a `?.` that TypeScript can never discharge. Narrow once
- * with {@link isMusicProfileVisible} and the rest is non-optional.
+ * A discriminated union: the five content fields are present together or
+ * absent together. Narrow once with {@link isMusicProfileVisible} and the rest
+ * is non-optional.
  */
 export type MusicProfile = MusicProfileVisible | MusicProfileHidden;
 
@@ -366,41 +321,24 @@ export type MusicProfile = MusicProfileVisible | MusicProfileHidden;
  * `GET /music/storage`: bytes of music media stored, against the account's
  * ceiling.
  *
- * ## `limit_bytes` IS NULLABLE, and it did not use to be
- *
- * The ceiling was `users.music_storage_limit_bytes`, a `NOT NULL` column, so
- * `limit_bytes` was always a number - which is why the native app types it
- * `limit_bytes: number` and has no `unlimited` field at all
- * (`oms-music/src/api/endpoints/musicStorage.ts`). Since the quota catalogue
- * landed (`Quotas::CATALOG`, migration `20260826120000`) an administrator can
- * mark an account unlimited by storing a `QuotaOverride` row with a `NULL`
- * value; the limit then resolves to `Float::INFINITY` and `Quotas.limit_json`
- * serialises it as `null`, because JSON has no infinity.
- *
+ * `limit_bytes` IS NULLABLE: an administrator can mark an account unlimited,
+ * and the limit is then serialised as `null`, because JSON has no infinity.
  * So read {@link MusicStorageUsage.unlimited} FIRST. A client that divides
  * `used_bytes` by `limit_bytes` renders `NaN%`, and one that reads `null` as
  * `0` shows a permanently full bar to exactly the accounts that were given no
  * ceiling at all. {@link musicStorageRemaining} and
  * {@link musicStorageAffords} answer both questions without the arithmetic.
+ * An ordinary account's ceiling is the default of 100 GiB.
  *
- * An ordinary account is unaffected: with no override row the limit is the
- * catalogue default of 100 GiB - the same number the old column defaulted to,
- * and `quotas_test.rb` pins the two together so they cannot drift apart.
- *
- * ## The same number is also in `oms.quotas`
- *
- * `music_storage_bytes` is one of the six resources `GET /quotas` reports, and
- * both routes call `Quotas.limit_for` and `Music::Quota.usage`, so they cannot
- * disagree. Use `oms.quotas.list()` when you want every ceiling at once; use
- * this when you want only this one, or when you are talking to a build older
- * than the catalogue.
+ * The same number is reported as `music_storage_bytes` by `GET /quotas`, and
+ * the two cannot disagree. Use `oms.quotas.list()` when you want every ceiling
+ * at once; use this when you want only this one.
  */
 export interface MusicStorageUsage {
   /**
    * Sum of the DISTINCT blobs reachable from the account's songs, artists and
    * playlists. Computed live on every call - a blob shared by two records
-   * counts once, exactly as it costs once in object storage - so it can never
-   * drift the way the storage tree's cached counters did. It is also not free:
+   * counts once, exactly as it costs once in storage. It is also not free:
    * read it on a settings screen, not on a timer.
    */
   readonly used_bytes: number;
@@ -417,38 +355,36 @@ export interface MusicStorageUsage {
 /** Primary key of a persisted assistant chat. An INTEGER. */
 export type MusicAssistantChatId = number;
 
-/** Turns of history the server feeds the model (`Responder::MAX_HISTORY`). */
+/** Turns of history the server feeds the model. */
 export const MUSIC_ASSISTANT_HISTORY_TURNS = 20;
 
-/** Messages a chat keeps before the oldest fall off (`AssistantChat::MAX_MESSAGES`). */
+/** Messages a chat keeps before the oldest fall off. */
 export const MUSIC_ASSISTANT_CHAT_MAX_MESSAGES = 200;
 
-/** Player actions one answer may carry (`Responder::MAX_ACTIONS`). */
+/** Player actions one answer may carry. */
 export const MUSIC_ASSISTANT_MAX_ACTIONS = 10;
 
 /**
- * Largest request body `MusicAssistantController` accepts, in bytes. Over it is
+ * Largest request body `POST /music_assistant` accepts, in bytes. Over it is
  * `413 "Request too big"`, decided from `Content-Length` before any parsing.
  */
 export const MUSIC_ASSISTANT_MAX_BODY_BYTES = 256 * 1024;
 
 /**
- * How long a chat may sit idle before it seals itself, in milliseconds
- * (`AssistantChat::READ_ONLY_AFTER`, two days).
+ * How long a chat may sit idle before it seals itself, in milliseconds (two
+ * days).
  *
- * It is COMPUTED, never persisted - no job runs, `read_only?` is a comparison
- * against the clock - so a summary you cached yesterday can report
- * `read_only: false` for a chat that is now sealed. The `POST` is where you
- * find out, with a `423`.
+ * It is COMPUTED against the clock at read time, never stored, so a summary
+ * you cached yesterday can report `read_only: false` for a chat that is now
+ * sealed. The `POST` is where you find out, with a `423`.
  */
 export const MUSIC_ASSISTANT_READ_ONLY_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
 
 /**
  * Default deadline for one assistant generation, in milliseconds.
  *
- * The client's global default is 60 s and a cold model behind OpenRouter
- * routinely beats that while still being on its way to an answer. The app uses
- * 90 s for the same reason; pass `timeoutMs` to override.
+ * The client's global default is 60 s and a cold model routinely beats that
+ * while still being on its way to an answer. Pass `timeoutMs` to override.
  */
 export const MUSIC_ASSISTANT_TIMEOUT_MS = 90_000;
 
@@ -480,9 +416,9 @@ export interface MusicAssistantChatDetail extends MusicAssistantChatSummary {
  * Snapshot of the caller's player, so the model can answer "pause this" and
  * "who sings this".
  *
- * The server applies a strict whitelist (`MusicAssistantController#player_context`);
- * a key that is not one of these nine never reaches the prompt, silently. Every
- * field is optional here because the whitelist permits rather than requires.
+ * The server applies a strict whitelist; a key that is not one of these nine
+ * never reaches the prompt, silently. Every field is optional here because the
+ * whitelist permits rather than requires.
  */
 export interface MusicAssistantPlayerContext {
   readonly song_id?: number | null;
@@ -510,8 +446,8 @@ export interface MusicAssistantPlaylistRef {
  * A player command the server validated and the client executes LOCALLY.
  *
  * Nothing here runs on the server. The songs in `play` and `queue` arrive fully
- * serialised in the `GET /songs` shape and have already been through
- * `viewable_by`, so a client queues them without a second request and without
+ * serialised in the `GET /songs` shape and already scoped to what the caller
+ * may play, so a client queues them without a second request and without
  * re-checking anything. Values are clamped server-side before they get here:
  * `set_volume` to `[0, 1]`, `set_rate` to `[0.5, 1.5]`, `sleep_timer.minutes`
  * to `[1, 600]`. An action the sanitiser did not recognise is DROPPED rather
@@ -542,7 +478,7 @@ export type MusicAssistantAction =
  * What `POST /music_assistant` answers.
  *
  * `playlist` and `actions` are OMITTED when the turn produced none - the
- * controller only writes the keys it has - so test with `in` or a truthiness
+ * server only writes the keys it has - so test with `in` or a truthiness
  * check rather than against `null`.
  */
 export interface MusicAssistantAnswer {
@@ -575,25 +511,22 @@ export interface SendMusicAssistantMessageInput {
  * ========================================================================== */
 
 /**
- * Generations per user per hour, shared by `/music_dj` and `/music_dj/batch`
- * (`MusicDjController::HOURLY_CAP`).
+ * Generations per user per hour, shared by `/music_dj` and `/music_dj/batch`.
  *
- * Enforced in the controller with a cache counter rather than by
- * `Rack::Attack`, and the counter is incremented by EVERY request - including
- * the ones it then refuses with `429`. A retry loop therefore drives the count
- * further past the cap and can never recover inside the hour, which is why
+ * The counter is incremented by EVERY request - including the ones it then
+ * refuses with `429`. A retry loop therefore drives the count further past the
+ * cap and can never recover inside the hour, which is why
  * {@link MusicDjNamespace} passes `retry: false` unless you override it.
  */
 export const MUSIC_DJ_HOURLY_CAP = 40;
 
 /**
- * Default deadline for one DJ generation, in milliseconds. A script from the
- * free LLM plus a couple of seconds of local text-to-speech takes well past the
- * client's 60 s default; the app uses 120 s.
+ * Default deadline for one DJ generation, in milliseconds. Writing the script
+ * and speaking it takes well past the client's 60 s default.
  */
 export const MUSIC_DJ_TIMEOUT_MS = 120_000;
 
-/** Songs one `/music_dj/batch` set plans at most (`BatchPlanner::BATCH_SIZE`). */
+/** Songs one `/music_dj/batch` set plans at most. */
 export const MUSIC_DJ_BATCH_SIZE = 4;
 
 /** `POST /music_dj`: one spoken link between two tracks. */
@@ -613,8 +546,8 @@ export interface MusicDjInterstitial {
 export interface MusicDjBatch extends MusicDjInterstitial {
   /**
    * The planned tracks, in play order, in the full `GET /songs` shape and
-   * already through `viewable_by`. Between 1 and
-   * {@link MUSIC_DJ_BATCH_SIZE}: the planner raises rather than answer with an
+   * already scoped to what the caller may play. Between 1 and
+   * {@link MUSIC_DJ_BATCH_SIZE}: the server fails rather than answer with an
    * empty set, so this is never `[]`.
    */
   readonly songs: Song[];
@@ -641,8 +574,9 @@ export interface MusicDjBatchInput {
  * ========================================================================== */
 
 /**
- * Jams over HTTP. The realtime half lives on the cable and is not in this SDK -
- * see the module note, and {@link jamStreamName} for the stream to subscribe to.
+ * Jams over HTTP. The realtime half lives on the WebSocket stream and is not in
+ * this SDK - see the module note, and {@link jamStreamName} for the stream to
+ * subscribe to.
  */
 export class MusicJamsNamespace extends Resource {
   /**
@@ -651,7 +585,7 @@ export class MusicJamsNamespace extends Resource {
    * Cheap and not cached anywhere, but also not a subscription: it is what you
    * call on app start to rediscover a jam you were already in, and when opening
    * a "join a jam" list. Everything that happens afterwards arrives on the
-   * cable, so polling this is the wrong shape.
+   * realtime stream, so polling this is the wrong shape.
    *
    * Missing keys are normalised (`current: null`, `joinable: []`) so a caller
    * never has to guard the two separately.
@@ -686,8 +620,9 @@ export class MusicJamsNamespace extends Resource {
    * A jam with no active host device is a silent jam: the whole relay rides the
    * host's playback publishes, so proposals and skip votes answer `400 "The
    * host is not playing right now"` until the host's client claims the active
-   * device (`claim_active` with `mode: "steal"` on `PlaybackChannel`) and plays
-   * something. Do that immediately after this returns.
+   * playback device (a `claim_active` with `mode: "steal"` on the host's
+   * playback channel) and plays something. Do that immediately after this
+   * returns.
    *
    * General ceiling: 600/min.
    */
@@ -737,9 +672,9 @@ export class MusicJamsNamespace extends Resource {
    * `DELETE /jams/:id` - the host ends the jam for everyone. `200` with a
    * `null` body, NOT the `204` the SDK's other destroys answer with.
    *
-   * Identical in effect to a host calling {@link leave}, which is what the web
-   * UI's "End jam" button actually does. Both set `ended_at`, broadcast
-   * `ended`, and re-broadcast every member's feed row so their jam badges drop.
+   * Identical in effect to a host calling {@link leave}. Both set `ended_at`,
+   * broadcast `ended`, and re-broadcast every member's feed row so their jam
+   * badges drop.
    *
    * @throws {OmsError} `401 "Only the host can end a jam"` - an authorization
    *   failure with an authentication status. See {@link join}.
@@ -790,10 +725,9 @@ export class MusicJamsNamespace extends Resource {
    *
    * ## The `200` is weaker than it looks
    *
-   * Nothing is written to the database here. The server records the song in a
-   * 24-hour cache allowlist (so the host's playback state is allowed to
-   * reference a song the host does not own), then broadcasts a `jam_add_song`
-   * command onto the HOST's playback stream carrying a fully presigned payload.
+   * Nothing is stored here. The server allows the host's playback state to
+   * reference your song for 24 hours, then broadcasts a `jam_add_song` command
+   * onto the HOST's playback stream carrying a fully presigned payload.
    * The song joins the queue when the host's CLIENT handles that command and
    * republishes its state. A host whose app is backgrounded, disconnected, or
    * simply older than the feature never handles it, and no error comes back to
@@ -801,8 +735,9 @@ export class MusicJamsNamespace extends Resource {
    * treating the `200` as confirmation.
    *
    * The song must be the CALLER's. Proposing the host's song, or a third
-   * user's, is `404 "Song not found"` - the lookup is scoped to `user_id`, so a
-   * song you can see but do not own does not exist for this route.
+   * user's, is `404 "Song not found"` - the lookup is scoped to your own
+   * library, so a song you can see but do not own does not exist for this
+   * route.
    *
    * @throws {OmsError} `404 "Jam not found"` (also when you are not a member).
    * @throws {OmsError} `400 "The host picks the music in this jam"` when
@@ -819,9 +754,9 @@ export class MusicJamsNamespace extends Resource {
   /**
    * `POST /jams/:id/skip_vote` - votes to skip whatever is playing.
    *
-   * Votes are a set of user ids in a 15-minute cache entry keyed by jam AND by
-   * the CURRENT song, so voting twice is idempotent and **a track change resets
-   * the tally silently** - no message says so. Reset any local counter whenever
+   * Votes are kept for 15 minutes, per jam AND per CURRENT song, so voting
+   * twice is idempotent and **a track change resets the tally silently** - no
+   * message says so. Reset any local counter whenever
    * the song id in the jam state changes.
    *
    * The threshold is `1` under `"anyone"` and `floor(members / 2) + 1` under
@@ -859,8 +794,7 @@ export class MusicProfilesNamespace extends Resource {
    * `{ "visible": false }` at status `200`, on purpose: a private profile has to
    * look identical to an empty one. Narrow with {@link isMusicProfileVisible}.
    *
-   * Authentication is required even though it looks like a public read - the
-   * action is not on `UsersController`'s unauthenticated allowlist, so an
+   * Authentication is required even though it looks like a public read: an
    * anonymous call is a `401`, not a hidden profile.
    *
    * Every `*_url` in the answer is presigned and short-lived
@@ -877,10 +811,7 @@ export class MusicProfilesNamespace extends Resource {
   }
 }
 
-/**
- * The music storage meter. **Native app only** - the web frontend has no caller
- * for this route.
- */
+/** The music storage meter. */
 export class MusicStorageNamespace extends Resource {
   /**
    * `GET /music/storage` - bytes of music media stored, against the ceiling.
@@ -889,7 +820,7 @@ export class MusicStorageNamespace extends Resource {
    * `limit_bytes`, which is `null` for an unlimited account. See the interface
    * for the whole story.
    *
-   * `used_bytes` is a live `SUM` over the account's distinct blobs, so it is
+   * `used_bytes` is computed live over the account's distinct blobs, so it is
    * never stale and never free. A settings screen, not a poll.
    *
    * General ceiling: 600/min - this route is NOT covered by the 30/min bucket
@@ -901,7 +832,7 @@ export class MusicStorageNamespace extends Resource {
 }
 
 /**
- * Stored assistant sessions: list, reopen, delete. **Native app only.**
+ * Stored assistant sessions: list, reopen, delete.
  *
  * Reading and deleting live here; WRITING does not. A message is appended by
  * {@link MusicAssistantNamespace.send}, because the only path that may add to a
@@ -912,10 +843,9 @@ export class MusicAssistantChatsNamespace extends Resource {
    * `GET /music_assistant/chats` - the caller's sessions, newest activity
    * first, without their messages.
    *
-   * A bare array with no paging and no filters: `AssistantChat` is not a CRUD
-   * resource, so `modifiers[page]` and `search[...]` are not read (and, unlike
-   * a real index, not rejected either - they are simply ignored). The list
-   * grows without bound; nothing prunes old chats.
+   * A bare array with no paging and no filters: `modifiers[page]` and
+   * `search[...]` are ignored rather than rejected. The list grows without
+   * bound; nothing prunes old chats.
    *
    * General ceiling: 600/min.
    */
@@ -950,8 +880,7 @@ export class MusicAssistantChatsNamespace extends Resource {
 
 /**
  * "O Melhor Assistente": a chat that can search the library, build playlists
- * and drive the player. **Native app only** among the shipped clients, but
- * nothing about it is mobile-specific.
+ * and drive the player.
  */
 export class MusicAssistantNamespace extends Resource {
   /** Stored sessions: list, reopen, delete. */
@@ -976,7 +905,7 @@ export class MusicAssistantNamespace extends Resource {
    *
    * ## Nothing is stored until the model answers
    *
-   * The controller runs the generation FIRST and only then creates the chat and
+   * The server runs the generation FIRST and only then creates the chat and
    * appends both messages. So a `502` leaves the chat exactly as it was - no
    * dangling user message, no empty chat on a failed first turn, and a resend
    * that cannot duplicate. That is also why a failure gives you no `chat_id` to
@@ -988,7 +917,7 @@ export class MusicAssistantNamespace extends Resource {
    *   and is sealed. Open a new one (call again with no `chatId`); there is no
    *   unseal. The `read_only` flag is computed, so a cached summary can say
    *   `false` and this still fire.
-   * - `502` - OpenRouter refused or fell over. The reply is not partial, it is
+   * - `502` - the model refused or fell over. The reply is not partial, it is
    *   absent.
    *
    * A body over {@link MUSIC_ASSISTANT_MAX_BODY_BYTES} is `413 "Request too
@@ -1001,7 +930,7 @@ export class MusicAssistantNamespace extends Resource {
    * finished and stored the turn. Reload with {@link MusicAssistantChatsNamespace.get}
    * before resending.
    *
-   * General ceiling: 600/min, and one generation holds a Puma thread for its
+   * General ceiling: 600/min, and one generation holds a server thread for its
    * whole duration - do not fan these out.
    */
   send(input: SendMusicAssistantMessageInput, options: RequestOptions = {}): Promise<MusicAssistantAnswer> {
@@ -1018,9 +947,8 @@ export class MusicAssistantNamespace extends Resource {
    * `POST /music_assistant` in its STATELESS mode - you own the history, the
    * server stores nothing.
    *
-   * This is the older contract, kept alive for the app builds already in
-   * people's hands, and it is the right one for a CLI or an MCP host that has
-   * no place to keep a `chat_id` between invocations. The whole transcript
+   * This is the older contract, and the right one for a caller that has no
+   * place to keep a `chat_id` between invocations. The whole transcript
    * rides in the request every time, so it grows, and the body ceiling
    * ({@link MUSIC_ASSISTANT_MAX_BODY_BYTES}) is a real limit rather than a
    * theoretical one. Only the last {@link MUSIC_ASSISTANT_HISTORY_TURNS}
@@ -1054,15 +982,15 @@ export class MusicAssistantNamespace extends Resource {
 
 /**
  * "O Melhor DJ": a written-and-spoken link between tracks, and a whole planned
- * set. **Native app only** among the shipped clients.
+ * set.
  *
  * Both methods pass `retry: false` by default. That is not caution about
  * duplicates - the transport does not replay a `POST` anyway - it is about the
- * one thing it DOES replay: a `429`. The hourly cap here is a cache counter the
- * controller increments on every request including the refused ones, so waiting
- * out a `Retry-After` and asking again pushes the count further past the cap
- * and cannot succeed inside the hour. Pass `retry: {}` to opt back in if you
- * are sure the `429` came from `Rack::Attack` instead.
+ * one thing it DOES replay: a `429`. The hourly cap here counts every request
+ * including the refused ones, so waiting out a `Retry-After` and asking again
+ * pushes the count further past the cap and cannot succeed inside the hour.
+ * Pass `retry: {}` to opt back in if you are sure the `429` came from the
+ * general per-minute ceiling instead.
  */
 export class MusicDjNamespace extends Resource {
   /**
@@ -1073,12 +1001,12 @@ export class MusicDjNamespace extends Resource {
    * nothing stores it. Decode with {@link musicDjAudioBytes}, or hand
    * {@link musicDjAudioDataUrl} to a player that takes a URI.
    *
-   * Both ids are resolved through `viewable_by`, so a followed playlist's track
-   * works and a stranger's does not. `previousSongId` is genuinely optional and
+   * Both ids are resolved against what the caller may play, so a followed
+   * playlist's track works and a stranger's does not. `previousSongId` is genuinely optional and
    * is what lets the script say goodbye to the outgoing track.
    *
-   * Generation is a free-tier LLM call followed by local text-to-speech, so it
-   * takes seconds; the deadline defaults to {@link MUSIC_DJ_TIMEOUT_MS}. The
+   * Generation takes seconds; the deadline defaults to
+   * {@link MUSIC_DJ_TIMEOUT_MS}. The
    * intended pattern is to ask for the clip while the current track is still
    * playing and drop it on the boundary, ideally over the outgoing
    * instrumental.
@@ -1149,15 +1077,15 @@ export class MusicDjNamespace extends Resource {
  * this class.
  */
 export class MusicSocialNamespace extends Resource {
-  /** Shared listening sessions. HTTP half only - the rest is on the cable. */
+  /** Shared listening sessions. HTTP half only - the rest is on the realtime stream. */
   readonly jams: MusicJamsNamespace;
   /** The music card on somebody's profile. */
   readonly profiles: MusicProfilesNamespace;
-  /** Music bytes stored against the account's ceiling. Native app only. */
+  /** Music bytes stored against the account's ceiling. */
   readonly storage: MusicStorageNamespace;
-  /** The chat assistant, with its stored sessions. Native app only. */
+  /** The chat assistant, with its stored sessions. */
   readonly assistant: MusicAssistantNamespace;
-  /** Scripted and spoken links between tracks. Native app only. */
+  /** Scripted and spoken links between tracks. */
   readonly dj: MusicDjNamespace;
 
   constructor(http: ConstructorParameters<typeof Resource>[0]) {
@@ -1175,14 +1103,13 @@ export class MusicSocialNamespace extends Resource {
  * ========================================================================== */
 
 /**
- * The ActionCable stream a jam broadcasts on (`Jam.stream_for`).
+ * The realtime stream a jam broadcasts on.
  *
- * This SDK does not open it - it has no cable client - but the name is part of
- * the contract and hard-coding `` `jam:${id}` `` in three clients is how it
- * drifts. Subscribe with the identifier
+ * This SDK does not open it - it has no WebSocket client - but the name is
+ * part of the contract. Subscribe with the identifier
  * `{"channel":"JamChannel","id":<jam id>}` AFTER
  * {@link MusicJamsNamespace.join} has returned, and treat the subscription as
- * receive-only: `JamChannel` has no client actions.
+ * receive-only.
  */
 export function jamStreamName(jamId: JamId): string {
   return `jam:${jamId}`;
@@ -1229,10 +1156,9 @@ export function isMusicProfileVisible(profile: MusicProfile): profile is MusicPr
 }
 
 /**
- * Picks the best available image for a profile's top artist, in the order both
- * shipped clients use: the owner's upload, then the large Deezer sizes, then
- * the small ones, then Last.fm. `undefined` when there is nothing, which is
- * common - render initials.
+ * Picks the best available image for a profile's top artist: the owner's
+ * upload, then the large Deezer sizes, then the small ones, then Last.fm.
+ * `undefined` when there is nothing, which is common - render initials.
  *
  * Note that `picture_big` deliberately comes before `picture_xl`: `xl` is a
  * 1000px square and these render at avatar size.
@@ -1264,9 +1190,9 @@ export function musicStorageRemaining(usage: MusicStorageUsage): number | null {
 /**
  * Whether `bytes` more would fit. Always true for an unlimited account.
  *
- * Worth calling before an upload: the music quota is checked server-side under
- * an advisory lock at attach time, and failing there means the bytes have
- * already crossed the network.
+ * Worth calling before an upload: the music quota is checked server-side at
+ * attach time, and failing there means the bytes have already crossed the
+ * network.
  */
 export function musicStorageAffords(usage: MusicStorageUsage, bytes: number): boolean {
   const remaining = musicStorageRemaining(usage);
@@ -1280,7 +1206,7 @@ const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
  * Decodes a DJ clip's `audio_base64` into bytes.
  *
  * Uses the platform's `atob` when there is one and falls back to a arithmetic
- * decode when there is not, because this has to work in all three clients and
+ * decode when there is not, because this has to work in every runtime and
  * `atob` is the kind of global that is present in a browser and in Bun, arrived
  * in React Native only recently, and is not guaranteed in a Worker-class
  * isolate. No `Buffer`, no `node:*`.
@@ -1320,11 +1246,10 @@ export function musicDjAudioBytes(clip: Pick<MusicDjInterstitial, "audio_base64"
 
 /**
  * Wraps a DJ clip as a `data:` URI, for a player that takes a URI rather than
- * bytes - which is most of them, `expo-audio` included.
+ * bytes - which is most of them.
  *
  * The string is roughly a third larger than the audio, and the audio is already
- * in memory, so this is cheap in every sense that matters at this size. It does
- * NOT work as an `<a download>` target inside a published artifact, and it is
+ * in memory, so this is cheap in every sense that matters at this size. It is
  * not a URL anything can fetch twice - it is the bytes, spelled differently.
  */
 export function musicDjAudioDataUrl(clip: MusicDjInterstitial): string {

@@ -3,7 +3,7 @@
  *
  * This module encodes a payload into a module matrix and renders it as SVG.
  * That is the whole isolate-safe surface: SVG is text, so it works in a Worker,
- * in the CLI and in a browser alike.
+ * in Bun and in a browser alike.
  *
  * Raster output (PNG, JPEG) is deliberately NOT here. It needs a canvas or an
  * image encoder, neither of which every target runtime has, and the host

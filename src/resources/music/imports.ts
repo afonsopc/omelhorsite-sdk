@@ -2,31 +2,28 @@
  * The `music.imports` namespace: getting audio INTO the library, and keeping a
  * Spotify account mirrored into it.
  *
- * Four unrelated backends sit behind one namespace because they are the four
+ * Four route families sit behind one namespace because they are the four
  * doors a track can walk through:
  *
  * | Route family | What it is | Who may call it |
  * |---|---|---|
- * | `/song_imports` | one track, downloaded by the yt-dlp sidecar | any signed-in user |
+ * | `/song_imports` | one track, downloaded from a URL or found by search | any signed-in user |
  * | `/playlist_imports/preview` | read a playlist URL without importing it | any signed-in user |
- * | `/spotify_syncs/*` | mirror a Spotify account into playlists | Dev-Mode allowlisted users only |
+ * | `/spotify_syncs/*` | mirror a Spotify account into playlists | Spotify-enabled accounts only |
  * | `/s_r_machine/*` | raw fetch + transcode helpers | **admins only** |
  *
  * ## An import is not a `Job`
  *
- * `POST /song_imports` answers a row of the `song_imports` table, not a row of
- * the generic `jobs` table, and there is no `job_id` anywhere on it. So
- * `oms.jobs.get()` will never find it and `watch_token` means nothing here.
+ * `POST /song_imports` answers a song import, not a generic job, and there is
+ * no `job_id` anywhere on it. So `oms.jobs.get()` will never find it and
+ * `watch_token` means nothing here.
  *
- * What this namespace DOES take from `oms.jobs` is the loop: {@link
- * MusicImportsNamespace.wait} and {@link MusicImportsNamespace.watch} are
- * `pollUntilTerminal` / `watchUntilTerminal` from `../jobs` with `poll` bound
- * to `GET /song_imports/:id` and `terminal` bound to
- * {@link isSongImportTerminal}. Same backoff, same `waitTimeoutMs`, same
- * `signal` semantics, same two `OmsTimeoutError` codes. There is exactly one
- * polling engine in this SDK and this is not a second one. The same is true of
- * {@link SpotifySyncNamespace.waitForSync}, which binds `poll` to
- * `GET /spotify_syncs/status`.
+ * What this namespace DOES share with `oms.jobs` is the polling loop:
+ * {@link MusicImportsNamespace.wait} and {@link MusicImportsNamespace.watch}
+ * poll `GET /song_imports/:id` until {@link isSongImportTerminal}, with the
+ * same backoff, the same `waitTimeoutMs`, the same `signal` semantics and the
+ * same two `OmsTimeoutError` codes. {@link SpotifySyncNamespace.waitForSync}
+ * does the same against `GET /spotify_syncs/status`.
  *
  * Three scales, all called "progress", none of them the same number:
  *
@@ -41,16 +38,13 @@
  *
  * Everything here sits under the general authenticated ceiling of 600/min
  * except {@link MusicImportsNamespace.previewPlaylist}, which carries TWO
- * budgets of its own and is the only endpoint in this file that has already
- * been used to take the site down. Read its doc comment before writing a loop
- * around it.
+ * budgets of its own. Read its doc comment before writing a loop around it.
  *
  * ## OAuth tokens cannot reach any of this
  *
- * None of these controllers declares an `oauth_scope`, and
- * `enforce_oauth_scope!` denies by omission, so an OAuth access token gets
- * `403 {"error":"insufficient_scope"}` before the action runs. Imports need a
- * session cookie or a personal token, like the rest of music.
+ * An OAuth access token gets `403 {"error":"insufficient_scope"}` on every
+ * route here. Imports need a session cookie or a personal token, like the rest
+ * of music.
  */
 
 import { type ApiClient, Resource, buildFormData, filenameFromDisposition } from "../../http";
@@ -93,7 +87,7 @@ export type SongImportId = number | string;
  */
 export type SongImportState = "pending" | "processing" | "complete" | "failed";
 
-/** The four states, spelled the way `SongImport::STATES` spells them. */
+/** The four states. */
 export const SONG_IMPORT_STATES = Object.freeze({
   pending: "pending",
   processing: "processing",
@@ -102,8 +96,8 @@ export const SONG_IMPORT_STATES = Object.freeze({
 } as const);
 
 /**
- * The states `SongImport#terminal?` treats as final, and the ones
- * {@link MusicImportsNamespace.wait} stops on.
+ * The states that are final, and the ones {@link MusicImportsNamespace.wait}
+ * stops on.
  *
  * `"pending"` is deliberately absent even though a row can go BACK to it: see
  * {@link isSongImportTerminal}.
@@ -116,31 +110,29 @@ export const SONG_IMPORT_TERMINAL_STATES: readonly SongImportState[] = Object.fr
 /**
  * True once this state can never change again.
  *
- * The state machine is NOT monotonic on the way there. `SongImportJob` rescues
- * a transient sidecar error by writing the row back to `"pending"` with
- * `progress_pct: 0.0` so the retried run passes its own `terminal?` guard, so a
- * poller legitimately observes `processing -> pending -> processing ->
- * complete` and a progress bar legitimately goes backwards. Never latch a UI on
- * "it was processing, so it cannot be pending again"; read the state every time.
+ * The state machine is NOT monotonic on the way there. A transient download
+ * error puts the row back to `"pending"` with `progress_pct: 0.0` before a
+ * retry, so a poller legitimately observes `processing -> pending ->
+ * processing -> complete` and a progress bar legitimately goes backwards.
+ * Never latch a UI on "it was processing, so it cannot be pending again"; read
+ * the state every time.
  *
- * `"failed"`, by contrast, is only ever written when the job has decided NOT to
- * retry, so it really is the end.
+ * `"failed"`, by contrast, is only ever written when the server has decided
+ * NOT to retry, so it really is the end.
  */
 export function isSongImportTerminal(state: string): boolean {
   return (SONG_IMPORT_TERMINAL_STATES as readonly string[]).includes(state);
 }
 
 /**
- * One row of `song_imports`.
+ * One song import.
  *
- * `SongImportBlueprint` declares nineteen fields plus the three from
- * `ApplicationBlueprint`, so every key below is present on every response;
- * what varies is the value.
+ * Every key below is present on every response; what varies is the value.
  *
- * ## Five columns you can write but never read back
+ * ## Five fields you can write but never read back
  *
  * `search_artist`, `search_title`, `search_album`, `isrc` and `artwork_url` are
- * all accepted by `POST /song_imports` and NONE of them is in the blueprint.
+ * all accepted by `POST /song_imports` and NONE of them is echoed back.
  * `artwork_data_b64` likewise (and it is wiped from the row the moment the
  * import settles, deduped or not). So an import created in search mode answers
  * with `source_url: null` and no trace of what was searched for: if the caller
@@ -169,33 +161,32 @@ export interface SongImport extends Omit<BaseRecord, "id"> {
   /** The provider's own id for the track. Half of the dedupe key. */
   readonly source_id: string | null;
   /**
-   * `"yt_dlp"` (the column default, and what every user-driven import is) or
-   * `"spotify_sync"` (written by `SpotifyPlaylistSyncJob`, one row per track
-   * per run). Never `"upload"` - that is a `Song.source_kind` value, not one of
-   * these.
+   * `"yt_dlp"` (the default, and what every user-driven import is) or
+   * `"spotify_sync"` (written by the Spotify sync, one row per track per run).
+   * Never `"upload"` - that is a `Song.source_kind` value, not one of these.
    */
   readonly source_kind: string;
   readonly override_title: string | null;
   readonly override_artist: string | null;
   readonly override_album: string | null;
-  /** Seconds, as a float. A hint the sidecar uses to pick between candidates. */
+  /** Seconds, as a float. A hint the downloader uses to pick between candidates. */
   readonly expected_duration_s: number | null;
   /** Requested position in {@link SongImport.playlist_id}. See the note on `create`. */
   readonly position: number | null;
-  /** The yt-dlp sidecar's own job id. Diagnostics only; nothing here takes it. */
+  /** The downloader's own request id. Diagnostics only; nothing here takes it. */
   readonly sidecar_request_id: string | null;
   readonly state: SongImportState;
   /**
-   * Free text from the sidecar (`"starting"`, `"complete"`, `"a repetir"`, or
-   * whatever yt-dlp last said). Human-facing, not a state: switch on
+   * Free text from the downloader (`"starting"`, `"complete"`, `"a repetir"`,
+   * or whatever it last said). Human-facing, not a state: switch on
    * {@link SongImport.state}.
    */
   readonly progress_message: string | null;
   /**
    * A FLOAT between 0 and 1, not a percentage. `0.05` means 5%.
    *
-   * The column is `float DEFAULT 0.0`, so it is a real number from the moment
-   * the row exists. It can go DOWN - a transient retry resets it to `0.0`.
+   * It is a real number from the moment the row exists. It can go DOWN - a
+   * transient retry resets it to `0.0`.
    * Multiply by 100 before showing it, or use {@link songImportProgress}.
    */
   readonly progress_pct: number;
@@ -222,22 +213,21 @@ export interface SongImport extends Omit<BaseRecord, "id"> {
  * Exactly one of the two modes must be satisfied, and the server checks it in
  * this order:
  *
- * 1. **URL mode** - `sourceUrl` present. It must pass `SsrfGuard.
- *    public_http_url?`: http(s) only, public DNS only, no redirect to a private
- *    address. Anything else is `400 "source_url is not allowed"`.
+ * 1. **URL mode** - `sourceUrl` present. It must be a public http(s) URL:
+ *    public DNS only, no redirect to a private address. Anything else is
+ *    `400 "source_url is not allowed"`.
  * 2. **Search mode** - `searchArtist` AND `searchTitle` both non-blank, with no
- *    `sourceUrl`. The sidecar goes and finds the track itself.
+ *    `sourceUrl`. The server goes and finds the track itself.
  *
  * Neither one satisfied is `400 "source_url or (search_artist + search_title)
  * required"`. One without the other counts as neither: `searchArtist` alone is
  * not search mode.
  *
- * Every other field is optional and every unknown field is dropped in silence
- * by the controller's `create_params` allowlist, so a typo here is a
- * successful import that ignored what you asked for.
+ * Every other field is optional and every unknown field is dropped in silence,
+ * so a typo here is a successful import that ignored what you asked for.
  */
 export interface CreateSongImportInput {
-  /** URL mode. Public http(s) only; see the SSRF note above. */
+  /** URL mode. Public http(s) only; see the note above. */
   readonly sourceUrl?: string;
   /** Search mode. Needs {@link CreateSongImportInput.searchTitle} beside it. */
   readonly searchArtist?: string;
@@ -257,22 +247,21 @@ export interface CreateSongImportInput {
   readonly sourceId?: string;
   /**
    * Defaults server-side to `"yt_dlp"`. Passing `"spotify_sync"` by hand is a
-   * bad idea: it changes the queue the job runs on (the slow bulk lane), it
-   * suppresses the Discord alert, and it makes the row eligible for the
-   * playlist-position rewriting the sync does.
+   * bad idea: it moves the import onto the slow bulk lane and makes the row
+   * eligible for the playlist-position rewriting the sync does.
    */
   readonly sourceKind?: string;
-  /** Tag overrides written onto the finished song instead of what yt-dlp read. */
+  /** Tag overrides written onto the finished song instead of what the download carried. */
   readonly overrideTitle?: string;
   readonly overrideArtist?: string;
   readonly overrideAlbum?: string;
-  /** Cover to embed. SSRF-guarded exactly like `sourceUrl`. */
+  /** Cover to embed. Must be a public http(s) URL, exactly like `sourceUrl`. */
   readonly artworkUrl?: string;
   /**
-   * Cover as base64, for a picture that has no public URL. Goes into a `text`
-   * column and is wiped as soon as the import settles, so keep it small: it is
-   * a JSON body, not a multipart upload, and Cloudflare caps a request body at
-   * roughly 100 MB well before Rails complains.
+   * Cover as base64, for a picture that has no public URL. Wiped as soon as
+   * the import settles. Keep it small: it is a JSON body, not a multipart
+   * upload, and the CDN in front of the API caps a request body at roughly
+   * 100 MB.
    */
   readonly artworkDataB64?: string;
   /** Seconds. A hint, not a constraint. */
@@ -296,7 +285,7 @@ export interface CreateSongImportInput {
 /**
  * Filters for {@link MusicImportsNamespace.list}.
  *
- * The controller allowlists six columns and nothing else. An unrecognised
+ * The server allowlists six columns and nothing else. An unrecognised
  * `search[...]` key is a `400` naming it, never a silently wider result.
  */
 export interface ListSongImportsParams extends ListParams<(typeof SONG_IMPORT_FILTER_COLUMNS)[number]> {
@@ -319,41 +308,40 @@ export const SONG_IMPORT_FILTER_COLUMNS = Object.freeze([
 
 /**
  * What `POST /playlist_imports/preview` answers: the SAME `DownloaderPreview`
- * shape `oms.tools.downloader.preview()` returns, because both call
- * `YtDlpClient.fetch_metadata` on the same sidecar.
+ * shape `oms.tools.downloader.preview()` returns, because both read metadata
+ * the same way.
  *
  * Check `kind` first: a `"playlist"` carries `count` and `tracks` and none of
  * the track fields, a `"track"` carries the track fields and neither of those.
- * Note this endpoint asks for `include_formats: false`, so `formats` is absent
- * even on a `"track"` - unlike the downloader's own preview.
+ * Note that `formats` is absent here even on a `"track"` - unlike the
+ * downloader's own preview.
  */
 export type PlaylistImportPreview = DownloaderPreview;
 
 /**
  * Sustained ceiling on `POST /playlist_imports/preview`: 60 an hour, keyed by
- * user id. A controller-level `rate_limit`, not rack-attack.
+ * user id.
  */
 export const PLAYLIST_IMPORT_PREVIEW_HOURLY_LIMIT = 60;
 
 /**
- * Burst ceiling on the same route: 20 a minute, from rack-attack's
- * `expensive_tools/client` bucket, SHARED with every other expensive tool
- * (`/upscales`, `/vocal_separations`, `/transcriptions`, `/caption_jobs`,
- * `/jumpstyle_jobs`, `/songs/:id/separate`, `/tools_downloader/*`).
+ * Burst ceiling on the same route: 20 a minute, from a bucket SHARED with
+ * every other expensive tool (`/upscales`, `/vocal_separations`,
+ * `/transcriptions`, `/caption_jobs`, `/jumpstyle_jobs`, `/songs/:id/separate`,
+ * `/tools_downloader/*`).
  */
 export const PLAYLIST_IMPORT_PREVIEW_BURST_LIMIT_PER_MINUTE = 20;
 
 /**
- * How long `SongImportJob` polls the sidecar before giving up on one import:
+ * How long the server waits on a download before giving up on one import:
  * ten minutes. A sensible floor for `waitTimeoutMs`, and the reason a shorter
  * one is a client-side deadline rather than a cancellation.
  */
 export const SONG_IMPORT_SERVER_TIMEOUT_MS = 600_000;
 
 /**
- * Default pause between polls of a song import: 1.5s, which is what the app
- * uses. Slower than the jobs default because `SongImportJob` only writes
- * progress every 3 seconds anyway.
+ * Default pause between polls of a song import: 1.5s. Slower than the jobs
+ * default because progress is only written every 3 seconds anyway.
  */
 export const SONG_IMPORT_POLL_INTERVAL_MS = 1_500;
 
@@ -377,7 +365,7 @@ export function songImportProgress(record: SongImport): Progress {
 
 /** The `music.imports` namespace, reachable as `oms.music.imports`. */
 export class MusicImportsNamespace extends Resource {
-  /** Spotify account mirroring. Allowlisted accounts only - see the class. */
+  /** Spotify account mirroring. Spotify-enabled accounts only - see the class. */
   readonly spotify: SpotifySyncNamespace;
 
   /** Admin-only fetch and transcode helpers. */
@@ -392,12 +380,12 @@ export class MusicImportsNamespace extends Resource {
   /**
    * `GET /song_imports` - your import history, newest first only if you ask.
    *
-   * Scoped `where(user: current_user)`, so `userId` can only ever narrow to
-   * yourself and a foreign one answers an empty page rather than a 403.
+   * Scoped to the caller, so `userId` can only ever narrow to yourself and a
+   * foreign one answers an empty page rather than a 403.
    *
-   * **The table is pruned.** `SongImportPruneJob` deletes `complete` and
-   * `deduped` rows older than 30 days and `failed` rows older than 90, so this
-   * is a recent-activity feed, not an archive. It is also dominated by
+   * **The list is pruned.** `complete` and `deduped` rows older than 30 days
+   * and `failed` rows older than 90 are deleted, so this is a recent-activity
+   * feed, not an archive. It is also dominated by
    * `spotify_sync` rows on any account with the sync on - one per track per
    * daily run, thousands a day - so filter by `state` or `playlistId` unless
    * you actually want that.
@@ -418,7 +406,7 @@ export class MusicImportsNamespace extends Resource {
    * `GET /song_imports/:id` - one read, no waiting.
    *
    * @throws {OmsApiError} 404 `"song import not found"` for an id that is not
-   *   yours, never a 403 - and for one the prune job has already deleted.
+   *   yours, never a 403 - and for one that has already been pruned.
    */
   async get(id: SongImportId, options: RequestOptions = {}): Promise<SongImport> {
     return this.http.get<SongImport>(`/song_imports/${encodeURIComponent(String(id))}`, options);
@@ -428,19 +416,19 @@ export class MusicImportsNamespace extends Resource {
    * `POST /song_imports` - 201 with the row, before any downloading starts.
    *
    * Returns immediately in every case. Either the row is already terminal
-   * because dedupe hit ({@link SongImport.deduped}), or it is `"pending"` and a
-   * `SongImportJob` has been enqueued. Nothing about this call waits for audio.
+   * because dedupe hit ({@link SongImport.deduped}), or it is `"pending"` and
+   * the download has been queued. Nothing about this call waits for audio.
    *
-   * Which queue that job runs on depends on `sourceKind`: anything but
-   * `"spotify_sync"` goes on the `:interactive` lane precisely so a person
-   * watching a spinner is not queued behind the thousands of sync imports on
-   * `:default`. Leave `sourceKind` alone and you get the good lane.
+   * Which lane the download runs on depends on `sourceKind`: anything but
+   * `"spotify_sync"` goes on the interactive lane precisely so a person
+   * watching a spinner is not queued behind thousands of sync imports. Leave
+   * `sourceKind` alone and you get the good lane.
    *
    * ## The 401 that is really a 403
    *
    * `playlistId` pointing at a playlist you cannot update answers
-   * `401 "playlist not yours"` - the controller uses `unauthorized!` where it
-   * means `forbidden!`. Two consequences: it is an {@link OmsAuthError}, not an
+   * `401 "playlist not yours"`, an authorization failure wearing an
+   * authentication status. Two consequences: it is an {@link OmsAuthError}, not an
    * {@link OmsApiError}, so a `catch` sorting by class puts it in the wrong
    * pile; and if the client was built with a token provider that implements
    * `onUnauthorized`, the transport spends one pointless refresh on it before
@@ -448,8 +436,8 @@ export class MusicImportsNamespace extends Resource {
    *
    * @throws {TypeError} before any request when neither mode is satisfied.
    * @throws {OmsApiError} 400 `"source_url is not allowed"` /
-   *   `"artwork_url is not allowed"` from the SSRF guard, `400` naming the
-   *   missing mode, `404 "playlist not found"`.
+   *   `"artwork_url is not allowed"` for a URL that is not public http(s),
+   *   `400` naming the missing mode, `404 "playlist not found"`.
    * @throws {OmsAuthError} 401 `"playlist not yours"`. See above.
    */
   async create(input: CreateSongImportInput, options: RequestOptions = {}): Promise<SongImport> {
@@ -474,12 +462,12 @@ export class MusicImportsNamespace extends Resource {
    * semantics. `onProgress` is fed through {@link songImportProgress}, so its
    * `loaded` is out of 100 even though the wire value is out of 1.
    *
-   * Resolves for `"failed"` as well as `"complete"`: a download the sidecar
+   * Resolves for `"failed"` as well as `"complete"`: a download the server
    * could not do is an ANSWER. Check `state` before reading `song_id`.
    *
-   * `waitTimeoutMs` has no default here either. `SongImportJob` gives the
-   * sidecar ten minutes ({@link SONG_IMPORT_SERVER_TIMEOUT_MS}) and may then be
-   * retried, so a real import can outlive any deadline you pick; a deadline
+   * `waitTimeoutMs` has no default here either. The server gives a download
+   * ten minutes ({@link SONG_IMPORT_SERVER_TIMEOUT_MS}) and may then retry it,
+   * so a real import can outlive any deadline you pick; a deadline
    * here abandons the WAIT, never the import, which keeps running and can be
    * read later with {@link get}.
    *
@@ -525,25 +513,20 @@ export class MusicImportsNamespace extends Resource {
    * Nothing is written and nothing is enqueued, which is exactly why it is easy
    * to mistake for cheap.
    *
-   * ## It is not cheap. It has been used to take the API down.
+   * ## It is not cheap
    *
-   * Each call shells out to yt-dlp against a URL the CALLER chose and parks a
-   * Puma thread for up to the sidecar's 60-second metadata timeout. There are
-   * only `RAILS_MAX_THREADS` of those, shared with every other request the site
-   * serves. On 2026-07-27 a load generator drove this endpoint at roughly 900
-   * requests a minute with each one parked 20-40 seconds, and the whole API -
-   * health check included - went down with it. At the time it was the one
-   * yt-dlp-backed route with neither a rack-attack rule nor a controller-level
-   * limit. It now has both:
+   * Each call fetches metadata for a URL the CALLER chose and holds a server
+   * thread for up to 60 seconds while it does. It therefore carries two
+   * budgets:
    *
    * - {@link PLAYLIST_IMPORT_PREVIEW_HOURLY_LIMIT} 60 an hour, keyed by user
-   *   id, from the controller. This one does NOT set `Retry-After`;
+   *   id. This one does NOT set `Retry-After`;
    * - {@link PLAYLIST_IMPORT_PREVIEW_BURST_LIMIT_PER_MINUTE} 20 a minute, from
-   *   rack-attack's `expensive_tools` bucket, SHARED with upscale, background
-   *   removal, transcription, vocal separation, captions, jumpstyle,
-   *   `/songs/:id/separate` and the downloader. Importing a playlist while a
-   *   separation is running spends the same budget. This one does set
-   *   `Retry-After`, which the transport honours.
+   *   a bucket SHARED with upscale, background removal, transcription, vocal
+   *   separation, captions, jumpstyle, `/songs/:id/separate` and the
+   *   downloader. Importing a playlist while a separation is running spends
+   *   the same budget. This one does set `Retry-After`, which the transport
+   *   honours.
    *
    * So: one preview per user action, never one per row of a list, and never
    * inside a retry loop. This method therefore does NOT retry by default -
@@ -551,11 +534,11 @@ export class MusicImportsNamespace extends Resource {
    * no, which a replay will not change. Pass `retry: {}` to opt back in.
    *
    * @throws {OmsApiError} 400 `"url is required"` when blank; 400
-   *   `"url is not allowed"` from the SSRF guard; 400 with a message pointing
-   *   at `/account/dashboard` for ANY `open.spotify.com` or `spotify.com` URL -
-   *   Spotify is never previewed here, it goes through
+   *   `"url is not allowed"` for a URL that is not public http(s); 400 with a
+   *   message pointing at `/account/dashboard` for ANY `open.spotify.com` or
+   *   `spotify.com` URL - Spotify is never previewed here, it goes through
    *   {@link MusicImportsNamespace.spotify}; 502 carrying the first 200
-   *   characters of whatever yt-dlp said.
+   *   characters of the downloader's own error.
    * @throws {OmsQuotaError} 429 from either budget above.
    */
   async previewPlaylist(url: string, options: RequestOptions = {}): Promise<PlaylistImportPreview> {
@@ -596,8 +579,8 @@ export type SpotifySyncPlaylistState = "pending" | "running" | "complete" | "fai
  *
  * `queued` and `skipped` count TRACKS, and together they are the walk's
  * progress against `total`. What they are not is downloads: `queued` means a
- * `song_imports` row was created and a `SongImportJob` enqueued on the slow
- * `:default` lane. The audio arrives minutes or hours later.
+ * song import was created on the slow bulk lane. The audio arrives minutes or
+ * hours later.
  */
 export interface SpotifySyncPlaylistProgress {
   /** Spotify's playlist id, or the literal `"liked"` for the liked-songs mirror. */
@@ -614,11 +597,10 @@ export interface SpotifySyncPlaylistProgress {
 
 /**
  * Progress of the last (or current) sync run, stored on the Spotify identity
- * rather than in any job table.
+ * rather than as a job.
  *
- * Every key is optional here because a freshly linked identity carries `{}` -
- * the column defaults to an empty hash and nothing writes it until the first
- * sync starts. Treat a missing `state` as `"idle"`.
+ * Every key is optional here because a freshly linked identity carries `{}`
+ * until the first sync starts. Treat a missing `state` as `"idle"`.
  */
 export interface SpotifySyncProgress {
   readonly state?: SpotifySyncRunState;
@@ -629,7 +611,7 @@ export interface SpotifySyncProgress {
    * their text: `"Token refresh failed - please relink Spotify."` means the
    * refresh token is dead and the user must go through the link flow again,
    * while a stale run rewritten by {@link SpotifySyncNamespace.status} says
-   * `"Sincronização interrompida"` (the backend writes that one in Portuguese).
+   * `"Sincronização interrompida"` (the server writes that one in Portuguese).
    */
   readonly error?: string | null;
   readonly playlists?: SpotifySyncPlaylistProgress[];
@@ -641,7 +623,7 @@ export interface SpotifySyncProgress {
  * All three keys are absent on an identity that has never been configured, and
  * absent is NOT `false` for any of them - each defaults differently:
  *
- * - `sync_liked` defaults to `true` (`fetch("sync_liked", true)`);
+ * - `sync_liked` defaults to `true`;
  * - `enabled_playlists` absent or `null` means EVERY eligible playlist, not
  *   none. An empty array means none;
  * - `auto_sync` absent means "on if this identity has ever synced before",
@@ -689,9 +671,8 @@ export interface SpotifyPlaylistOption {
   readonly owner: string | null;
   readonly cover_url: string | null;
   /**
-   * Whether this playlist is currently selected. Computed as
-   * `enabled_playlists.nil? || enabled_playlists.include?(id)`, so on an
-   * unconfigured identity EVERY row comes back `true`.
+   * Whether this playlist is currently selected. On an unconfigured identity
+   * (no `enabled_playlists` saved) EVERY row comes back `true`.
    */
   readonly enabled: boolean;
 }
@@ -701,9 +682,9 @@ export interface SpotifyPlaylistOption {
  *
  * The list is already filtered to what can actually be synced: playlists owned
  * by `"spotify"` (the editorial ones) and other people's non-collaborative
- * playlists are dropped, because Dev Mode plus the February 2026 API change
- * left us unable to read their tracks. A playlist the user can see in the
- * Spotify app and not here is that rule, not a bug.
+ * playlists are dropped, because Spotify does not let this integration read
+ * their tracks. A playlist the user can see in the Spotify app and not here is
+ * that rule, not a bug.
  */
 export interface SpotifySyncPreview {
   readonly sync_liked: boolean;
@@ -713,17 +694,16 @@ export interface SpotifySyncPreview {
 /**
  * Body of `PATCH /spotify_syncs/settings`.
  *
- * **Presence-sensitive, and two of the three keys delete data.** The updater
- * tests `params.key?`, so an omitted key is left alone and a present one is
- * applied - which means you cannot express "leave enabled_playlists alone" by
- * sending `null`, and you must send the WHOLE list every time rather than a
- * delta.
+ * **Presence-sensitive, and two of the three keys delete data.** An omitted
+ * key is left alone and a present one is applied - which means you cannot
+ * express "leave enabled_playlists alone" by sending `null`, and you must send
+ * the WHOLE list every time rather than a delta.
  *
  * The destruction is immediate and synchronous, inside the PATCH:
  *
  * - `enabledPlaylists` **destroys the local copy** of every synced playlist
  *   whose Spotify id is not in the new list. Songs stay in the library; the
- *   playlist row and its `playlist_songs` do not. Re-enabling it later
+ *   playlist and its rows do not. Re-enabling it later
  *   re-creates it from scratch on the next sync;
  * - `syncLiked: false` **destroys the local "liked" mirror** the same way.
  *
@@ -765,10 +745,7 @@ export interface StartSpotifySyncInput {
   readonly playlistIds?: string[];
 }
 
-/**
- * A `"running"` sync older than this is treated as lost. Two hours, matching
- * `SpotifySyncsController::STALE_RUNNING_AFTER`.
- */
+/** A `"running"` sync older than this is treated as lost. Two hours. */
 export const SPOTIFY_SYNC_STALE_AFTER_MS = 7_200_000;
 
 /** True while a sync run is in flight. Anything else - `"idle"` included - is not. */
@@ -779,31 +756,29 @@ export function isSpotifySyncRunning(status: SpotifySyncStatus): boolean {
 /**
  * Spotify account mirroring, reachable as `oms.music.imports.spotify`.
  *
- * ## Every method here 403s unless the account is Dev-Mode allowlisted
+ * ## Every method here 403s unless Spotify is enabled for the account
  *
- * `before_action :require_spotify_allowed` gates the whole controller on the
- * `users.allowed_to_use_spotify` column and answers
- * `403 "Spotify is not enabled for this account"` without it. That is step one
- * of two, and the two fail in completely different places:
+ * Every route answers `403 "Spotify is not enabled for this account"` unless
+ * an administrator has enabled Spotify for the account. That is step one of
+ * two, and the two fail in completely different places:
  *
- * 1. **The database flag.** Without it, `GET /auth/link/spotify` refuses before
+ * 1. **The account flag.** Without it, `GET /auth/link/spotify` refuses before
  *    it ever redirects to Spotify: the user is bounced straight back with
  *    `?error=spotify_not_allowlisted`, having seen no Spotify screen at all.
  *    Every method in this class also 403s.
- * 2. **The email in the Spotify dashboard's User Management list.** Our app is
- *    still in Spotify's Development Mode, which admits at most 25 named users.
- *    With the flag set but the email missing, the link flow LOOKS right up to
- *    the last moment: the redirect to Spotify happens, the user signs in, and
- *    then Spotify refuses the authorization itself. OmniAuth lands on
- *    `/auth/failure` with `"not registered for this application"` and the user
- *    is redirected back with the same `?error=spotify_not_allowlisted`, never
+ * 2. **Spotify's own allowlist.** The integration runs in Spotify's
+ *    Development Mode, which admits at most 25 named users. With the flag set
+ *    but the user not registered on Spotify's side, the link flow LOOKS right
+ *    up to the last moment: the redirect to Spotify happens, the user signs
+ *    in, and then Spotify refuses the authorization itself. The user is
+ *    redirected back with the same `?error=spotify_not_allowlisted`, never
  *    linked, with nothing in this API having recorded an attempt. From the
- *    outside it looks like the login silently died - and the fix is not in this
- *    codebase at all, it is in the Spotify dashboard.
+ *    outside it looks like the login silently died, and the fix is on
+ *    Spotify's side.
  *
- * Because step 2 fails outside our API, {@link SpotifySyncNamespace.status}
- * answering `{ connected: false }` on an allowlisted account is the normal
- * symptom of it. `connected: false` means "no identity row", which covers both
+ * Because step 2 fails outside this API, {@link SpotifySyncNamespace.status}
+ * answering `{ connected: false }` on an enabled account is the normal symptom
+ * of it. `connected: false` means "no linked identity", which covers both
  * "never tried" and "tried and Spotify said no".
  *
  * ## There is no sync id
@@ -820,15 +795,15 @@ export class SpotifySyncNamespace extends Resource {
    * `GET /spotify_syncs/status` - the whole state of the link in one call.
    *
    * **This GET writes.** If the stored progress says `"running"` and started
-   * more than {@link SPOTIFY_SYNC_STALE_AFTER_MS} ago, the controller rewrites
-   * it to `"failed"` before answering, because a worker that was SIGKILLed
-   * leaves an eternal `"running"` behind and
+   * more than {@link SPOTIFY_SYNC_STALE_AFTER_MS} ago, the server rewrites it
+   * to `"failed"` before answering, because a run that died leaves an eternal
+   * `"running"` behind and
    * {@link SpotifySyncNamespace.start} refuses to queue another while one is
    * "in flight". Calling this is therefore how a stuck account gets unstuck -
    * which also means it is not safe to treat as a cacheable read.
    *
    * @throws {OmsApiError} 403 `"Spotify is not enabled for this account"` when
-   *   the account lacks the Dev-Mode flag. See the class comment.
+   *   Spotify is not enabled for the account. See the class comment.
    */
   async status(options: RequestOptions = {}): Promise<SpotifySyncStatus> {
     return this.http.get<SpotifySyncStatus>("/spotify_syncs/status", options);
@@ -847,7 +822,7 @@ export class SpotifySyncNamespace extends Resource {
    * @throws {OmsApiError} 404 `"link your Spotify account first"` when there is
    *   no identity; 502 `"Spotify auth failed: ..."` when the refresh token is
    *   dead (the user must relink); 502 with Spotify's own message for anything
-   *   else upstream; 403 without the Dev-Mode flag.
+   *   else upstream; 403 when Spotify is not enabled for the account.
    */
   async preview(options: RequestOptions = {}): Promise<SpotifySyncPreview> {
     return this.http.get<SpotifySyncPreview>("/spotify_syncs/preview", {
@@ -868,8 +843,8 @@ export class SpotifySyncNamespace extends Resource {
    * never deselected. Read {@link SpotifySyncNamespace.preview} first and send
    * back the ids you got from it.
    *
-   * @throws {OmsApiError} 404 `"link your Spotify account first"`; 403 without
-   *   the Dev-Mode flag.
+   * @throws {OmsApiError} 404 `"link your Spotify account first"`; 403 when
+   *   Spotify is not enabled for the account.
    */
   async updateSettings(
     input: UpdateSpotifySyncSettingsInput,
@@ -891,22 +866,22 @@ export class SpotifySyncNamespace extends Resource {
    * previous run. That is what makes {@link SpotifySyncNamespace.waitForSync}
    * race-free when it follows a `start()`.
    *
-   * A manual run is not the same as the nightly one. It ignores the
-   * `snapshot_id` shortcut and re-walks every enabled playlist even when
-   * Spotify says nothing changed - it is the "I think something is out of step"
-   * button - which is why it is much more expensive than the automatic sync and
-   * why it should be user-initiated, never polled into.
+   * A manual run is not the same as the nightly one. It re-walks every
+   * enabled playlist even when Spotify says nothing changed - it is the "I
+   * think something is out of step" button - which is why it is much more
+   * expensive than the automatic sync and why it should be user-initiated,
+   * never polled into.
    *
-   * What finishing means: `"complete"` says the walk is done and a
-   * `song_imports` row exists for every new track. The downloads themselves are
-   * still queued behind however many thousand rows the run just created, on the
-   * `:default` lane. The library fills in for a long time afterwards.
+   * What finishing means: `"complete"` says the walk is done and a song import
+   * exists for every new track. The downloads themselves are still queued
+   * behind however many thousand imports the run just created. The library
+   * fills in for a long time afterwards.
    *
    * @throws {OmsApiError} 409 `"a sync is already running"` - unless the
    *   running one is over two hours old, in which case
    *   {@link SpotifySyncNamespace.status} rewrites it to failed first and this
-   *   then succeeds; 404 `"link your Spotify account first"`; 403 without the
-   *   Dev-Mode flag.
+   *   then succeeds; 404 `"link your Spotify account first"`; 403 when Spotify
+   *   is not enabled for the account.
    */
   async start(input: StartSpotifySyncInput = {}, options: RequestOptions = {}): Promise<SpotifySyncQueued> {
     return this.http.post<SpotifySyncQueued>(
@@ -943,11 +918,12 @@ export class SpotifySyncNamespace extends Resource {
    * count (the liked mirror always does until it finishes).
    *
    * Polling here is also what clears a lost `"running"`, since `status` rewrites
-   * a stale one - so a wait against a dead worker ends after two hours rather
-   * than never.
+   * a stale one - so a wait against a run that died ends after two hours
+   * rather than never.
    *
    * @throws {OmsTimeoutError} `code: "timeout"` / `"aborted"`, as everywhere.
-   * @throws {OmsApiError} 403 without the Dev-Mode flag, on the first poll.
+   * @throws {OmsApiError} 403 when Spotify is not enabled for the account, on
+   *   the first poll.
    */
   async waitForSync(options: WaitOptions = {}): Promise<SpotifySyncStatus> {
     return pollUntilTerminal(this.syncPollPlan(options));
@@ -996,9 +972,9 @@ export interface SRMachineMetadata {
  *
  * ## Admin only, and the check is blunt
  *
- * `before_action :gatekeep` answers `403 "You SHALL NOT use this resource"` to
- * anyone who is not an administrator. There is no allowlist, no scope and no
- * per-user quota; the whole guard is `Current.user.admin?`.
+ * Every route answers `403 "You SHALL NOT use this resource"` to anyone who is
+ * not an administrator. There is no allowlist, no scope and no per-user
+ * quota.
  *
  * ## What it is
  *
@@ -1009,12 +985,11 @@ export interface SRMachineMetadata {
  * the response body. If you want a track IN the library, use
  * {@link MusicImportsNamespace.create} instead; this is the raw pipe.
  *
- * Three of the four shell out to yt-dlp against a caller-supplied URL and hold
- * a Puma thread while they do it, exactly like
- * {@link MusicImportsNamespace.previewPlaylist} - but note they are NOT in
- * rack-attack's `expensive_tools` pattern and have no controller-level limit
- * either, so the only ceiling is the general 600/min. The admin gate is what
- * stands in for a budget here. Do not build a batch loop on top of these.
+ * Three of the four fetch a caller-supplied URL and hold a server thread while
+ * they do it, exactly like {@link MusicImportsNamespace.previewPlaylist} - but
+ * they have no budget of their own, so the only ceiling is the general
+ * 600/min. The admin gate is what stands in for a budget here. Do not build a
+ * batch loop on top of these.
  *
  * A YouTube URL carrying `?list=` is truncated at the `?list=` before the fetch,
  * so a link copied from inside a playlist resolves to the single video rather
@@ -1026,20 +1001,19 @@ export interface SRMachineMetadata {
  */
 export class SRMachineNamespace extends Resource {
   /**
-   * `GET /s_r_machine/metadata` - the title and artist yt-dlp reads off a URL.
+   * `GET /s_r_machine/metadata` - the title and artist read off a URL.
    *
    * Both keys can be `null` for a source that carries no tags; it is a
    * best-effort read, not a lookup.
    *
-   * Not retried by default: it parks a thread for up to the sidecar's
-   * 60-second metadata timeout, and a failure means the source refused.
+   * Not retried by default: it parks a server thread for up to 60 seconds,
+   * and a failure means the source refused.
    *
    * @throws {OmsAuthError} 403 `"You SHALL NOT use this resource"` for a
    *   non-admin.
-   * @throws {OmsApiError} 400 `"url is not allowed"` from the SSRF guard; 500
-   *   when yt-dlp itself blows up - this controller has no `bad_gateway!`
-   *   rescue, so an upstream failure surfaces as a server error AND fires a
-   *   Discord alert.
+   * @throws {OmsApiError} 400 `"url is not allowed"` for a URL that is not
+   *   public http(s); 500 when the fetch itself fails - an upstream failure
+   *   surfaces as a server error here, not as a 502.
    */
   async metadata(url: string, options: RequestOptions = {}): Promise<SRMachineMetadata> {
     return this.http.get<SRMachineMetadata>("/s_r_machine/metadata", {
@@ -1099,27 +1073,24 @@ export class SRMachineNamespace extends Resource {
    * Multipart, field name `file`, and the only method in this namespace that
    * uploads. The response is `audio/opus` bytes, not JSON.
    *
-   * Works on all three clients: a React Native `{ uri, name, type }` descriptor
+   * Works on all three runtimes: a React Native `{ uri, name, type }` descriptor
    * goes into the `FormData` verbatim and is streamed off disk by the native
    * layer, while a browser or Bun caller passes a `FileInput` carrying a Blob
    * or a `Uint8Array`. A `ReadableStream` is buffered first, because
    * `FormData` has no streaming entry.
    *
    * The upload has no client-side size cap here because the server declares
-   * none - but Cloudflare sits in front of production and rejects a request
-   * body over roughly 100 MB with a 413 that never reaches Rails. There is no
-   * chunked path for this route, so a file above that simply cannot go through
-   * it.
+   * none - but the CDN in front of the API rejects a request body over roughly
+   * 100 MB with a 413 that never reaches it. There is no chunked path for this
+   * route, so a file above that simply cannot go through it.
    *
-   * The server reads the whole part into memory (`params[:file].read`) and
-   * hands it to ffmpeg, so a large input is a large allocation on the Mac Mini
-   * as well as on the caller.
+   * The server reads the whole part into memory before transcoding, so a large
+   * input is a large allocation on both sides.
    *
    * @throws {OmsAuthError} 403 `"You SHALL NOT use this resource"` for a
    *   non-admin.
-   * @throws {OmsApiError} 500 when no `file` part was sent (`params[:file]` is
-   *   `nil` and `.read` raises) or when ffmpeg refuses the input. Neither is a
-   *   graceful 400.
+   * @throws {OmsApiError} 500 when no `file` part was sent or when the input
+   *   cannot be transcoded. Neither is a graceful 400.
    * @throws {TypeError} when a React Native descriptor is passed on a runtime
    *   whose `FormData` is the web one, which would otherwise upload the literal
    *   text `"[object Object]"` and answer 500.
@@ -1169,7 +1140,7 @@ export function spotifySyncProgress(status: SpotifySyncStatus): Progress {
   };
 }
 
-/** Turns the camelCase input into the snake_case body the controller allows. */
+/** Turns the camelCase input into the snake_case body the server accepts. */
 function createBody(input: CreateSongImportInput, sourceUrl: string | undefined): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   const put = (key: string, value: unknown): void => {
@@ -1197,11 +1168,12 @@ function createBody(input: CreateSongImportInput, sourceUrl: string | undefined)
 }
 
 /**
- * One filter value, as either a scalar or the array form Rails reads as `IN`.
+ * One filter value, as either a scalar or the array form the server matches
+ * as a set.
  *
  * Numbers are left as numbers: `encodeQuery` stringifies them, and the
- * null sentinel has no business here - none of these six columns is usefully
- * filtered on `IS NULL`.
+ * null sentinel has no business here - none of these six fields is usefully
+ * filtered on null.
  */
 function asFilter(value: QueryValue | readonly QueryValue[]): QueryValue {
   return Array.isArray(value) ? [...value] : (value as QueryValue);

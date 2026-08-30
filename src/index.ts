@@ -8,8 +8,7 @@
  * const link = await oms.shortLinks.create({ url: "https://example.com" });
  * ```
  *
- * This package is the product; the CLI and the MCP server are two clients of
- * it. Three rules make that work, and they are not negotiable:
+ * Three rules shape the package, and they are not negotiable:
  *
  * 1. It runs in a Cloudflare-Worker-class isolate. No `node:*`, no `process`,
  *    no filesystem, no stdout. `fetch` is injectable through the constructor.

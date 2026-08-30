@@ -8,14 +8,13 @@
  *
  * ## What a credential actually is
  *
- * A `Session` row, and nothing more. `POST /sessions` writes one and hands back
- * its `token`, which is a `SecureRandom.uuid`. That UUID IS the credential.
+ * An opaque UUID, and nothing more. `POST /sessions` mints one and hands it
+ * back as `token`. That UUID IS the credential.
  *
  * There is no JWT, no signature to verify, no `exp`, no refresh token and no
- * rotation. A session token never expires on its own: it lives until the row is
- * deleted, which happens on sign-out, when an administrator deactivates the
- * account (`User#deactivate!` runs `sessions.delete_all`), or when someone
- * deletes it in the database. Do not build refresh logic against this - there
+ * rotation. A session token never expires on its own: it lives until the
+ * session is deleted, which happens on sign-out or when an administrator
+ * deactivates the account. Do not build refresh logic against this - there
  * is nothing to refresh, and a client that "renews" by signing in again just
  * accumulates rows in the user's device list and fires a login alert each time.
  *
@@ -25,24 +24,22 @@
  *
  * ## Three ways the server reads it, and the one that bites
  *
- * `Session.candidate_tokens` collects, in this order:
+ * The server looks for the token, in this order, in:
  *
  * 1. the `Authorization` header,
  * 2. the `token` request parameter (query string or body),
  * 3. the `oms_session` cookie.
  *
- * and `Session.resolve_from_request` tries each until one resolves to a LIVE
- * row, so a stale header no longer permanently shadows a good cookie on API
- * requests. (`ApplicationCable::Connection` is the exception: the WebSocket
- * handshake takes the FIRST candidate, not the first live one, so a stale
- * header there really does beat a good `?token=`.)
+ * and tries each until one resolves to a LIVE session, so a stale header does
+ * not permanently shadow a good cookie on API requests. (The WebSocket
+ * handshake is the exception: it takes the FIRST candidate, not the first
+ * live one, so a stale header there really does beat a good `?token=`.)
  *
- * The header is parsed as `header["Bearer:".length..]`, which is a BLIND SLICE
- * OF THE FIRST SEVEN CHARACTERS. Nothing checks that those seven characters
- * spell anything:
+ * The header is read by slicing off its FIRST SEVEN CHARACTERS, whatever they
+ * are. Nothing checks that those seven characters spell anything:
  *
  * - `Bearer <token>` works (7 chars: `Bearer` plus the space),
- * - `Bearer:<token>` also works, which is where the constant's name comes from,
+ * - `Bearer:<token>` also works, since the slice is seven characters either way,
  * - a bare token with NO prefix does NOT work. Its first seven characters are
  *   eaten, the remainder matches no row, and the request is answered as
  *   anonymous. The failure is a 401 on an endpoint that needs auth, or - far
@@ -63,17 +60,16 @@
  * `SameSite=Lax`, `path=/`, a one-year expiry and NO `Domain` attribute, which
  * makes it host-only: it belongs to `backend.omelhorsite.pt` alone and is never
  * sent to a sibling subdomain. `omelhorsite.pt` and `backend.omelhorsite.pt`
- * share a registrable domain, so a call from the web app is cross-ORIGIN but
- * same-SITE, and `SameSite=Lax` still lets the cookie ride along. A page on a
- * genuinely different site (the `pages.dev` staging build, where `pages.dev` is
- * a public suffix) can never receive it, no CORS header can change that, and
- * such a page must use token mode instead.
+ * share a registrable domain, so a call from a page on `omelhorsite.pt` is
+ * cross-ORIGIN but same-SITE, and `SameSite=Lax` still lets the cookie ride
+ * along. A page on a genuinely different site (a `pages.dev` preview, say,
+ * where `pages.dev` is a public suffix) can never receive it, no CORS header
+ * can change that, and such a page must use token mode instead.
  *
  * ## No CSRF token exists
  *
- * The backend is an `ActionController::API` and `protect_from_forgery` is never
- * enabled. There is no CSRF token to fetch, no header to echo, and nothing in
- * this SDK that omits one. For browsers the entire cross-site defence is
+ * The API issues none. There is no CSRF token to fetch, no header to echo, and
+ * nothing in this SDK that omits one. For browsers the entire cross-site defence is
  * `SameSite=Lax` on the cookie; bearer clients are unaffected because a
  * cross-site page cannot make the browser attach an `Authorization` header.
  *
@@ -88,11 +84,7 @@
  *   `.update()`, `.follow()`, `.picture()` - the user read and write surface.
  *
  * `DELETE /users/:id` is also absent, and that one is not a delegation: the
- * route cannot succeed for anybody. `UsersController#destroy` checks for an
- * administrator and then calls `super`, and `CrudActions#destroy` asks
- * `resource.destroyable_by?(Current.user)` - which on `User` is
- * `alias destroyable_by? creatable_by?`, and `creatable_by?` returns `false`
- * unconditionally. Every caller, administrator included, gets
+ * route cannot succeed for anybody. Every caller, administrator included, gets
  * `401 "You are not authorized to destroy this resource"`. Use
  * {@link AuthSessionsNamespace.deactivateUser} for the operational need, or
  * {@link AuthSessionsNamespace.deleteAccountStart} for a user deleting
@@ -127,8 +119,7 @@ export const SESSION_COOKIE_NAME = "oms_session";
 
 /**
  * The seven characters the server slices off the `Authorization` header before
- * looking the token up, spelled the way the Rails source spells them
- * (`"Bearer:".length`).
+ * looking the token up: the length of `"Bearer:"`.
  *
  * Present so the number 7 appears somewhere other than a comment. The transport
  * writes `"Bearer "` (with a space), which is the same length; both forms work
@@ -137,7 +128,7 @@ export const SESSION_COOKIE_NAME = "oms_session";
 export const SESSION_BEARER_PREFIX_LENGTH = 7;
 
 /**
- * Digits in an email verification code (`EmailVerification::CODE_LENGTH`).
+ * Digits in an email verification code.
  *
  * Six, numeric only, zero-padded. This is a deliberate product decision on this
  * project rather than an accident: a code a person can read off a phone and
@@ -147,19 +138,17 @@ export const SESSION_BEARER_PREFIX_LENGTH = 7;
 export const VERIFICATION_CODE_LENGTH = 6;
 
 /**
- * Wrong guesses an issued code survives (`EmailVerification::MAX_ATTEMPTS`).
+ * Wrong guesses an issued code survives.
  *
  * This is the counterweight to a six-digit code, and it is per CODE, not per IP:
- * rack-attack only throttles by address, so an attacker rotating through a
- * botnet would otherwise walk a million-key space at 10 guesses a minute per
+ * the request throttle only counts by address, so an attacker rotating through
+ * a botnet would otherwise walk a million-key space at 10 guesses a minute per
  * address. The budget closes that regardless of where the guesses come from.
  *
  * The exact arithmetic, because off-by-one matters when you are deciding
- * whether to let a user try again: `register_failed_attempt` destroys the code
- * when `attempts + 1 >= MAX_ATTEMPTS`, starting from `attempts = 0`. So four
- * wrong guesses are survivable and the FIFTH burns the code. Burning is
- * permanent - the row is deleted, not locked - and it also fires a
- * `verification_burned` security alert to the owner. The user's only route
+ * whether to let a user try again: four wrong guesses are survivable and the
+ * FIFTH burns the code. Burning is permanent - the code is deleted, not locked
+ * - and it also sends the owner a security alert. The user's only route
  * forward is a fresh `*_start` call, which is throttled at 4 a minute and 20 an
  * hour per IP, so a client that lets someone mash a code field will lock them
  * out of the flow for the rest of the hour.
@@ -170,19 +159,16 @@ export const VERIFICATION_CODE_LENGTH = 6;
 export const VERIFICATION_CODE_MAX_ATTEMPTS = 5;
 
 /**
- * How long an issued code stays valid (`EmailVerification::EXPIRES_IN`), in
- * milliseconds. Fifteen minutes.
+ * How long an issued code stays valid, in milliseconds. Fifteen minutes.
  *
- * Expiry is enforced by an `active` scope plus an opportunistic purge on every
- * issue and every verify, so an expired code behaves exactly like a wrong one:
+ * An expired code behaves exactly like a wrong one:
  * `404 "Invalid Verification"`, indistinguishable from the status alone. Show
  * the user a countdown rather than making them find out.
  */
 export const VERIFICATION_CODE_TTL_MS = 15 * 60 * 1000;
 
 /**
- * How long an OAuth handoff ticket stays valid (`SessionsController::TICKET_TTL`),
- * in milliseconds. Two minutes.
+ * How long an OAuth handoff ticket stays valid, in milliseconds. Two minutes.
  *
  * The signature window is only half the story - the ticket is also one-time.
  * See {@link AuthSessionsNamespace.adopt}.
@@ -197,10 +183,10 @@ export const OAUTH_TICKET_TTL_MS = 2 * 60 * 1000;
  * the user can rename it afterwards through `oms.account.sessions.update()`.
  * The list is mostly a joke, with one entry that is not:
  *
- * **`"teapot"` suppresses alerts.** `Session#alert_login` and
- * `#alert_returning_activity` both bail out for a teapot session, which is how
- * the backend's own background jobs sign in without paging the owner on every
- * run. Do not relabel a real user's device as a teapot to quieten notifications:
+ * **`"teapot"` suppresses alerts.** A teapot session fires neither the login
+ * alert nor the returning-activity alert, which is what an unattended
+ * automation wants. Do not relabel a real user's device as a teapot to
+ * quieten notifications:
  * you are turning off the only signal that a stolen token is being used.
  */
 export const SESSION_DEVICE_TYPES = [
@@ -251,8 +237,8 @@ export type SessionDeviceType = (typeof SESSION_DEVICE_TYPES)[number];
  * the ten requests a minute the IP is allowed. A user who pastes a code with a
  * trailing space should not lose a fifth of their budget to whitespace.
  *
- * The server normalises with `strip`, so surrounding whitespace is forgiven
- * there; this returns `false` for it anyway, so a caller can trim before
+ * The server trims surrounding whitespace, so it is forgiven there; this
+ * returns `false` for it anyway, so a caller can trim before
  * sending rather than relying on the remote side to be lenient.
  */
 export function isVerificationCode(value: string): boolean {
@@ -261,11 +247,11 @@ export function isVerificationCode(value: string): boolean {
 
 /** Credentials for {@link AuthSessionsNamespace.signIn}. */
 export interface SignInInput {
-  /** Normalised server-side with `strip.downcase`; send it as the user typed it. */
+  /** Trimmed and lowercased server-side; send it as the user typed it. */
   readonly email: string;
   /**
-   * Compared with `User.authenticate_by`, which is timing-safe: a wrong
-   * password and an unknown address take the same time and give the same
+   * Compared in constant time: a wrong password and an unknown address take
+   * the same time and give the same
    * message, so this endpoint cannot be used to test whether an account exists.
    */
   readonly password: string;
@@ -274,15 +260,13 @@ export interface SignInInput {
 /**
  * What `POST /sessions` answers with: the session record plus, ONCE, the token.
  *
- * This is `SessionBlueprint`'s `:token` view, which is the base view plus one
- * field - Blueprinter views inherit, they do not replace - so everything an
- * ordinary {@link AccountSession} carries is here too, including the inlined
- * `user`. That inline user saves a round trip: there is no need to call
- * `oms.account.me()` straight after signing in.
+ * Everything an ordinary {@link AccountSession} carries is here too, including
+ * the inlined `user`, plus `token`. That inline user saves a round trip: there
+ * is no need to call `oms.account.me()` straight after signing in.
  *
  * `token` appears in this response and in NO other. Nothing else in the API
- * ever renders it again: `GET /sessions` and `GET /sessions/mine` return the
- * base view, which has no `token` field. Lose it and the only way back is to
+ * ever renders it again: `GET /sessions` and `GET /sessions/mine` never
+ * include a `token` field. Lose it and the only way back is to
  * sign in again, minting another row.
  */
 export interface SignedInSession extends AccountSession {
@@ -290,7 +274,7 @@ export interface SignedInSession extends AccountSession {
    * The credential. A bare UUID, no prefix.
    *
    * Store it where the platform stores secrets (Keychain / Keystore via
-   * SecureStore on React Native, the OS keyring for the CLI). Do NOT store it
+   * SecureStore on React Native, the OS keyring on a desktop). Do NOT store it
    * when you are in cookie mode - see {@link AuthSessionsNamespace.signIn}.
    */
   readonly token: string;
@@ -327,7 +311,7 @@ export interface SignUpInput {
   readonly code: string;
   /**
    * Display name, 1 to 50 characters. The `handle` is NOT settable here: the
-   * server generates one from this name in a `before_create` hook. Change it
+   * server generates one from this name. Change it
    * afterwards with `oms.account.update({ handle })`.
    */
   readonly name: string;
@@ -389,7 +373,7 @@ export class AuthSessionsNamespace extends Resource {
    *
    * ## What to do with the answer, per mode
    *
-   * **Token mode** (React Native, the CLI, anything not served from
+   * **Token mode** (React Native, Bun, anything not served from
    * `omelhorsite.pt`): store `token` in the platform's secret store and build a
    * client with it. The client you called this on has no credential, and adding
    * one to an existing client is not possible - `Oms` takes its token at
@@ -421,9 +405,6 @@ export class AuthSessionsNamespace extends Resource {
    * re-creates precisely the XSS-exfiltratable copy the cookie mode exists to
    * eliminate, and it also gives you a second credential that outlives the
    * first: sign out, and the cookie dies while the stored token keeps working.
-   * The web app is explicit about this - `persistSessionToken` writes only a
-   * non-sensitive `authed` flag when `isCookieAuth()`, and actively purges any
-   * legacy token it finds.
    *
    * Note that an `Oms` cannot be both: passing `sessionCookie: true` together
    * with a token throws a `TypeError` at construction, deliberately, so that no
@@ -431,14 +412,13 @@ export class AuthSessionsNamespace extends Resource {
    *
    * ## Cost and failure
    *
-   * Throttled to **10 POSTs per minute per IP** (`login/ip`), which is a
-   * password-guessing bound and is keyed by address, so several users behind
-   * one NAT share it. The throttle matches a normalised path, so `/sessions/`,
-   * `//sessions` and `/sessions.json` all count against the same bucket - that
-   * gap was closed.
+   * Throttled to **10 POSTs per minute per IP**, which is a password-guessing
+   * bound and is keyed by address, so several users behind one NAT share it.
+   * The throttle matches a normalised path, so `/sessions/`, `//sessions` and
+   * `/sessions.json` all count against the same bucket.
    *
-   * Every successful sign-in creates a row AND fires a Discord alert to the
-   * owner. Signing in once per process invocation is how a device list fills up
+   * Every successful sign-in creates a session AND sends the owner a login
+   * alert. Signing in once per process invocation is how a device list fills up
    * with a hundred identical entries; persist the token instead.
    *
    * Retries: an ambiguous network failure is NOT replayed, because this is a
@@ -456,8 +436,7 @@ export class AuthSessionsNamespace extends Resource {
    *
    * @throws {OmsAuthError} 401 `"Invalid email address or password."` for a
    *   wrong password, an unknown address, and a deactivated account alike. The
-   *   three are not distinguishable, on purpose. (Deactivation is enforced as a
-   *   validation on `Session` create, so it fails at the same place.)
+   *   three are not distinguishable, on purpose.
    * @throws {OmsQuotaError} 429 once the per-IP login budget is spent.
    */
   async signIn(input: SignInInput, options: RequestOptions = {}): Promise<SignedInSession> {
@@ -473,12 +452,10 @@ export class AuthSessionsNamespace extends Resource {
    *
    * ## THE `:id` IS IGNORED. THIS ALWAYS DESTROYS THE CALLING SESSION.
    *
-   * `SessionsController#destroy` does not look the path segment up. It does not
-   * call `resource`. It reads `Current.session`, destroys that, clears the
-   * cookie and answers `204`. So `DELETE /sessions/<any string at all>` means
-   * "log ME out", and there is no way through this API to revoke a different
-   * device. The web app's own "sign out this other device" button has always
-   * signed the user out of the browser they clicked it in.
+   * The server never looks the path segment up. It destroys the calling
+   * session, clears the cookie and answers `204`. So
+   * `DELETE /sessions/<any string at all>` means "log ME out", and there is no
+   * way through this API to revoke a different device.
    *
    * That is why this method takes no id. A signature that accepted one would be
    * describing behaviour the server does not have, and the mistake it invites -
@@ -486,7 +463,7 @@ export class AuthSessionsNamespace extends Resource {
    * with a `204` that looks like success.
    *
    * To actually end someone else's sessions there is exactly one lever, and it
-   * is administrative: {@link deactivateUser} runs `sessions.delete_all` on the
+   * is administrative: {@link deactivateUser} ends every session of the
    * target.
    *
    * ## What it does on the wire
@@ -546,20 +523,19 @@ export class AuthSessionsNamespace extends Resource {
   /**
    * `GET /sessions/mine` - the session the current credential resolves to.
    *
-   * The cheapest liveness check there is, and the one the web app and the
-   * native app both boot with: a `200` means the stored credential still names
-   * a row, a `401` means it does not and the user must sign in again. Identical
+   * The cheapest liveness check there is, and the one an app should boot with:
+   * a `200` means the stored credential still names a live session, a `401`
+   * means it does not and the user must sign in again. Identical
    * to `oms.account.sessions.current()`; both are here because "am I still
    * signed in" belongs to the sign-in lifecycle and "which devices are signed
    * in" belongs to the account screen.
    *
-   * Returns the base `SessionBlueprint` view, with the owner inlined under
-   * `user` and WITHOUT `token`. There is no route that hands a token back.
+   * Returns the session with the owner inlined under `user` and WITHOUT
+   * `token`. There is no route that hands a token back.
    *
    * `/sessions/mine` is the whole spelling. There is NO `GET /sessions/current`:
-   * `resources :sessions` is declared `only: [:index, :create, :update,
-   * :destroy]`, so `show` is not routed and a GET to `/sessions/current` is a
-   * 404. (It IS a live path on DELETE, where it is the placeholder id
+   * `GET /sessions/:id` is not routed at all, so a GET to `/sessions/current`
+   * is a 404. (It IS a live path on DELETE, where it is the placeholder id
    * {@link signOut} uses, which is exactly the sort of coincidence that makes
    * the wrong spelling look plausible.)
    *
@@ -586,8 +562,8 @@ export class AuthSessionsNamespace extends Resource {
    *
    * The last step of the browser OAuth flow. The provider round trip happens on
    * the API host; its callback redirects the browser back to
-   * `https://omelhorsite.pt/account/oauth/callback?ticket=...` (hardcoded to
-   * `Rails.configuration.frontend_url`, not configurable per client), and the
+   * `https://omelhorsite.pt/account/oauth/callback?ticket=...` (fixed
+   * server-side, not configurable per client), and the
    * page hands that ticket here. The ticket exists so the session token itself
    * never travels in a URL, a browser history entry or a `Referer`.
    *
@@ -598,10 +574,9 @@ export class AuthSessionsNamespace extends Resource {
    *
    * ## MUST NOT BE RETRIED, and this method enforces that
    *
-   * The ticket is one-time on the server. Redemption is claimed atomically with
-   * `Rails.cache.write(..., unless_exist: true)` before the session is adopted,
-   * and a second presentation of the same ticket gets the same `401 "Invalid or
-   * expired ticket."` as a forged one. So a retry after an ambiguous failure -
+   * The ticket is one-time on the server. Redemption is claimed atomically
+   * before the session is adopted, and a second presentation of the same
+   * ticket gets the same `401 "Invalid or expired ticket."` as a forged one. So a retry after an ambiguous failure -
    * a torn connection, a lost response - burns the ticket and reports a login
    * failure for a login that actually SUCCEEDED. The user is left staring at an
    * error page while the browser quietly holds a valid session cookie.
@@ -609,12 +584,6 @@ export class AuthSessionsNamespace extends Resource {
    * This method therefore passes `retry: false` and a caller cannot override it
    * back on. If the call fails ambiguously, the honest recovery is to check
    * {@link current} before deciding anything: if it answers, you are signed in.
-   *
-   * The app-side documentation (`oms-music/docs/auth-account.md`, section 6)
-   * says the ticket is "not single-use server-side" and that the web enforces
-   * single use client-side with a sessionStorage nonce. THAT IS OUT OF DATE.
-   * The Rails code enforces it, and it is the enforcement that makes a retry
-   * destructive. When the doc and the Rails disagree, the Rails wins.
    *
    * Tickets are also short-lived, {@link OAUTH_TICKET_TTL_MS} (two minutes), so
    * do not stash one to redeem later.
@@ -630,7 +599,7 @@ export class AuthSessionsNamespace extends Resource {
    * `GET /sessions/oauth_ticket` - mints a short-lived ticket for the current
    * session, so the session token itself never crosses a subdomain boundary.
    *
-   * Only the web app needs this, and only for one thing: linking an OAuth
+   * Only a browser page needs this, and only for one thing: linking an OAuth
    * provider to an account that is already signed in. That flow is a full-page
    * navigation to `backend.omelhorsite.pt/auth/link/<provider>`, and a
    * navigation cannot carry an `Authorization` header. The cookie is host-only
@@ -638,8 +607,8 @@ export class AuthSessionsNamespace extends Resource {
    * `?token=<the session token>` in a URL that lands in browser history and in
    * a `Referer`, which is exactly what this endpoint exists to avoid.
    *
-   * Native and CLI clients have no such constraint and do not need this: they
-   * hold the token already.
+   * A token-mode client has no such constraint and does not need this: it
+   * holds the token already.
    *
    * The result is scoped to the `oauth` purpose and expires after
    * {@link OAUTH_TICKET_TTL_MS}. It authenticates nothing else - an API call
@@ -675,9 +644,9 @@ export class AuthSessionsNamespace extends Resource {
    * is a deliberate trade for a usable signup form, and it is why
    * {@link resetPasswordStart} does the opposite.
    *
-   * Issuing a code DELETES any live code for the same address and reason
-   * (`where(reason:, email:).delete_all` before insert). One code per flow per
-   * address, always. A user who asks for a second code and then types the first
+   * Issuing a code DELETES any live code for the same address and flow. One
+   * code per flow per address, always. A user who asks for a second code and
+   * then types the first
    * one gets `404 "Invalid Verification"` and, worse, spends one of the five
    * guesses belonging to the code they cannot see. Tell them the old code is
    * dead when they request a new one.
@@ -705,9 +674,8 @@ export class AuthSessionsNamespace extends Resource {
    *
    * No session is created and no token is returned. The account exists and the
    * caller is still anonymous. Follow it immediately with {@link signIn} using
-   * the same email and password - that is what both the web app and the native
-   * app do, and forgetting it is the classic "signup worked but the app is
-   * still on the login screen" bug.
+   * the same email and password; forgetting it is the classic "signup worked
+   * but the app is still on the login screen" bug.
    *
    * ```ts
    * await oms.sessions.signUpStart(email);
@@ -716,12 +684,11 @@ export class AuthSessionsNamespace extends Resource {
    * const session = await oms.sessions.signIn({ email, password });
    * ```
    *
-   * `handle` cannot be chosen here even though the column exists: the parameter
-   * is not permitted on this action, and a `before_create` hook generates one
-   * from `name`. Let the user change it afterwards with
+   * `handle` cannot be chosen here: the parameter is ignored, and the server
+   * generates one from `name`. Let the user change it afterwards with
    * `oms.account.update({ handle })`, where 15 characters is the ceiling.
    *
-   * Consuming the code also stamps `email_verified_at`, inside the same create.
+   * Consuming the code also marks the address as verified.
    * The address is proven, so a freshly signed-up account is never in the
    * "verify your email" limbo.
    *
@@ -759,8 +726,7 @@ export class AuthSessionsNamespace extends Resource {
    * present this result to the user as confirmation that mail is on its way to
    * a real account, because it is not evidence of that.
    *
-   * A real send also fires a `password_reset_started` security alert to the
-   * owner.
+   * A real send also sends the owner a security alert.
    *
    * Same throttle family as every other `*_start`: **4 a minute and 20 an hour
    * per IP**, shared.
@@ -784,7 +750,7 @@ export class AuthSessionsNamespace extends Resource {
    * other sessions ({@link signOut} only ends the caller's). Escalating to an
    * administrator and {@link deactivateUser} is the only lever that clears them.
    *
-   * Consuming the code stamps `email_verified_at`: proving control of the
+   * Consuming the code marks the address as verified: proving control of the
    * mailbox verifies the address even if it never was verified before.
    *
    * Throttled to **10 a minute per IP**, shared with the other `*_end`
@@ -812,9 +778,8 @@ export class AuthSessionsNamespace extends Resource {
    * `POST /users/update_email_start` - emails TWO codes: one to the address
    * currently on the account, one to the address it is moving to.
    *
-   * Requires a live session. One HTTP request, two `EmailVerification` rows,
-   * two different reasons (`email_update_prev` and `email_update_new`), and
-   * {@link changeEmailComplete} needs both codes back. Proving control of the
+   * Requires a live session. One HTTP request, two codes, and
+   * {@link changeEmailComplete} needs both back. Proving control of the
    * new mailbox alone is not enough: an attacker sitting on a hijacked session
    * would otherwise move the account to an address they own and lock the real
    * owner out permanently.
@@ -846,17 +811,16 @@ export class AuthSessionsNamespace extends Resource {
    *
    * Requires a live session; answers `200` with the updated {@link User}.
    *
-   * Both codes are checked BEFORE either is consumed (the controller verifies
-   * twice with `destroy: false`, then verifies again to consume), so getting
-   * one right and one wrong burns neither. What it does still cost is an
-   * attempt against BOTH live codes: a wrong guess charges
-   * `register_failed_attempt` on the code for that reason, so a user typing the
-   * two codes into the wrong boxes spends one of the five guesses on each. With
+   * Both codes are checked BEFORE either is consumed, so getting one right and
+   * one wrong burns neither. What it does still cost is an attempt against
+   * BOTH live codes: a wrong guess counts against the code it was meant for,
+   * so a user typing the two codes into the wrong boxes spends one of the five
+   * guesses on each. With
    * two codes in play the per-code budget is easier to exhaust than anywhere
    * else in this family - validate with {@link isVerificationCode} first, and
    * label the two inputs unmistakably.
    *
-   * Consuming both stamps `email_verified_at`, since both mailboxes are proven.
+   * Consuming both marks the address as verified, since both mailboxes are proven.
    *
    * Throttled to **10 a minute per IP**, shared with the other `*_end`
    * endpoints.
@@ -898,10 +862,6 @@ export class AuthSessionsNamespace extends Resource {
    * Answers `200` with the bare string `"User deletion instructions sent."`.
    * Shared `*_start` throttle: **4 a minute and 20 an hour per IP**.
    *
-   * Included here even though it is the one pair of routes the sibling
-   * documentation does not list, because nothing else in the SDK covers it and
-   * a user who cannot delete their account has no exit.
-   *
    * @throws {OmsAuthError} 401 without a live session.
    */
   async deleteAccountStart(options: RequestOptions = {}): Promise<string> {
@@ -911,9 +871,9 @@ export class AuthSessionsNamespace extends Resource {
   /**
    * `POST /users/destroy_end` - presents the code and DESTROYS THE ACCOUNT.
    *
-   * Requires a live session. Irreversible: `user.destroy` runs, taking the
-   * user's sessions, files, music library and everything else that cascades
-   * from the row. There is no soft-delete on this path and no undo.
+   * Requires a live session. Irreversible: it takes the user's sessions,
+   * files, music library and everything else with it. There is no soft-delete
+   * on this path and no undo.
    * {@link deactivateUser} is the reversible operation, and it is
    * administrators only.
    *
@@ -927,9 +887,8 @@ export class AuthSessionsNamespace extends Resource {
    * @throws {OmsAuthError} 401 without a live session.
    * @throws {OmsApiError} 404 `"Invalid Verification"` for a wrong, expired or
    *   burned code.
-   * @throws {OmsApiError} 500 with the model's error messages when the record
-   *   could not be destroyed - a foreign key that refused to cascade. The
-   *   account survives; the code does not.
+   * @throws {OmsApiError} 500 with the server's error messages when the
+   *   account could not be destroyed. The account survives; the code does not.
    */
   async deleteAccountComplete(code: string, options: RequestOptions = {}): Promise<void> {
     await this.http.post<unknown>("/users/destroy_end", { code }, options);
@@ -941,23 +900,22 @@ export class AuthSessionsNamespace extends Resource {
    * `GET /users` - the user roster.
    *
    * Requires a credential, and any authenticated account can enumerate the
-   * whole table: `User.viewable_by` is `->(user) { all }`. What an ordinary
-   * caller does NOT get is the privileged columns - `group`, `email`, `gender`,
+   * whole roster. What an ordinary caller does NOT get is the privileged
+   * columns - `group`, `email`, `gender`,
    * `last_seen_at`, `sessions_count`, `deactivated_at` and
    * `allowed_to_use_spotify` are all rendered conditionally, so an absent key
    * means "not visible to you", never "empty".
    *
-   * This used to be anonymous and is not any more, precisely so that the roster
-   * could not be harvested. For a picker, prefer `oms.account.search()`: it is
-   * anonymous, capped at eight rows, and returns only id, handle and name.
+   * For a picker, prefer `oms.account.search()`: it is anonymous, capped at
+   * eight rows, and returns only id, handle and name.
    *
    * Only `name` and `handle` are filterable. Any other key is a `400 "Unknown
    * search filter"` - this DSL fails closed rather than ignoring what it does
    * not recognise.
    *
-   * Deactivated accounts are NOT filtered out of this listing (the `active`
-   * scope is applied by `users#search`, not by the index), so a roster shows
-   * them; an administrator can tell by `deactivated_at`, and nobody else can.
+   * Deactivated accounts are NOT filtered out of this listing (unlike
+   * `oms.account.search()`), so a roster shows them; an administrator can tell
+   * by `deactivated_at`, and nobody else can.
    *
    * Index responses carry an `ETag`, so a repeat can answer `304` with no body.
    * Counts against the general authenticated ceiling, 600 a minute.
@@ -977,10 +935,10 @@ export class AuthSessionsNamespace extends Resource {
    *
    * ## This is also the only way to revoke somebody's sessions
    *
-   * `User#deactivate!` stamps `deactivated_at` and runs `sessions.delete_all`
-   * in the same transaction, so every device the target is signed in on is
-   * logged out at once, and `Session`'s create validation then refuses to mint
-   * a new one. It is the single lever in this API that ends a session other
+   * Deactivation stamps `deactivated_at` and ends every session of the target
+   * at once, so every device they are signed in on is logged out, and a new
+   * sign-in is refused. It is the single lever in this API that ends a session
+   * other
    * than the caller's own - {@link signOut} cannot, and neither can anything in
    * `oms.account.sessions`. If a token has leaked, this is the response.
    *

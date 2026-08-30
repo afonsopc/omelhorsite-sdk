@@ -19,9 +19,8 @@
  * few dozen lines of actual logic in `password.ts`. Nothing here is
  * platform-specific, so it is isolate-safe like the rest of `local/`.
  *
- * This file is DATA, copied verbatim from `frontend/lib/crypto/wordlist.ts` -
- * the same list the web app's vault draws from. Keep the two in step rather
- * than editing either by hand.
+ * This file is DATA. Regenerate it from the source rather than editing it by
+ * hand.
  */
 export const EFF_LONG_WORDLIST: readonly string[] = Object.freeze([
   "abacus", "abdomen", "abdominal", "abide", "abiding", "ability", "ablaze", "able",

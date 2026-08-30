@@ -9,7 +9,7 @@
  * | credential | OAuth access token (JWT) | opaque `Session` token or cookie |
  * | who issues it | `/oauth/token`, the device grant | `POST /sessions` |
  * | authority | only the granted scopes | the whole account |
- * | who uses it | third-party apps, the CLI, MCP | the web app, oms-music |
+ * | who uses it | third-party apps and automation | first-party apps |
  * | reaches | endpoints declaring an `oauth_scope` | everything |
  *
  * `enforce_oauth_scope!` denies by omission, so an OAuth token cannot reach

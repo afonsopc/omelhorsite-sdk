@@ -9,43 +9,37 @@
  * ## Two routes, and which one is the real one
  *
  * - `GET /media/:id/data` and `GET /media/:id/data_url` are the CANONICAL
- *   routes. `MediaController` serves them, and every new client should use
- *   them.
+ *   routes. Every new client should use them.
  * - `GET /fs_nodes/:id/data` and `GET /fs_nodes/:id/data_url` are a TEMPORARY
- *   ALIAS, in the backend's own words: "the old `/fs_nodes/:id/data{,_url}`
- *   routes keep a temporary numeric-id alias for the web frontend".
- *   `FsNodesController` branches on `params[:id] =~ /\A\d+\z/` and hands a
- *   numeric id to the same `MusicMediaServing` concern; a storage UUID keeps
- *   the old filesystem behaviour. The alias exists because the web frontend
- *   still builds those URLs, and it is scheduled to go together with the
- *   `*_fs_node_id` blueprint twins.
+ *   ALIAS. An all-digit id there is served as media; a storage UUID keeps the
+ *   filesystem behaviour. The alias is scheduled to go, together with the
+ *   `*_fs_node_id` twins on the music records.
  *
  * {@link MediaNamespace.aliasUrl} and {@link MediaNamespace.aliasDataUrl} are
- * here so a port of the old web code type-checks, and for the one case where
+ * here for code that still spells the old routes, and for the one case where
  * the alias is genuinely more capable (see the OAuth note below). Reach for
  * {@link MediaNamespace.url} and {@link MediaNamespace.dataUrl} in new code.
  *
  * ## A media id is not a storage node id
  *
- * It is an `active_storage_attachments` primary key, which
- * `ApplicationBlueprint.media_id_fields` serialises with `.to_s` - so it is a
- * STRING whose characters happen to all be digits (`"48211"`). Storage node
- * ids are uuids. The two id spaces are not interchangeable, and the only
- * reason a media id works on the `fs_nodes` path at all is the numeric branch
- * described above. {@link isMediaId} exists to keep that straight.
+ * It is a STRING whose characters happen to all be digits (`"48211"`).
+ * Storage node ids are uuids. The two id spaces are not interchangeable, and
+ * the only reason a media id works on the `fs_nodes` path at all is the
+ * numeric branch described above. {@link isMediaId} exists to keep that
+ * straight.
  *
  * ## 404 NEVER 401, and why that will empty somebody's library
  *
- * `resolve_music_attachment` returns `nil` - and the controller answers `404
- * "Not found"` - for every one of these, deliberately indistinguishable:
+ * The server answers `404 "Not found"` for every one of these, deliberately
+ * indistinguishable:
  *
  * - the id does not exist;
  * - it exists but belongs to a book, a tool output, another user;
  * - the caller sent no credential at all;
  * - the caller sent a credential that no longer resolves to a live session.
  *
- * The routes are declared `allow_unauthenticated_access`, so authentication
- * never gets a chance to answer `401`. That is correct for the server:
+ * The routes accept anonymous callers, so authentication never gets a chance
+ * to answer `401`. That is correct for the server:
  * existence must not leak. It is a TRAP for the client.
  *
  * A client that reads `404` as "this file is gone" will, the moment a session
@@ -59,8 +53,8 @@
  *
  * ## The rate ceilings are not the same on the two routes, and that is the point
  *
- * `rack-attack`'s `GENERAL_EXEMPT_PATHS` matches `/media/:id/data` and
- * `/fs_nodes/:id/(data|zip)`, and matches NEITHER `data_url`:
+ * The general rate-limit exemption covers `/media/:id/data` and
+ * `/fs_nodes/:id/(data|zip)`, and NEITHER `data_url`:
  *
  * - **`data` is EXEMPT** from the 600/min authenticated and 120/min anonymous
  *   ceilings, on both the canonical route and the alias. An artwork grid, a
@@ -79,12 +73,12 @@
  *
  * ## An OAuth access token cannot reach `/media/*` at all
  *
- * `MediaController` declares no `oauth_scope`, and `enforce_oauth_scope!`
- * denies by omission: an OAuth token gets `403 {"error":"insufficient_scope"}`
- * before the action runs. `FsNodesController` DOES declare `storage:read` on
- * `data`/`data_url`, so - until `MediaController` grows a scope - a token
- * holding `storage:read` can reach music bytes through the temporary alias and
- * not through the canonical route. That inversion is a server-side gap rather
+ * The canonical routes accept no OAuth scope at all: an OAuth token gets
+ * `403 {"error":"insufficient_scope"}` whatever it carries. The `/fs_nodes`
+ * alias DOES accept `storage:read` on `data`/`data_url`, so - until the
+ * canonical routes gain a scope - a token holding `storage:read` can reach
+ * music bytes through the temporary alias and not through the canonical
+ * route. That inversion is a server-side gap rather
  * than a design decision; it is the single reason to prefer the alias, and it
  * is expected to close. A session token or the browser cookie reaches both.
  *
@@ -105,8 +99,7 @@ import { type ApiClient, Resource } from "../http";
 import type { FileOutput, RequestOptions } from "../types";
 
 /**
- * An `active_storage_attachments` id, as the blueprints serialise it: a string
- * of digits.
+ * A media id: a string of digits.
  *
  * Typed as a plain `string` rather than a branded type because that is what
  * every `*_media_id` field on a song, an artist and a playlist already is, and
@@ -116,7 +109,7 @@ export type MediaId = string;
 
 /**
  * How long a presigned URL from {@link MediaNamespace.dataUrl} stays valid:
- * six hours (`MediaUrls::EXPIRY`).
+ * six hours.
  *
  * The window is long because it has to be, not out of generosity. A media
  * element re-requests the object on every seek and whenever it resumes a
@@ -128,8 +121,7 @@ export const MEDIA_URL_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * How long a browser may reuse the `302` from `GET /media/:id/data`:
- * five minutes (`MusicMediaServing::REDIRECT_CACHE_TTL`), `Cache-Control:
- * private`.
+ * five minutes, `Cache-Control: private`.
  *
  * It exists because a redirect with no `Cache-Control` is never cached, so
  * every `<img>` re-followed the hop on every mount and artwork visibly
@@ -155,7 +147,7 @@ export class MediaNamespace extends Resource {
    *   {@link MEDIA_REDIRECT_CACHE_TTL_MS}. Do NOT put `crossorigin` on the
    *   element: it turns a no-cors load into a CORS one and re-creates exactly
    *   the failure the split between `data` and `data_url` exists to avoid.
-   * - **token mode (the native app, the CLI)**: this URL alone is a `404`,
+   * - **token mode**: this URL alone is a `404`,
    *   because no credential reaches the server. Use
    *   {@link authenticatedUrl} instead.
    *
@@ -175,11 +167,9 @@ export class MediaNamespace extends Resource {
    * be a getter. In cookie mode there is no token and it returns the bare URL,
    * which is the correct answer there.
    *
-   * `Session.candidate_tokens` reads the `Authorization` header, then
-   * `params[:token]`, then the cookie, so a query token is a first-class
-   * credential on this route - and, unlike on the HTML pages served by this
-   * host, it is not a redirect-injection risk here because there is no page to
-   * render as somebody else.
+   * The server reads the `Authorization` header, then the `token` query
+   * parameter, then the cookie, so a query token is a first-class credential
+   * on this route.
    *
    * **THE RESULT IS A LIVE CREDENTIAL.** It goes into the DOM, into the server
    * access log, into `Referer` and into anything that records URLs; anyone
@@ -233,8 +223,8 @@ export class MediaNamespace extends Resource {
    * @throws {OmsApiError} 404 `"Not found"` - which does NOT mean the media is
    *   gone. See {@link isMediaMissing} and the namespace notes.
    * @throws {OmsAuthError} 403 `insufficient_scope` when the client
-   *   authenticated with an OAuth access token; `MediaController` declares no
-   *   scope, so no token reaches it.
+   *   authenticated with an OAuth access token; the route accepts no scope, so
+   *   no OAuth token reaches it.
    */
   async dataUrl(id: MediaId, options: RequestOptions = {}): Promise<string> {
     const answer = await this.http.get<{ url: string }>(dataUrlPath(id), options);
@@ -257,9 +247,8 @@ export class MediaNamespace extends Resource {
    * to a native downloader instead, both of which stream to disk. This method
    * is for artwork and for the odd file a host really does need in memory.
    *
-   * The server falls back to sending the bytes inline (with a
-   * `Content-Disposition` filename) when the storage service has no URL host,
-   * which is what dev and test look like; both shapes arrive here identically.
+   * The server may also send the bytes inline (with a `Content-Disposition`
+   * filename) instead of redirecting; both shapes arrive here identically.
    *
    * The runtime follows the redirect, and every conformant one drops the
    * `Authorization` header on the cross-origin hop. That is not a limitation to
@@ -296,18 +285,17 @@ export class MediaNamespace extends Resource {
    * `GET /fs_nodes/:id/data` - the TEMPORARY numeric-id alias for {@link url}.
    *
    * Identical bytes, identical owner-or-404 rule, identical rate-limit
-   * exemption, resolved by the same `MusicMediaServing` concern. It is here for
-   * two reasons and no others: code ported from the old web frontend still
-   * spells it this way, and it is currently the only media route an OAuth token
-   * carrying `storage:read` can reach (see the namespace notes).
+   * exemption. It is here for two reasons and no others: code that still
+   * spells the old route, and it is currently the only media route an OAuth
+   * token carrying `storage:read` can reach (see the namespace notes).
    *
-   * The id must be all digits. `FsNodesController#data` only takes the media
-   * branch for `/\A\d+\z/`; anything else is looked up as a storage node,
-   * which for a media id means a 404 with a completely different cause.
-   * {@link isMediaId} checks that before you spend a request finding out.
+   * The id must be all digits. The alias only serves media for an all-digit
+   * id; anything else is looked up as a storage node, which for a media id
+   * means a 404 with a completely different cause. {@link isMediaId} checks
+   * that before you spend a request finding out.
    *
-   * @deprecated Prefer {@link url}. The backend calls this alias temporary and
-   *   it will be removed together with the `*_fs_node_id` blueprint twins.
+   * @deprecated Prefer {@link url}. The alias is temporary and will be removed
+   *   together with the `*_fs_node_id` twins.
    */
   aliasUrl(id: MediaId): string {
     return this.http.url(aliasDataPath(id));
@@ -375,9 +363,9 @@ export function isMediaId(value: unknown): value is MediaId {
  * Whether an error is a media `404`.
  *
  * **Read the name as "the server would not serve this", never as "this does
- * not exist".** The media routes are `allow_unauthenticated_access` and
- * `resolve_music_attachment` collapses five different situations into the same
- * `404`, on purpose, so that the existence of a file never leaks: unknown id,
+ * not exist".** The media routes accept anonymous callers and collapse five
+ * different situations into the same `404`, on purpose, so that the existence
+ * of a file never leaks: unknown id,
  * wrong owner, non-music attachment, no credential, and a credential that has
  * expired.
  *
@@ -408,16 +396,15 @@ export function isMediaMissing(error: unknown): boolean {
  *
  * Every music record offers the same choice twice over: a compressed twin and
  * an original, either of which may be `null`. The compressed one is what a
- * client should reach for - the originals are lossless files on a Raspberry Pi
- * and an album grid that asks for them takes seconds per tile - and the
- * fallback chain is written out by hand in every client today.
+ * client should reach for - the originals are lossless files and an album
+ * grid that asks for them takes seconds per tile.
  *
  * ```ts
  * const artwork = firstMediaId(song.compressed_artwork_media_id, song.artwork_media_id);
  * const audio = firstMediaId(song.compressed_audio_media_id, song.audio_media_id);
  * ```
  *
- * Empty strings are treated as absent: a blueprint field is `null` when there
+ * Empty strings are treated as absent: the field is `null` when there
  * is no attachment, but a form round-trip through a URL or a database can turn
  * that into `""`, and an empty id would build a request for `/media//data`.
  */

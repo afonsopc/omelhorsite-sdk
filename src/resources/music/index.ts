@@ -1,11 +1,11 @@
 /**
  * The music domain, reachable as `oms.music`.
  *
- * Five modules split by what they own rather than by which controller serves
- * them, because the Rails routes here are flatter than the concepts are:
- * `/songs`, `/artists`, `/playlists`, `/song_imports`, `/jams` and a dozen more
- * all hang off the root, and grouping them by prefix would have produced a
- * surface nobody could guess from.
+ * Five modules split by what they own rather than by URL prefix, because the
+ * routes here are flatter than the concepts are: `/songs`, `/artists`,
+ * `/playlists`, `/song_imports`, `/jams` and a dozen more all hang off the
+ * root, and grouping them by prefix would have produced a surface nobody could
+ * guess from.
  *
  * ```ts
  * const songs = await oms.music.songs.list({ artist: "Nina Simone" });
@@ -18,7 +18,8 @@
  *
  * `songs`, `artists`, `playlists`, `playlist_songs`, `liked_songs`,
  * `play_events`, `jams`, `song_imports` and `artist_imports` are INTEGERS over
- * HTTP. The same song ids come back as STRINGS on the cable. The types in each
+ * HTTP. The same song ids come back as STRINGS on the realtime stream. The
+ * types in each
  * module say which one applies where; do not normalise them yourself on the way
  * in, because `exact_search` compares them typed and a stringified integer
  * silently matches nothing.
@@ -56,7 +57,7 @@ export class MusicNamespace extends Resource {
   readonly artists: MusicArtistsNamespace;
   /** Playlists, plus `.songs`, `.mixes`, `.radios` and `.plays`. */
   readonly playlists: MusicPlaylistsNamespace;
-  /** Getting audio in: uploads, yt-dlp, `.spotify` sync and `.srMachine`. */
+  /** Getting audio in: uploads, URL downloads, `.spotify` sync and `.srMachine`. */
   readonly imports: MusicImportsNamespace;
   /** Jams, music profiles, the assistant and the DJ. */
   readonly social: MusicSocialNamespace;

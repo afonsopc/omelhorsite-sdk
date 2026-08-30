@@ -4,7 +4,7 @@
  * Nothing here touches the platform: no `node:*`, no `process`, no `console`.
  * Files are normally values (Blob / Uint8Array / ReadableStream), never paths -
  * the core has no filesystem, and turning a path into a {@link FileInput} is the
- * CLI's job.
+ * host's job.
  *
  * React Native is the one exception, and it is the platform's exception rather
  * than a relaxation of ours: a file the user picked there is a
@@ -31,9 +31,8 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 /**
  * A file picked on React Native, exactly as the platform hands it over.
  *
- * This is the shape `expo-file-system`'s picker returns and the shape the app
- * already builds by hand (`oms-music/src/features/settings/pickers.ts`,
- * `features/playlist/artworkPicker.ts`), and it is a DESCRIPTOR, not bytes: the
+ * This is the shape `expo-file-system`'s picker returns, and it is a
+ * DESCRIPTOR, not bytes: the
  * URI is a `file://`, `content://` or `ph://` handle into the device, and
  * nothing in JavaScript can turn it into a `Blob` without a native module.
  *
@@ -66,10 +65,9 @@ export interface NativeFile {
   /** Filename the server should store. RN sends it as the part's `filename`. */
   readonly name: string;
   /**
-   * MIME type. Pickers report `""` for some `content://` URIs, which is why the
-   * app falls back to a per-kind constant before it gets here; do the same, as
-   * Rails infers the container format from the part's content type for several
-   * of the tools.
+   * MIME type. Pickers report `""` for some `content://` URIs; fall back to a
+   * per-kind constant before it gets here, as the server infers the container
+   * format from the part's content type for several of the tools.
    */
   readonly type?: string;
   /** Byte length when the picker reported one. Ignored by RN, used by the SDK. */
@@ -105,7 +103,7 @@ export function isNativeFile(value: unknown): value is NativeFile {
  * multipart form bodies have to be materialised: {@link readFileInput} buffers
  * a stream into a Blob before it can be appended to a `FormData`. For anything
  * large, prefer the storage direct-upload path, which streams straight to the
- * object store and never passes through Rails.
+ * object store.
  *
  * On React Native there is no need to wrap a picked file in one of these at
  * all: pass the picked `{ uri, name, type }` object straight into the form bag
@@ -220,10 +218,8 @@ export function file(
  *
  * It ticks once per COMPLETED transfer, never per byte, and that is a property
  * of `fetch` rather than a decision this SDK is free to revisit. No `fetch` -
- * browser, React Native or Worker - exposes request-body progress. The web
- * frontend gets a real byte counter in its 36 `onUploadProgress` call sites
- * because axios is XHR underneath, and XHR is the only API that has ever
- * reported bytes as they leave.
+ * browser, React Native or Worker - exposes request-body progress. XHR is the
+ * only API that has ever reported bytes as they leave.
  *
  * There is therefore ONE mechanism in this SDK, not two: `resources/storage/upload.ts`
  * ticks per finished transfer (one per 32 MiB part on the multipart tier, one
@@ -343,17 +339,17 @@ export const DEFAULT_RETRY: ResolvedRetry = Object.freeze({
 /**
  * One value in a query string.
  *
- * Nested objects and arrays are encoded the way Rails reads them
+ * Nested objects and arrays are encoded the way the API reads them
  * (`search[status]=open`, `ids[]=1&ids[]=2`). Three values do NOT encode
  * literally, and `encodeQuery` in `http.ts` carries the full argument:
  *
  * - `undefined` is dropped. It means "I am not filtering on this column".
- * - `null` is sent as the backend's `\b` null sentinel and comes back out of
- *   `CrudActions` as SQL `NULL`. It means "filter where this column IS NULL".
- *   The two are not interchangeable, and getting them the wrong way round is
- *   the difference between one folder and somebody's entire tree.
- * - a `Date` is sent as its ISO-8601 string, which is the only shape the Rails
- *   date filters parse (`String#to_date_safe`).
+ * - `null` is sent as the API's `\b` null sentinel and is read as SQL `NULL`.
+ *   It means "filter where this column IS NULL". The two are not
+ *   interchangeable, and getting them the wrong way round is the difference
+ *   between one folder and somebody's entire tree.
+ * - a `Date` is sent as its ISO-8601 string, which is the only shape the date
+ *   filters parse.
  */
 export type QueryValue =
   | string
@@ -369,11 +365,10 @@ export type QueryValue =
 export type QueryParams = Record<string, QueryValue>;
 
 /**
- * Hard ceiling the backend applies to a page size, mirroring
- * `QueryModifier::MAX_PAGE_SIZE`.
+ * Hard ceiling the API applies to a page size.
  *
- * The server clamps silently - `size = [size, MAX_PAGE_SIZE].min` - so asking
- * for 1200 returns 500 rows and no indication that a ceiling was hit. The SDK
+ * The server clamps silently, so asking for 1200 returns 500 rows and no
+ * indication that a ceiling was hit. The SDK
  * therefore clamps to the same number BEFORE the request, so that the size it
  * reports back in {@link Paginated.pageSize} is the size the rows were actually
  * counted against. See {@link resolvePageSize}.
@@ -386,8 +381,7 @@ export const MAX_PAGE_SIZE = 500;
  * Deliberately below {@link MAX_PAGE_SIZE}: a `list()` is usually the first
  * screen of something, and 500 rows of expanded records is a slow first paint.
  * Note this is NOT the server's own default - a request with no page modifier
- * at all gets `QueryModifier::DEFAULT_PAGE_SIZE` (500) forced on it by
- * `CrudActions#index_modifiers_params` - but the SDK always sends one.
+ * at all gets 500 - but the SDK always sends one.
  */
 export const DEFAULT_PAGE_SIZE = 100;
 
@@ -403,11 +397,9 @@ export const DEFAULT_PAGE_SIZE = 100;
  *   `hasMore: false`, dropping 700 rows without a word.
  * - **not a usable size at all** (`NaN`, `Infinity`, zero, negative) throws.
  *   There is nothing sensible to clamp such a value to, and it is not merely
- *   wrong on the client: `pageModifier` would put `"1:NaN"` on the wire,
- *   `QueryModifier#apply_pagination` reads that as size `0`, bails out before
- *   `limit`/`offset` are applied, and the endpoint answers with the WHOLE
- *   table. A typo would turn a listing into an unbounded scan holding a Puma
- *   thread and a DB connection.
+ *   wrong on the client: `pageModifier` would put `"1:NaN"` on the wire, the
+ *   server reads that as size `0`, skips pagination, and the endpoint answers
+ *   with the WHOLE table. A typo would turn a listing into an unbounded scan.
  *
  * @throws {TypeError} when `pageSize` is not a finite number of at least 1.
  */
@@ -456,11 +448,10 @@ export interface PageParams {
    * A size the server could not parse is NOT clamped, it throws: `0`, a
    * negative, `NaN` and `Infinity` all raise a `TypeError` before the request
    * is built. This is deliberate and it is not defensive tidiness. `"1:NaN"`
-   * on the wire makes `QueryModifier#apply_pagination` read the size as zero
-   * and bail out before `limit`/`offset` are applied, so the endpoint answers
-   * with the WHOLE table: one typo turns a listing into an unbounded scan
-   * holding a Puma thread and a database connection. Failing at the call site
-   * is the only place that mistake is still cheap.
+   * on the wire is read as size zero and disables pagination, so the endpoint
+   * answers with the WHOLE table: one typo turns a listing into an unbounded
+   * scan. Failing at the call site is the only place that mistake is still
+   * cheap.
    *
    * Narrower than 0.2.0, which clamped `0` to 1 and let `NaN` through onto
    * the wire. See {@link resolvePageSize}.
@@ -593,8 +584,8 @@ export interface QuotaStatus {
 /**
  * How a long-running server-side job reports itself.
  *
- * These are the five strings `Job::STATUSES` holds, spelled exactly as the
- * backend spells them: `"complete"` and `"canceled"`, not `"completed"` and
+ * These are the five strings the API uses, spelled exactly as it spells
+ * them: `"complete"` and `"canceled"`, not `"completed"` and
  * `"cancelled"`. Compare against `JOB_STATUS` / `isJobTerminal` from the jobs
  * namespace rather than against a literal you typed from memory - a wait loop
  * that tests for `"completed"` never ends.

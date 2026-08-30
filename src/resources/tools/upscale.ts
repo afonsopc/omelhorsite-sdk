@@ -1,13 +1,13 @@
 /**
  * Upscaling: enlarges an image without turning it to mush.
  *
- * Same shape as background removal: `POST /upscales` enqueues a proxy job and
+ * Same shape as background removal: `POST /upscales` enqueues a job and
  * answers with a row plus a `job_id` and, when anonymous, a `watch_token`.
  *
- * Backend limits: 20 MiB, and the scale must be one the upscaler advertises.
+ * Limits: 20 MiB, and the scale must be one of `"2"`, `"3"`, `"4"`.
  *
- * Like background removal, this tool is not metered by the `Quotas` catalogue,
- * so there is no `quota()` to call first.
+ * Like background removal, this tool has no daily quota, so there is no
+ * `quota()` to call first.
  */
 
 import { Resource } from "../../http";
@@ -27,7 +27,7 @@ import {
 /**
  * Enlargement factor, as the string the API expects.
  *
- * A string and not a number because the backend compares it against an
+ * A string and not a number because the server compares it against an
  * allow-list of strings; `4` and `"4"` are not the same request.
  */
 export type UpscaleScale = "2" | "3" | "4";
@@ -36,19 +36,15 @@ export type UpscaleScale = "2" | "3" | "4";
  * An upscale run.
  *
  * Both routes that answer with one - `POST /upscales` and `GET /upscales/:id` -
- * render the `:extended` view, so `result_url` is always PRESENT and simply
- * `null` until the run completes. There is no default-view variant of this
- * record reachable through the API.
+ * answer the same shape, so `result_url` is always PRESENT and simply `null`
+ * until the run completes.
  *
  * `progress_percent`, inherited from {@link ToolRecord}, is never sent for this
- * tool: `UpscaleBlueprint` has no such field. Progress for an upscale lives on
- * the {@link Job} row that {@link UpscaleCreated.job_id} names.
+ * tool. Progress for an upscale lives on the {@link Job} row that
+ * {@link UpscaleCreated.job_id} names.
  */
 export interface Upscale extends ToolRecord {
-  /**
-   * One of `"2"`, `"3"`, `"4"` - a string, because the column is a string and
-   * the allow-list is `%w[2 3 4]`. Never `null`: `NOT NULL DEFAULT '4'`.
-   */
+  /** One of `"2"`, `"3"`, `"4"` - a string. Never `null`; defaults to `"4"`. */
   readonly scale: string;
   /**
    * Signed URL of the enlarged PNG, or `null`. `null` covers three different
@@ -64,9 +60,9 @@ export type UpscaleCreated = Upscale & ToolJobHandle;
 
 /** Arguments for starting a run. */
 export interface CreateUpscaleInput extends ToolCaptcha {
-  /** The image. Backend cap: 20 MiB. */
+  /** The image. Cap: 20 MiB. */
   readonly file: FileInput;
-  /** Defaults to `"4"`, which is what the backend picks when none is sent. */
+  /** Defaults to `"4"`, which is what the server picks when none is sent. */
   readonly scale?: UpscaleScale;
 }
 

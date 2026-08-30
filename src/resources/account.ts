@@ -28,7 +28,7 @@ import { DEFAULT_PAGE_SIZE } from "../types";
 /**
  * A user as the API renders them.
  *
- * Most fields are conditional: the blueprint hides `email` and `gender` unless
+ * Most fields are conditional: the API hides `email` and `gender` unless
  * they are public or you are the owner or an administrator, and hides
  * `group`, `last_seen_at`, `sessions_count` and `deactivated_at` from everyone
  * but an administrator. An absent key therefore means "not visible to you",
@@ -253,7 +253,7 @@ export class AccountSessionsNamespace extends Resource {
    * `DELETE /sessions/:id` - ends the session THIS credential is using.
    *
    * There is no argument on purpose. The endpoint never reads the `:id` in the
-   * path: it destroys `Current.session`, whatever id you send. Revoking
+   * path: it destroys the calling session, whatever id you send. Revoking
    * another device's session is not possible through the API today, and a
    * method that appeared to do it would silently log the caller out instead.
    *
@@ -319,8 +319,8 @@ export class AccountNamespace extends Resource {
   }
 
   /**
-   * `GET /account/usage` - consumption per area, for the bars the CLI prints
-   * before starting an expensive job.
+   * `GET /account/usage` - consumption per area, for a usage screen or a
+   * check before starting an expensive job.
    */
   async usage(options: RequestOptions = {}): Promise<AccountUsage> {
     return this.http.get<AccountUsage>("/account/usage", options);
@@ -364,21 +364,20 @@ export class AccountNamespace extends Resource {
    * SENT WITH NO CREDENTIAL AT ALL, and that is the point of this method rather
    * than an oversight.
    *
-   * The endpoint is anonymous by design: `UsersController` lists `picture` in
-   * `allow_unauthenticated_access`, and `User.viewable_by` is `->(user) { all }`,
-   * so a signed-in caller and a stranger resolve the same row and get the same
-   * bytes. Sending a credential buys nothing, and it is what breaks the call.
+   * The endpoint is anonymous by design: a signed-in caller and a stranger get
+   * the same bytes. Sending a credential buys nothing, and it is what breaks
+   * the call.
    *
-   * Why it breaks. The action answers `302` to `minio.omelhorsite.pt` with a
+   * Why it breaks. The endpoint answers `302` to the object store with a
    * presigned URL, and `fetch` follows that hop. Per the Fetch standard, when a
    * CORS request is redirected cross-origin and the request's origin already
    * differs from the current URL's origin, the origin is replaced by an opaque
-   * one - so the second hop reaches the store with `Origin: null`. MinIO
+   * one - so the second hop reaches the store with `Origin: null`. The store
    * answers a null origin with `Access-Control-Allow-Origin: *`. A wildcard is
    * illegal for a credentialed request no matter what
    * `Access-Control-Allow-Credentials` says, so a client built with
-   * `sessionCookie: true` - the production web app - would have the browser
-   * reject the response before any JavaScript saw it. Every avatar on the page
+   * `sessionCookie: true` would have the browser reject the response before
+   * any JavaScript saw it. Every avatar on the page
    * would fail, and fail as an opaque "Failed to fetch".
    *
    * Dropping the credential removes the wildcard problem entirely: an
@@ -424,9 +423,8 @@ export class AccountNamespace extends Resource {
    * while rendering a friends list, a member picker or a message thread; an
    * async URL would turn every avatar into a state update and a second paint.
    *
-   * It can be synchronous because the route carries no credential: `picture` is
-   * in `allow_unauthenticated_access` and `User.viewable_by` is `all`, so there
-   * is nothing to resolve and nothing to leak. The URL is safe to put in
+   * It can be synchronous because the route needs no credential, so there is
+   * nothing to resolve and nothing to leak. The URL is safe to put in
    * markup, to log, and to hand to someone else.
    *
    * ```tsx
@@ -435,8 +433,7 @@ export class AccountNamespace extends Resource {
    *
    * Do NOT add a `crossorigin` attribute. Without one the element makes a
    * no-cors request and the `302` to the object store is followed with no CORS
-   * check at all, which is why this path has always worked in the web app.
-   * `crossorigin="use-credentials"` re-creates exactly the failure
+   * check at all. `crossorigin="use-credentials"` re-creates exactly the failure
    * {@link picture} documents, and `crossorigin="anonymous"` only buys the
    * ability to read the pixels back out of a canvas.
    *

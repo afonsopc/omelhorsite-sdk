@@ -1,20 +1,14 @@
 /**
  * The `shortLinks` namespace: URL shortening plus per-link click statistics.
  *
- * This module is the reference implementation of the resource pattern. Every
- * other resource in the SDK is shaped exactly like it, and CONTRACT.md quotes
- * it verbatim. Change the pattern here and change it everywhere, or do not
- * change it at all.
- *
  * Creating a link works anonymously; listing, editing and statistics need a
  * credential. Creation is the most tightly throttled write in the whole API -
  * see {@link ShortLinksNamespace.create} before you spend one.
  *
  * There is deliberately no `get(id)` here, and its absence is the API's, not
- * an omission: the route file declares `resources :short_links, only: [:create,
- * :index, :update, :destroy]`, so `GET /short_links/:id` is not routed at all
- * and answers 404 for every id, including your own links. To read one link,
- * find it in {@link ShortLinksNamespace.list} - or by endpoint with
+ * an omission: `GET /short_links/:id` does not exist and answers 404 for every
+ * id, including your own links. To read one link, find it in
+ * {@link ShortLinksNamespace.list} - or by endpoint with
  * {@link ShortLinksNamespace.resolve}, which explains what that costs.
  */
 
@@ -34,16 +28,16 @@ import {
   type Timestamp,
 } from "../types";
 
-/** Public host that fronts `short_links#follow`. See {@link ShortLinksNamespace.shortUrl}. */
+/** Public host short links are served from. See {@link ShortLinksNamespace.shortUrl}. */
 export const SHORT_LINK_BASE_URL = "https://omelhor.site";
 
 /**
  * Primary key of a short link.
  *
- * Short links predate the string ids the rest of the API uses: the table still
- * has an integer primary key, so the JSON carries a **number** here while the
- * `user_id` right next to it is a string. Every method accepts either form and
- * interpolates it into the path, so a caller never has to care.
+ * Short links predate the string ids the rest of the API uses: the JSON
+ * carries a **number** here while the `user_id` right next to it is a string.
+ * Every method accepts either form and interpolates it into the path, so a
+ * caller never has to care.
  */
 export type ShortLinkId = Id | number;
 
@@ -59,15 +53,15 @@ export interface ShortLinkClick {
 }
 
 /**
- * The owner of a link, rendered inline by `UserBlueprint`'s default view.
+ * The owner of a link, rendered inline.
  *
- * Only the keys that view declares unconditionally are named. `UserBlueprint`
- * also renders `group`, `email`, `gender`, `last_seen_at`, `sessions_count`,
- * `deactivated_at`, `allowed_to_use_spotify` and `share_listening` behind `if:`
- * predicates that test who is ASKING, so whether they appear depends on the
- * caller's own privileges rather than on the record. That is why they are
- * reached through the index signature instead of being declared here as
- * optionals: an optional would suggest the server decides, and it does not.
+ * Only the keys that are always present are named. `group`, `email`,
+ * `gender`, `last_seen_at`, `sessions_count`, `deactivated_at`,
+ * `allowed_to_use_spotify` and `share_listening` appear or not depending on
+ * who is ASKING - the caller's own privileges rather than the record. That is
+ * why they are reached through the index signature instead of being declared
+ * here as optionals: an optional would suggest the record decides, and it does
+ * not.
  */
 export interface ShortLinkOwner {
   readonly id: Id;
@@ -87,11 +81,6 @@ export interface ShortLinkOwner {
  * {@link ShortLinkId} for why the identifier is a number on this one table.
  *
  * Every key below is present on every response this namespace can produce.
- * `ShortLinkBlueprint` does declare a second, narrower `:admin` view - it drops
- * `updated_at`, both associations, and adds `owner`, `click_count` and
- * `last_click_at` - but that view is only ever rendered by the admin
- * shortlinks tool under `/admin/short_links`, which is not this resource. A
- * record that arrived here has the full default shape.
  */
 export interface ShortLink extends Omit<BaseRecord, "id"> {
   /** Integer primary key. See {@link ShortLinkId}. */
@@ -105,22 +94,21 @@ export interface ShortLink extends Omit<BaseRecord, "id"> {
    * internal tools reserve `"n"` (notepads), `"c"` (chests), `"ss"` (storage
    * shares), `"qr"` (dynamic QR), `"f"` (forms) and `"t"` (link trees). That
    * is why {@link ShortLink} and `DynamicQr` are separate resources even
-   * though both are rows in the same table.
+   * though both are short links.
    *
    * A link that reached you through {@link ShortLinksNamespace.list} always
-   * holds `null` or `""`, because the listing scope is `user_managed`.
+   * holds `null` or `""`, because the listing only returns user-managed links.
    */
   readonly namespace: string | null;
   /** Owner, or `null` for a link created anonymously. */
   readonly user_id: Id | null;
   /**
-   * EVERY click ever recorded, inlined by the blueprint - not a count, not a
-   * page. A link with 50 000 visits sends 50 000 objects here. Use
+   * EVERY click ever recorded, inlined - not a count, not a page. A link with
+   * 50 000 visits sends 50 000 objects here. Use
    * {@link ShortLinksNamespace.stats} for anything analytical and treat this
    * field as a payload hazard, not as a feature.
    *
-   * Always present, and `[]` rather than `null` for a link nobody has clicked:
-   * a Blueprinter association over an empty `has_many` renders an empty array.
+   * Always present, and `[]` rather than `null` for a link nobody has clicked.
    */
   readonly short_link_clicks: ShortLinkClick[];
   /** The owner rendered inline, or `null` for a link created anonymously. */
@@ -152,7 +140,7 @@ export interface ShortLinkDeviceClicks {
  * `GET /dynamic_qrs/:id/stats` returns.
  *
  * Five keys, always all five. There is no referrer breakdown and no unique
- * visitor count: the backend stores neither.
+ * visitor count: the server stores neither.
  */
 export interface ShortLinkStats {
   readonly total_clicks: number;
@@ -174,8 +162,8 @@ export interface ShortLinkStats {
 /** Arguments for creating a short link. */
 export interface CreateShortLinkInput {
   /**
-   * Absolute destination URL. Must be `http` or `https` and must parse against
-   * `URI::DEFAULT_PARSER`; anything else is a 400, not a silent rewrite.
+   * Absolute destination URL. Must be `http` or `https` and must parse as a
+   * URL; anything else is a 400, not a silent rewrite.
    */
   readonly url: string;
   /**
@@ -204,8 +192,8 @@ export interface ListShortLinksParams extends ListParams<(typeof SHORT_LINK_FILT
    * Narrow to one owner, sent as `exact_search[user_id]`.
    *
    * The listing is already scoped to the caller server-side, so this can only
-   * ever narrow your own links to yourself or to nothing. It exists because
-   * the web app sends it; there is no admin escape hatch here.
+   * ever narrow your own links to yourself or to nothing. There is no admin
+   * escape hatch here.
    */
   readonly userId?: Id;
 }
@@ -245,10 +233,10 @@ export class ShortLinksNamespace extends Resource {
   /**
    * `POST /short_links` - shortens a URL.
    *
-   * **Rate limit, read this before you spend one:** rack-attack allows
-   * **10 creations per hour per IP** (`short_links_create/ip`), and the rule
-   * is keyed by IP for EVERYONE - being signed in does not buy you a bigger
-   * budget. The 11th call in an hour answers `429` with a `Retry-After` header
+   * **Rate limit, read this before you spend one:** the server allows
+   * **10 creations per hour per IP**, and the rule is keyed by IP for
+   * EVERYONE - being signed in does not buy you a bigger budget. The 11th call
+   * in an hour answers `429` with a `Retry-After` header
    * measured in whatever is left of that hour, which arrives here as an
    * {@link OmsQuotaError} with `retryAfterMs` set. An agent that shortens URLs
    * in a loop will burn the whole hour's budget in about a second, so batch the
@@ -305,7 +293,7 @@ export class ShortLinksNamespace extends Resource {
   /**
    * `GET /short_links/:id/stats` - totals plus a fixed 30-day daily histogram.
    *
-   * The window is not configurable: the backend always buckets the last 30
+   * The window is not configurable: the server always buckets the last 30
    * days. For anything else, read {@link ShortLink.short_link_clicks} off the
    * record and bucket it yourself - at the cost noted on that field.
    *
@@ -320,8 +308,8 @@ export class ShortLinksNamespace extends Resource {
   /**
    * Finds one of YOUR links by its endpoint, without counting a click.
    *
-   * The public `follow` route records a visit before it redirects, so using it
-   * to read a destination would quietly corrupt the owner's statistics. The
+   * The public redirect records a visit before it redirects, so using it to
+   * read a destination would quietly corrupt the owner's statistics. The
    * API offers no read-by-endpoint, and `search[endpoint]` is not on the
    * allowlist (an unknown filter key is a 400, not a wider result), so the only
    * honest implementation is to page through your own listing and match

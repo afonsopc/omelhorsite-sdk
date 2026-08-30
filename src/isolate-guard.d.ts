@@ -9,7 +9,7 @@
  *
  * Declaring it as a string type turns `process.env.OMS_TOKEN` into a compile
  * error whose message says what to do instead, rather than into code that
- * silently works on the CLI and explodes in a Worker.
+ * silently works on Node and explodes in a Worker.
  *
  * This file is a declaration script (no imports, no exports), so the
  * declarations below are global to the `packages/core` project only. The CLI

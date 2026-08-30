@@ -1,46 +1,44 @@
 /**
  * The `storage` namespace: the virtual filesystem.
  *
- * A node is a file or a directory, identified by an opaque id. Since the ltree
- * migration the id IS the address: there is no `path` column any more, and
- * navigation goes parent id -> children, with `ancestors()` for a breadcrumb.
- * Never build or parse a path string.
+ * A node is a file or a directory, identified by an opaque id. The id IS the
+ * address: a node carries no path, and navigation goes parent id -> children,
+ * with `ancestors()` for a breadcrumb. Never build or parse a path string.
  *
  * {@link StorageNamespace.resolvePath} exists for humans typing `docs/a.pdf`,
  * and it is exactly what it looks like: one request per segment, walking
- * `name` + `parent_id` down the filtered index. It memoises what it learns per
- * client instance so a CLI session does not re-walk the same prefix, but the
- * cheap call is always the one that already has an id.
+ * `name` + `parent_id` down a filtered listing. It memoises what it learns per
+ * client instance so a second walk down the same prefix is free, but the cheap
+ * call is always the one that already has an id.
  *
  * Uploads do NOT stream through this namespace. Bytes go straight to object
- * storage with a presigned URL; Rails only mints the plan and, at the end,
+ * storage with a presigned URL; the API only mints the plan and, at the end,
  * binds the blob. That whole dance lives in `storage/upload.ts` and is reached
  * through {@link StorageNamespace.upload}.
  *
- * Four throttles bound what this namespace can do, and they are far tighter
+ * Three rate limits bound what this namespace can do, and two are far tighter
  * than the API's general ceiling:
  *
- * - `fs_upload` - 300/min for the whole upload control plane. Paced by
+ * - 300 requests a minute for the whole upload control plane. Paced by
  *   {@link UploadManager}.
- * - `fs_bulk_job` - TWELVE a minute for `copy`, `createDirectories`,
- *   `emptyTrash` and `trash` together. Paced by {@link StorageNamespace.bulkGate}.
- * - the general 600/min for everything else.
- * - the direct PUTs at the object store, which rack-attack never sees at all.
+ * - TWELVE a minute for `copy`, `createDirectories`, `emptyTrash` and `trash`
+ *   together. Paced by {@link StorageNamespace.bulkGate}.
+ * - the general 600 a minute for everything else.
+ *
+ * The direct PUTs at the object store are not rate limited by the API.
  */
 
 /**
  * The server's null sentinel: U+0008, a literal backspace.
  *
- * `CrudActions` rewrites any filter value equal to it before the query layer
- * ever sees it - `transform_values! { |v| v == "\b" ? nil : v }`, applied to
- * every option bag, not just to `exact_search`. Through `exact_search` that is
- * exactly what is wanted: `where(parent_id: nil)`, the root nodes.
+ * The server reads any filter value equal to it as `null`, in every option
+ * bag. Through `exact_search[parent_id]` that is exactly what is wanted: the
+ * nodes with no parent, i.e. the roots.
  *
- * Through `extra_options` the same rewrite is a trap, because
- * `QueryExtraOptions::FsNodes` opens with
- * `return unless params[:parent_id].present?` and `nil` is not present, so the
- * filter is dropped without a word. {@link StorageNamespace.list} is built
- * around that difference; do not collapse the two filters back together.
+ * Through `extra_options[parent_id]` the same value is a trap: a `null` there
+ * counts as no filter at all, and the filter is dropped without a word.
+ * {@link StorageNamespace.list} is built around that difference; do not
+ * collapse the two filters back together.
  */
 import { type ApiClient, filenameFromDisposition, NULL_SENTINEL, Resource } from "../http";
 import { OmsApiError, OmsError } from "../errors";
@@ -67,27 +65,14 @@ export type FsNodeKind = "file" | "directory";
 /**
  * A node in the virtual filesystem.
  *
- * This is the WHOLE record, and it was checked against the blueprint CHAIN
- * rather than against the table, because those two disagree.
- * `FsNodeBlueprint` declares `name`, `parent_id`, `kind`, `size`,
- * `max_size`; it extends `ApplicationBlueprint`, which contributes `id`,
- * `created_at` and `updated_at`; and its `:extended` view has an EMPTY body,
- * which in Blueprinter inherits the base fields rather than emitting nothing.
- * So `list`, `get`, `create` and `update` all answer the same eight fields.
- * Reading a view name and assuming it adds something has already produced bugs
- * in this repo - follow the `<` before deciding a field does or does not exist.
+ * This is the WHOLE record: `list`, `get`, `create` and `update` all answer
+ * the same eight fields.
  *
- * The `fs_nodes` TABLE is wider than that, and the difference is never sent:
- * `creator_id`, `updater_id`, `destroyer_id`, `signed_url_generated`,
- * `is_vault_root` and the `id_path` ltree are all real columns that appear in
- * no view. Declaring them client-side is worse than leaving them out, because
- * every later reader then believes they arrive.
- *
- * There is no `data` and no `url` field either: bytes are reached through
+ * There is no `data` and no `url` field: bytes are reached through
  * {@link StorageNamespace.download}, {@link StorageNamespace.downloadStream} or
  * {@link StorageNamespace.downloadUrl}, never off the record. And no
  * `content_type` and no `path` - the type is decided from the name at download
- * time, and the `path` column was dropped in the ltree migration.
+ * time, and a node is addressed by id.
  */
 export interface FsNode extends BaseRecord {
   readonly name: string;
@@ -119,10 +104,8 @@ export interface FsRoots {
  * A bulk operation the server runs in the background.
  *
  * `copy`, `createDirectories`, `trash` and `emptyTrash` all answer with nothing
- * but a job id: the work happens in a worker and the response says only that it
- * was enqueued. Poll it with `oms.jobs.wait(jobId)`; this namespace has no
- * access to the jobs namespace and deliberately does not grow a second polling
- * loop.
+ * but a job id: the response says only that the work was enqueued. Poll it
+ * with `oms.jobs.wait(jobId)`.
  */
 export interface FsBulkJob {
   /** Feed this to `oms.jobs.get` / `oms.jobs.wait`. */
@@ -145,7 +128,6 @@ export interface FsStream {
   readonly size: number | undefined;
 }
 
-/** Filters for {@link StorageNamespace.list}. */
 /** Filter columns of `GET /fs_nodes`. */
 export const FS_NODE_FILTER_COLUMNS = Object.freeze(["id", "created_at", "updated_at", "name", "parent_id"] as const);
 
@@ -180,10 +162,9 @@ export interface ListFsNodesParams extends ListParams<(typeof FS_NODE_FILTER_COL
    * Also return the parent itself, so one call gets both the folder's metadata
    * and its children. It occupies a slot on the page like any other row.
    *
-   * IGNORED when `parentId` is `null`, and that is a correction rather than a
-   * convenience: the server-side filter behind this flag cannot express "no
-   * parent" at all, and asking it to used to answer with the caller's whole
-   * tree. The roots have no folder to fold in anyway. The detail is on
+   * IGNORED when `parentId` is `null`: the server-side filter behind this flag
+   * cannot express "no parent", and asking it to answers with the caller's
+   * whole tree. The roots have no folder to fold in anyway. The detail is on
    * {@link StorageNamespace.list}.
    */
   readonly includeSelf?: boolean;
@@ -224,7 +205,7 @@ export interface FsGrant extends BaseRecord {
   readonly grantee_id: Id | null;
   /** Write access. Always `false` on a public grant - the server validates it. */
   readonly editable: boolean;
-  /** Only on the `:extended` view, i.e. from `get`, `create` and `update`. */
+  /** Only from `get`, `create` and `update`; absent in listings. */
   readonly fs_node?: FsNode;
   readonly grantor?: User;
   readonly grantee?: User | null;
@@ -262,17 +243,17 @@ export interface SharedFsNodeView {
  *
  * Creating one with a `granteeId` notifies that user. Creating one WITHOUT a
  * grantee mints a public link: the server also creates a short link in the `ss`
- * namespace whose endpoint is the grant's own id, pointing at the frontend's
- * `/storage/shared?id=<node>` page. Deleting the grant deletes that link.
+ * namespace whose endpoint is the grant's own id. Deleting the grant deletes
+ * that link.
  */
 export class FsGrantsNamespace extends Resource {
   /**
    * `GET /fs_grants` - the grants you hold: issued by you, or issued to you.
    *
-   * There is no server-side filter for the node. The controller allows only
-   * `id`, `created_at` and `updated_at` as search keys, and an unknown key is a
-   * 400, not a wider result - so narrowing to one node is a client-side filter
-   * over this listing. {@link StorageNamespace.shared} is the cheap way to ask
+   * There is no server-side filter for the node. The only search keys accepted
+   * are `id`, `created_at` and `updated_at`, and an unknown key is a 400, not a
+   * wider result - so narrowing to one node is a client-side filter over this
+   * listing. {@link StorageNamespace.shared} is the cheap way to ask
    * "how is THIS node shared".
    *
    * @throws {OmsAuthError} 401 when anonymous.
@@ -344,9 +325,9 @@ export class StorageNamespace extends Resource {
   /** Sharing grants. */
   readonly grants: FsGrantsNamespace;
   /**
-   * Paces the four bulk-job endpoints against the `fs_bulk_job` throttle, which
-   * is twelve requests a minute for all of them together. A loop that trashes
-   * files one at a time waits here rather than collecting 429s.
+   * Paces the four bulk-job endpoints against their shared limit of twelve
+   * requests a minute. A loop that trashes files one at a time waits here
+   * rather than collecting 429s.
    */
   readonly bulkGate: StorageRateGate;
 
@@ -404,32 +385,22 @@ export class StorageNamespace extends Resource {
    * TWO server-side filters address a directory and they are NOT
    * interchangeable. That asymmetry is the whole subtlety of this method:
    *
-   * - `exact_search[parent_id]` reaches `Searchable.exact_search`, which is a
-   *   bare `where(params)`. The controller has already rewritten a `\b` value
-   *   to `nil` by then, so the sentinel lands as `WHERE parent_id IS NULL` -
-   *   and since `FsNode.root_nodes` is exactly `where(parent_id: nil)`, this is
-   *   the only filter in the API that can say "the roots". The ltree
-   *   `id_path` is the source of truth for ANCESTRY, but rootness is still a
-   *   null `parent_id`.
-   * - `extra_options[parent_id]` reaches `QueryExtraOptions::FsNodes`, which
-   *   runs `where(parent_id: x).or(where(id: x))` and so folds the folder
-   *   itself back into its own listing. Convenient - and guarded by
-   *   `return unless params[:parent_id].present?`, with that same `\b` -> `nil`
-   *   rewrite happening first. Hand it the sentinel and the guard drops the
-   *   filter IN SILENCE. The request still answers 200; it just answers with
-   *   the caller's ENTIRE listable tree, page after page, instead of three
-   *   rows. It is the same failure shape as the `inside_path` incident that
-   *   `reject_unknown_filter_keys!` was written for, except this key IS known,
-   *   so nothing rejects it.
+   * - `exact_search[parent_id]` selects the children only. A `\b` value is
+   *   read as `null` and selects the nodes with no parent, so this is the only
+   *   filter in the API that can say "the roots".
+   * - `extra_options[parent_id]` selects the children AND the folder itself.
+   *   Hand it the sentinel and the filter is dropped IN SILENCE. The request
+   *   still answers 200; it just answers with the caller's ENTIRE listable
+   *   tree, page after page, instead of three rows.
    *
    * Hence `includeSelf` is honoured under a real directory and ignored at the
    * top of the tree. Not client-side taste: it is the only combination the
    * server can actually express.
    *
-   * The endpoint is conditional-GET aware and answers 304 to a matching
-   * `If-None-Match`. The SDK never sends one, and asks the runtime not to
-   * revalidate on its own, because a 304 has no body and would surface here as
-   * an error rather than as an empty page.
+   * The endpoint answers 304 to a matching `If-None-Match`. The SDK never
+   * sends one, and asks the runtime not to revalidate on its own, because a
+   * 304 has no body and would surface here as an error rather than as an
+   * empty page.
    */
   async list(params: ListFsNodesParams = {}, options: RequestOptions = {}): Promise<Paginated<FsNode>> {
     const parentId = params.parentId;
@@ -455,9 +426,8 @@ export class StorageNamespace extends Resource {
   /**
    * `GET /fs_nodes/:id` - one node.
    *
-   * Resolves against the broader `viewable_by` scope, so a node reached through
-   * a public share link answers here even though it never appears in
-   * {@link list}.
+   * Visibility is wider than {@link list}'s: a node reached through a public
+   * share link answers here even though it never appears in a listing.
    *
    * @throws {OmsApiError} 404 when the node does not exist or is not visible.
    */
@@ -489,11 +459,10 @@ export class StorageNamespace extends Resource {
    * Resolves a slash-separated path under a starting node, walking children one
    * level at a time.
    *
-   * A convenience for humans and CLIs, NOT how the API works. The `path` column
-   * was dropped in the ltree migration and nothing on the server accepts a path
-   * string, so each segment costs one filtered listing. Results are memoised
-   * per client instance, which makes a second walk down the same prefix free,
-   * but the cheap call is always the one that already has an id.
+   * A convenience for humans, NOT how the API works. Nothing on the server
+   * accepts a path string, so each segment costs one filtered listing. Results
+   * are memoised per client instance, which makes a second walk down the same
+   * prefix free, but the cheap call is always the one that already has an id.
    *
    * `.` is skipped and `..` climbs to the parent. A leading `/` means "from the
    * home root" and ignores `from`.
@@ -522,10 +491,9 @@ export class StorageNamespace extends Resource {
     }
 
     // The listing that resolves the LAST segment already carries the whole node
-    // - the index view and the :extended view of an FsNode are the same fields -
-    // so holding on to it saves a final `GET /fs_nodes/:id`. It is dropped
-    // whenever a segment came from the cache or from a climb, where all we have
-    // is an id.
+    // (a listing row and a `get` answer have the same fields), so holding on to
+    // it saves a final `GET /fs_nodes/:id`. It is dropped whenever a segment
+    // came from the cache or from a climb, where all we have is an id.
     let resolved: FsNode | undefined;
 
     let walked = "";
@@ -576,9 +544,9 @@ export class StorageNamespace extends Resource {
    * blobs and reads the finished nodes back.
    *
    * Files at or above `MULTIPART_THRESHOLD` (32 MiB, exported from this
-   * package) take the multipart path automatically, and that is not tuning:
-   * the object store sits behind Cloudflare with a request-body cap around
-   * 100 MB, so it is the only way a large file gets in at all.
+   * package) take the multipart path automatically, and that is not tuning: a
+   * single request to the object store is capped at roughly 100 MB, so it is
+   * the only way a large file gets in at all.
    *
    * A per-file rejection - a quota that ran out, a name that collides with a
    * directory - does not throw. It comes back in
@@ -616,7 +584,7 @@ export class StorageNamespace extends Resource {
    * job's result is the list of directories that were created. Existing levels
    * are reused, so re-running the same paths is a no-op that creates nothing.
    *
-   * Costs one of the twelve `fs_bulk_job` requests a minute. Pass every path in
+   * Counts against the twelve bulk-job requests a minute. Pass every path in
    * one call rather than looping.
    *
    * @throws {OmsApiError} 400 when `paths` is empty or the parent is not a
@@ -734,10 +702,10 @@ export class StorageNamespace extends Resource {
    * `GET /fs_nodes/:id/zip` - a directory and every file under it that the
    * caller can see, as a zip archive.
    *
-   * Streamed, and streamed for real: the server generates it with
-   * `ActionController::Live`, so there is no `Content-Length` and no way to
-   * know the size in advance. Never retried automatically either - a retry
-   * restarts the whole archive from zero.
+   * Streamed, and streamed for real: the server generates the archive as it
+   * sends it, so there is no `Content-Length` and no way to know the size in
+   * advance. Never retried automatically either - a retry restarts the whole
+   * archive from zero.
    *
    * @throws {OmsApiError} 400 when the node is not a directory, 404 when it is
    *   not visible.
@@ -762,8 +730,8 @@ export class StorageNamespace extends Resource {
   /**
    * `PATCH /fs_nodes/:id` with a new name.
    *
-   * The returned node is checked against what was asked for. The controller
-   * silently drops any field outside its update allowlist, so a 200 alone
+   * The returned node is checked against what was asked for. The server
+   * silently drops any field it does not accept on update, so a 200 alone
    * proves nothing about the write having happened.
    *
    * @throws {OmsApiError} 400 when the name collides with a sibling or contains
@@ -785,9 +753,7 @@ export class StorageNamespace extends Resource {
   /**
    * `PATCH /fs_nodes/:id` with a new parent.
    *
-   * The server refuses a move that would make a node its own ancestor; that
-   * cycle check is the fix for the 2026-07-27 copy outage and must not be
-   * second-guessed client-side.
+   * The server refuses a move that would make a node its own ancestor.
    *
    * Like {@link rename}, the answer is verified rather than assumed.
    *
@@ -822,7 +788,7 @@ export class StorageNamespace extends Resource {
    * filters the index does, so a copy with NO selection would resolve to the
    * caller's entire listable tree and duplicate it.
    *
-   * Costs one of the twelve `fs_bulk_job` requests a minute.
+   * Counts against the twelve bulk-job requests a minute.
    */
   async copy(input: CopyFsNodesInput, options: RequestOptions = {}): Promise<FsBulkJob> {
     if (input.ids.length === 0) {
@@ -850,7 +816,7 @@ export class StorageNamespace extends Resource {
    * Refuses an empty id list for the same reason {@link copy} does: with no
    * selection the endpoint resolves to the caller's whole listable tree.
    *
-   * Costs one of the twelve `fs_bulk_job` requests a minute, so trash the whole
+   * Counts against the twelve bulk-job requests a minute, so trash the whole
    * selection in one call.
    */
   async trash(ids: Id[], options: RequestOptions = {}): Promise<FsBulkJob> {
@@ -968,7 +934,7 @@ export class StorageNamespace extends Resource {
   /**
    * Fetches an object-storage URL on the injected transport with no credential
    * of ours attached. The presigned signature in the URL IS the credential, and
-   * a bearer header alongside it is what makes MinIO reject the request.
+   * the store rejects a request that carries a bearer header alongside it.
    */
   private async fetchObject(url: string, options: RequestOptions): Promise<Response> {
     const response = await this.transport(url, {
@@ -1008,8 +974,8 @@ function noRevalidate(headers: Record<string, string> | undefined): Record<strin
 /**
  * The real filename behind a presigned object URL.
  *
- * The last path segment is NOT it: ActiveStorage keys an object by a random
- * token, so the URL path says `k7f2...` where the user expects `relatorio.pdf`.
+ * The last path segment is NOT it: the object is stored under a random key,
+ * so the URL path says `k7f2...` where the user expects `relatorio.pdf`.
  * The name travels in `response-content-disposition`, which the store echoes
  * back as the response's own `Content-Disposition`. Read the header first, fall
  * back to the query parameter that asked for it, and only then give up and use

@@ -13,9 +13,9 @@
  * | `POST   /authentication_options` | **none** | **20/min per IP** |
  * | `POST   /authentication`    | **none**   | **20/min per IP**  |
  *
- * The last two share ONE bucket, not one each: `rack_attack.rb` throttles on
- * `canonical_path(req).start_with?("/webauthn_credentials/authentication")`,
- * and `/authentication_options` starts with that string. Twenty POSTs a minute
+ * The last two share ONE bucket, not one each: the throttle matches every
+ * path that starts with `/webauthn_credentials/authentication`, and
+ * `/authentication_options` starts with that string. Twenty POSTs a minute
  * from an IP covers both halves of every login attempt, so a NATed office gets
  * ten sign-ins a minute between them. Budget accordingly, and see the note on
  * {@link PasskeysNamespace.authenticate} for why neither of those two methods
@@ -29,16 +29,12 @@
  * say so in those words. It says `500`, or it says "Passkey could not be
  * verified", two minutes after the user pressed their fingerprint.
  *
- * The SDK's one body-shaped rewrite is the null sentinel, and this namespace is
- * out of its reach BY CONSTRUCTION rather than by opting out: `NULL_SENTINEL`
- * is written by `encodeQuery` in `http.ts` and by nothing else. A JSON body
- * goes through `JSON.stringify` untouched (`ApiClient#buildInit`), and
- * `buildFormData` omits a null field rather than sentinelling it. So the escape
- * hatch is simply this: a ceremony travels in the BODY, never in `query`, and
- * every method here passes the caller's object straight to `http.post` with no
- * copy, no reshaping, and no key filtering. `test/passkeys.test.ts` pins the
- * serialised body byte for byte, including a `null` that must survive as
- * `null`.
+ * The SDK's one body-shaped rewrite is the null sentinel, and it is written
+ * into query strings only, never into a JSON body. A ceremony travels in the
+ * BODY, and every method here passes the caller's object straight to
+ * `http.post` with no copy, no reshaping, and no key filtering: a `null`
+ * inside survives as `null`. `test/passkeys.test.ts` pins the serialised body
+ * byte for byte.
  *
  * The corollary is that nothing here normalises for you either. If your
  * platform is loose about base64 padding, run the credential through
@@ -51,15 +47,14 @@
  *
  * It never calls `navigator.credentials` and never touches a native passkey
  * module. That is the host's job, in the host's runtime, and it is the half
- * that differs between the three clients:
+ * that differs between runtimes:
  *
  * - browser: `@simplewebauthn/browser`'s `startRegistration` /
  *   `startAuthentication`, which take `optionsJSON` in the exact shape
  *   {@link PasskeyRegistrationOptions} / {@link PasskeyAuthenticationOptions}
  *   describe and hand back the exact shape the credential types describe;
- * - React Native: `react-native-passkeys`, loaded lazily because
- *   `requireNativeModule` throws at import time when the module is not linked
- *   (Expo Go, a stale dev client);
+ * - React Native: `react-native-passkeys`, best loaded lazily because it
+ *   throws at import time when the native module is not linked;
  * - Bun / a Worker: there is no authenticator. `list` and `remove` work,
  *   the ceremonies cannot.
  *
@@ -75,41 +70,35 @@ import type { BaseRecord, Id, RequestOptions, Timestamp } from "../../types";
 // ---------------------------------------------------------------------------
 
 /**
- * One registered passkey, as `WebauthnCredentialBlueprint` renders it.
+ * One registered passkey.
  *
- * The blueprint declares two fields and inherits three from
- * `ApplicationBlueprint`, so the payload is exactly `id`, `created_at`,
- * `updated_at`, `nickname`, `last_used_at`. Its `:extended` view is an empty
- * block, which in Blueprinter INHERITS the default view rather than replacing
- * it, so `:extended` and the default are the same five fields here: the row
- * `POST /registration` answers with and the rows `GET /` answers with are
- * identical, despite the controller asking for different views.
+ * The payload is exactly `id`, `created_at`, `updated_at`, `nickname`,
+ * `last_used_at`, and it is the same five fields whether it came from
+ * `POST /registration` or from `GET /`.
  *
- * Nothing about the credential itself is ever rendered. `external_id`,
- * `public_key` and `sign_count` stay on the server; there is no field here that
- * identifies the authenticator, so a UI cannot say "your YubiKey" or "this
- * phone" unless the user typed a nickname.
+ * Nothing about the credential itself is ever rendered. The credential id,
+ * the public key and the sign counter stay on the server; there is no field
+ * here that identifies the authenticator, so a UI cannot say "your YubiKey"
+ * or "this phone" unless the user typed a nickname.
  *
- * `id` is a STRING (`create_table :webauthn_credentials, id: :string`), like
- * users and sessions and unlike songs and playlists. Never do arithmetic on it.
+ * `id` is a STRING, like users and sessions and unlike songs and playlists.
+ * Never do arithmetic on it.
  */
 export interface Passkey extends BaseRecord {
   /**
    * User-chosen label, or `null`.
    *
-   * `normalizes :nickname, with: ->(n) { n.to_s.strip.presence }` runs on the
-   * model, so `"  "` is stored as `null` and comes back as `null`, not as the
-   * spaces that were sent. A UI that echoes what it just submitted will show
-   * the wrong thing; read the answer instead.
+   * The server trims it and stores a blank as `null`, so `"  "` comes back as
+   * `null`, not as the spaces that were sent. A UI that echoes what it just
+   * submitted will show the wrong thing; read the answer instead.
    */
   readonly nickname: string | null;
   /**
    * When this passkey last completed a sign-in, or `null` if it never has.
    *
-   * Written by `touch_usage!` through `update_columns`, which skips validations
-   * AND callbacks but does bump `updated_at` by hand, so a passkey's
-   * `updated_at` tracks its last use rather than its last edit. There is no
-   * edit: the record has no update route.
+   * Every sign-in also bumps `updated_at`, so a passkey's `updated_at` tracks
+   * its last use rather than its last edit. There is no edit: the record has
+   * no update route.
    */
   readonly last_used_at: Timestamp | null;
 }
@@ -118,16 +107,15 @@ export interface Passkey extends BaseRecord {
  * What `POST /webauthn_credentials/authentication` answers with: the session,
  * plus the token, exactly as `POST /sessions` answers a password sign-in.
  *
- * `SessionBlueprint`'s `:token` view adds one field to the base view, so this
- * is an {@link AccountSession} with a `token`. That token is the new
+ * This is an {@link AccountSession} with a `token`. That token is the new
  * credential, and it is shown ONCE. Persist it here or lose it.
  *
- * A browser gets the same token a second way, as an httpOnly cookie the
- * controller sets alongside the body (`set_session_cookie`). That is why the
- * web client can ignore `token` entirely and still be signed in after the
- * post-login reload: it authenticates by cookie and deliberately never stores a
- * token where a script could read it. A native or CLI client does the opposite
- * and reads `token`.
+ * A browser gets the same token a second way, as an httpOnly cookie set
+ * alongside the body. That is why a cookie-mode client can ignore `token`
+ * entirely and still be signed in after the post-login reload: it
+ * authenticates by cookie and deliberately never stores a token where a
+ * script could read it. A token-mode client does the opposite and reads
+ * `token`.
  */
 export interface PasskeySession extends AccountSession {
   /** The bearer token for the new session. Rendered once, here, and never again. */
@@ -141,10 +129,8 @@ export interface PasskeySession extends AccountSession {
 /**
  * An `ArrayBuffer` after the only encoding this API speaks: unpadded base64url.
  *
- * `config.encoding = :base64url` in `config/initializers/webauthn.rb` decides
- * this for BOTH directions. Everything the server sends
- * (`WebAuthn::Encoders::Base64UrlEncoder#encode`) has its `=` padding chomped
- * off, and everything it reads back it decodes the same way.
+ * The server uses it in BOTH directions: everything it sends has its `=`
+ * padding chomped off, and everything it reads back it decodes the same way.
  *
  * A type alias, not a branded type, because a brand would force every caller to
  * cast the strings their platform just handed them and would buy nothing: the
@@ -168,25 +154,22 @@ export type PasskeyTransport = "usb" | "nfc" | "ble" | "smart-card" | "hybrid" |
  * One credential the ceremony should exclude (registration) or allow
  * (authentication).
  *
- * The server builds these with `as_public_key_descriptors`, which emits `type`
- * and `id` and NEVER `transports`, so a descriptor that arrives from this API
- * has exactly two keys. `transports` is here for the other direction, where a
- * platform reports it.
+ * The server emits `type` and `id` and NEVER `transports`, so a descriptor
+ * that arrives from this API has exactly two keys. `transports` is here for
+ * the other direction, where a platform reports it.
  */
 export interface PasskeyCredentialDescriptor {
   readonly type: "public-key";
-  /** The credential id, base64url. Matches `webauthn_credentials.external_id`. */
+  /** The credential id, base64url. */
   readonly id: PasskeyBase64Url;
   readonly transports?: readonly PasskeyTransport[];
 }
 
-/** The relying party, from `WebAuthn.configure`: `"O Melhor Site"` at `omelhorsite.pt`. */
+/** The relying party: `"O Melhor Site"` at `omelhorsite.pt`. */
 export interface PasskeyRelyingParty {
   readonly name: string;
   /**
-   * The registrable domain that owns the credential. Always sent: the
-   * initializer sets `rp_id`, and `RPEntity` falls back to it when the caller
-   * gives none.
+   * The registrable domain that owns the credential. Always sent.
    *
    * It is the domain of the UI, NOT of the API. Passkeys minted here are scoped
    * to `omelhorsite.pt` and its subdomains; `backend.omelhorsite.pt` serves the
@@ -198,9 +181,9 @@ export interface PasskeyRelyingParty {
 /**
  * The account the passkey will belong to.
  *
- * `id` is `users.webauthn_id`, a server-minted opaque handle that exists for
- * exactly this purpose, assigned lazily on the first call to
- * {@link PasskeysNamespace.registrationOptions}. It is NOT `users.id`, and the
+ * `id` is a server-minted opaque handle that exists for exactly this purpose,
+ * assigned lazily on the first call to
+ * {@link PasskeysNamespace.registrationOptions}. It is NOT the user's `id`, and the
  * distinction is the point: the value is stored on the authenticator, is
  * readable by anyone who gets hold of the device, and must therefore say
  * nothing about the account. `name` and `displayName`, by contrast, ARE the
@@ -231,26 +214,23 @@ export interface PasskeyAuthenticatorSelection {
 
 /**
  * `POST /webauthn_credentials/registration_options` - the arguments for
- * `navigator.credentials.create()`, camelCased and base64url-encoded by the
- * gem's `JSONSerializer`.
+ * `navigator.credentials.create()`, camelCased and base64url-encoded.
  *
- * Every optional field below is optional because `JSONSerializer#to_hash` drops
- * a falsy attribute, not because this deployment sometimes omits it. What this
- * deployment actually sends, verified against
- * `WebAuthn::PublicKeyCredential::CreationOptions`:
+ * Every optional field below is optional because the server drops a falsy
+ * attribute, not because it sometimes omits a field on purpose. What it
+ * actually sends:
  *
  * - `challenge`, `timeout` (120000), `extensions` (`{}`), `rp`, `user`,
  *   `pubKeyCredParams` (ES256, PS256, RS256), `authenticatorSelection`
  *   (`residentKey` and `userVerification`, both `"preferred"`), and
  *   `excludeCredentials`, which is `[]` for an account with no passkeys yet
  *   rather than absent;
- * - NOT `attestation`. The controller passes none, so the key is dropped
- *   entirely and the platform applies its own default (`"none"`).
+ * - NOT `attestation`. The key is absent, so the platform applies its own
+ *   default (`"none"`).
  *
  * Pass this object to the platform whole. Do not rebuild it field by field
- * unless your platform needs you to: the app does exactly that, and its reason
- * is a native Record decoder that trips on `extensions: {}`, which is a
- * property of `react-native-passkeys` rather than of WebAuthn.
+ * unless your platform needs you to: `react-native-passkeys` does, because its
+ * native Record decoder trips on `extensions: {}`.
  */
 export interface PasskeyRegistrationOptions {
   readonly challenge: PasskeyBase64Url;
@@ -278,15 +258,14 @@ export interface PasskeyRegistrationOptions {
  * `options` from `POST /webauthn_credentials/authentication_options` - the
  * arguments for `navigator.credentials.get()`.
  *
- * `allowCredentials` is always present and always `[]`: the controller calls
- * `options_for_get(user_verification: "preferred")` with no allow list, and
- * `RequestOptions#allow_credentials` falls back to `[]` rather than to nil. An
- * empty allow list IS the feature - it makes the ceremony discoverable, so the
- * OS offers whatever passkeys it holds for the domain and the user picks an
+ * `allowCredentials` is always present and always `[]`: the server sends no
+ * allow list, and spells that as `[]` rather than omitting the key. An empty
+ * allow list IS the feature - it makes the ceremony discoverable, so the OS
+ * offers whatever passkeys it holds for the domain and the user picks an
  * account. That is why sign-in needs no email field.
  *
- * `rpId` is always present too (`RequestOptions` defaults it from the
- * relying party), which matters because `react-native-passkeys` requires it.
+ * `rpId` is always present too, which matters because `react-native-passkeys`
+ * requires it.
  */
 export interface PasskeyAuthenticationOptions {
   readonly challenge: PasskeyBase64Url;
@@ -304,10 +283,10 @@ export interface PasskeyAuthenticationOptions {
  * the ceremony arguments plus the handle that identifies the challenge.
  *
  * The handle exists because the login ceremony has no session to key a
- * challenge against. The server caches the challenge under
- * `webauthn:auth:<handle>` and hands you the handle; you give it back with the
- * assertion. Treat it as a single-use nonce: it is a `SecureRandom.uuid`, it
- * lives two minutes, and {@link PasskeysNamespace.authenticate} spends it.
+ * challenge against. The server keeps the challenge under the handle and hands
+ * you the handle; you give it back with the assertion. Treat it as a
+ * single-use nonce: it is a random UUID, it lives two minutes, and
+ * {@link PasskeysNamespace.authenticate} spends it.
  */
 export interface PasskeyAuthenticationChallenge {
   readonly handle: string;
@@ -318,14 +297,11 @@ export interface PasskeyAuthenticationChallenge {
  * What the authenticator produced during registration, ready to be posted back.
  *
  * `id` and `rawId` are BOTH required, and both must be the same credential id
- * in base64url. This is not belt-and-braces, it is
- * `WebAuthn::PublicKeyCredential#valid_id?`, which decodes each one separately
- * and compares the BYTES. Send them out of step and see the warning on
- * {@link PasskeysNamespace.register}: the mismatch raises a bare `RuntimeError`
- * inside the gem, which is not a `WebAuthn::Error`, so the controller's rescue
- * does not catch it and you get a `500`.
+ * in base64url. This is not belt-and-braces: the server decodes each one
+ * separately and compares the BYTES. Send them out of step and you get a
+ * `500`, not a `400` - see the warning on {@link PasskeysNamespace.register}.
  *
- * The gem reads `clientDataJSON`, `attestationObject` and `transports` from
+ * The server reads `clientDataJSON`, `attestationObject` and `transports` from
  * `response` and ignores anything else in it, so a browser's `getPublicKey()` /
  * `publicKey` extras are harmless. They are also pointless bytes on a phone's
  * connection.
@@ -352,8 +328,8 @@ export interface PasskeyRegistrationCredential {
  * consequence for getting it wrong.
  *
  * `userHandle` is what a discoverable ceremony returns as the account the user
- * picked, and this server does NOT read it: it looks the credential up by
- * `external_id` instead. Send it anyway if the platform gave you one, but do
+ * picked, and this server does NOT read it: it looks the credential up by its
+ * id instead. Send it anyway if the platform gave you one, but do
  * not synthesise one, and never treat its absence as a failure.
  */
 export interface PasskeyAssertionCredential {
@@ -376,8 +352,8 @@ export interface RegisterPasskeyInput {
   /** The attestation the platform just produced. Sent verbatim. */
   readonly credential: PasskeyRegistrationCredential;
   /**
-   * Optional label. Blank and whitespace-only strings are stored as `null` by
-   * the model's `normalizes`, so there is no point sending `" "` to clear
+   * Optional label. Blank and whitespace-only strings are stored as `null`,
+   * so there is no point sending `" "` to clear
    * anything - there is nothing to clear, the record cannot be updated.
    */
   readonly nickname?: string;
@@ -410,15 +386,15 @@ const BASE64URL_ONLY = /^[A-Za-z0-9_-]+$/;
  * ## Who needs this
  *
  * A browser does not. `@simplewebauthn/browser` already emits unpadded
- * base64url on both sides, which is why the web frontend posts its credential
- * straight through and has never needed a normaliser.
+ * base64url on both sides, so a browser credential can be posted straight
+ * through.
  *
  * React Native does. Each platform re-encodes in its own native layer on the
  * way out of the OS, and they do not agree with each other about padding; iOS
  * in particular re-pads on the way in and strips on the way out. That would be
- * harmless if the server were lenient, and on most fields it is - the gem's
- * decoder re-pads a short string and accepts either alphabet. It is NOT lenient
- * about one thing: `valid_id?` decodes `id` and `rawId` SEPARATELY and demands
+ * harmless if the server were lenient, and on most fields it is - it re-pads a
+ * short string and accepts either alphabet. It is NOT lenient about one
+ * thing: it decodes `id` and `rawId` SEPARATELY and demands
  * identical bytes, so a platform that pads one and not the other loses the
  * ceremony at the very last step, with a 500 and nothing in the message.
  *
@@ -457,9 +433,8 @@ export function isPasskeyBase64Url(value: unknown): value is PasskeyBase64Url {
 function transportList(value: unknown): PasskeyTransport[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const list = value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
-  // An empty list is returned as `undefined` rather than `[]` on purpose:
-  // Rails' deep_munge rewrites an empty array in a request body to nil, so `[]`
-  // and absent reach the controller as the same thing anyway.
+  // An empty list is returned as `undefined` rather than `[]` on purpose: the
+  // server reads an empty array in a request body as absent anyway.
   return list.length > 0 ? list : undefined;
 }
 
@@ -486,11 +461,8 @@ function optionalString(value: unknown): string | undefined {
  * convenient: they are the same value by definition, and the server compares
  * their decoded bytes.
  *
- * Sending the `null` through instead is the failure this exists to prevent. The
- * gem does `relying_party.encoder.decode(credential["rawId"])` with no nil
- * check, so `nil.end_with?` raises `NoMethodError` - not a `WebAuthn::Error`,
- * therefore not caught by the controller's rescue, therefore a `500` with no
- * clue in it.
+ * Sending the `null` through instead is the failure this exists to prevent:
+ * the server answers a `500` with no clue in it.
  */
 function resolveRawId(source: Record<string, unknown>, id: PasskeyBase64Url): PasskeyBase64Url {
   return source.rawId === undefined || source.rawId === null ? id : passkeyBase64Url(source.rawId, "credential.rawId");
@@ -507,9 +479,9 @@ function resolveRawId(source: Record<string, unknown>, id: PasskeyBase64Url): Pa
  * thing that must not happen behind a caller's back.
  *
  * Drops `getPublicKey`, `publicKey`, `getPublicKeyAlgorithm` and
- * `getAuthenticatorData` from `response`: `AuthenticatorAttestationResponse`
- * reads `clientDataJSON`, `attestationObject` and `transports` and nothing
- * else, and the dropped fields are large.
+ * `getAuthenticatorData` from `response`: the server reads `clientDataJSON`,
+ * `attestationObject` and `transports` and nothing else, and the dropped
+ * fields are large.
  *
  * @throws {TypeError} through {@link passkeyBase64Url} when a required field is
  *   missing or not base64.
@@ -585,22 +557,18 @@ export class PasskeysNamespace extends Resource {
    * `GET /webauthn_credentials` - every passkey of the signed-in user, newest
    * first.
    *
-   * Returns a plain array, and that is the whole story: this action is
-   * hand-written rather than `CrudActions`, so unlike almost every other index
-   * in this API it has NO list DSL, NO `modifiers[page]`, NO `search` /
-   * `exact_search`, and NO `ETag` / `304`. Sending those parameters is not an
-   * error either - the controller never looks at `params`, so
-   * `reject_unknown_filter_keys!` is not in the chain and a filter is silently
-   * ignored rather than rejected with a `400`. The web frontend does exactly
-   * that today: `PasskeyService.list` accepts a `ListFilters` argument and
-   * forwards it, and it has never had any effect.
+   * Returns a plain array, and that is the whole story: unlike almost every
+   * other index in this API it has NO list DSL, NO `modifiers[page]`, NO
+   * `search` / `exact_search`, and NO `ETag` / `304`. Sending those parameters
+   * is not an error either: a filter is silently ignored rather than rejected
+   * with a `400`.
    *
    * Hence no `Paginated` and no `PageParams` here. An account's passkey count
    * is bounded by how many devices a person owns, and the server would return
    * all of them regardless of what was asked.
    *
-   * The order is `created_at: :desc`, applied in SQL, so it does not change if
-   * a passkey is used.
+   * The order is newest-created first, so it does not change when a passkey
+   * is used.
    *
    * Requires a credential. General authenticated ceiling, 600/min.
    *
@@ -613,11 +581,9 @@ export class PasskeysNamespace extends Resource {
   /**
    * `DELETE /webauthn_credentials/:id` - removes one passkey. `204`, no body.
    *
-   * The lookup is scoped to the caller (`Current.user.webauthn_credentials`),
-   * so somebody else's id is a `404` and never a `403`: the endpoint does not
-   * confirm that the id exists. `destroyable_by?` additionally lets an admin
-   * through, but only for a passkey they can already find, which by that
-   * scoping means their own.
+   * The lookup is scoped to the caller, so somebody else's id is a `404` and
+   * never a `403`: the endpoint does not confirm that the id exists. An
+   * administrator is no exception.
    *
    * Nothing stops the last passkey being removed. There is no "you would lock
    * yourself out" guard, because passwords and OAuth identities are still
@@ -643,19 +609,18 @@ export class PasskeysNamespace extends Resource {
    *
    * Two side effects, both of which matter:
    *
-   * 1. **It assigns `users.webauthn_id` on first use.** An account that has
-   *    never touched passkeys gets one minted here (`WebAuthn.generate_user_id`,
-   *    written with `update_column`, so no callbacks and no `updated_at` bump).
-   *    That handle is then permanent and is what every passkey on this account
-   *    is bound to.
-   * 2. **It caches a challenge under a key that is per USER, not per call**
-   *    (`webauthn:reg:<user id>`). Calling this twice for one account
+   * 1. **It assigns the account's WebAuthn user handle on first use.** An
+   *    account that has never touched passkeys gets one minted here. That
+   *    handle is then permanent and is what every passkey on this account is
+   *    bound to.
+   * 2. **It caches a challenge under a key that is per USER, not per call.**
+   *    Calling this twice for one account
    *    OVERWRITES the first challenge, so two registrations in flight at once
    *    means the older one fails verification with "Registration challenge
    *    expired" even though nothing expired. Do not call it speculatively, do
    *    not call it to warm a screen, and do not let a button fire it twice.
    *
-   * The challenge lives **two minutes** (`CHALLENGE_TTL`), and the `timeout`
+   * The challenge lives **two minutes**, and the `timeout`
    * inside the options is also 120000. Those are the same number, and the cache
    * clock starts BEFORE the response is even sent, so a user who lets the OS
    * sheet sit open for its full advertised timeout arrives after the challenge
@@ -663,7 +628,7 @@ export class PasskeysNamespace extends Resource {
    *
    * Requires a credential. General authenticated ceiling, 600/min.
    *
-   * An empty JSON object is sent as the body. The controller reads nothing from
+   * An empty JSON object is sent as the body. The server reads nothing from
    * it; it is there so the request carries `Content-Type: application/json`
    * like every other POST in this API rather than arriving bodyless.
    */
@@ -676,26 +641,22 @@ export class PasskeysNamespace extends Resource {
    * the new {@link Passkey}.
    *
    * `input.credential` is posted VERBATIM. Nothing here copies it, reshapes it,
-   * filters its keys or rewrites a `null` inside it, because the server reads
-   * it with `params.require(:credential).to_unsafe_h` and hands the raw hash to
-   * the gem, which then checks a signature over those exact bytes.
+   * filters its keys or rewrites a `null` inside it, because the server checks
+   * a signature over those exact bytes.
    *
    * ## The failure modes, and which of them are honest
    *
-   * The controller rescues `WebAuthn::Error` and turns it into a `400`. Some of
-   * what can go wrong here is NOT a `WebAuthn::Error`, and those reach you as a
-   * `500`:
+   * A verification failure is a `400`. Some of what can go wrong here is not
+   * treated as one, and reaches you as a `500`:
    *
    * - `type` that is not exactly `"public-key"`, or an `id` and `rawId` whose
-   *   decoded bytes differ: `PublicKeyCredential#verify` calls bare
-   *   `raise("invalid type")` / `raise("invalid id")`, which are `RuntimeError`
-   *   and slip past the rescue;
-   * - `rawId` absent or `null`: the decoder calls `end_with?` on it and raises
-   *   `NoMethodError`. See {@link normalizePasskeyRegistrationCredential},
+   *   decoded bytes differ;
+   * - `rawId` absent or `null`. See {@link normalizePasskeyRegistrationCredential},
    *   which fills `rawId` from `id` for the Android case where the platform
-   *   really does send `null`;
-   * - `credential` absent altogether: `params.require` raises
-   *   `ParameterMissing`, which Rails renders as `400`.
+   *   really does send `null`.
+   *
+   * `credential` absent altogether is the one malformed shape that is still a
+   * `400`.
    *
    * So a `500` from this endpoint is a malformed payload, not an outage, and it
    * is the single most likely thing to be wrong on a client that hand-builds
@@ -714,10 +675,9 @@ export class PasskeysNamespace extends Resource {
    *   again."` when more than two minutes passed since
    *   {@link registrationOptions}, or when a second call to it overwrote this
    *   ceremony's challenge.
-   * @throws {OmsApiError} 400 when verification fails, or when the row will not
-   *   save - which in practice means `external_id` is already taken, i.e. this
-   *   authenticator is already registered and `excludeCredentials` did not stop
-   *   it.
+   * @throws {OmsApiError} 400 when verification fails, or when the passkey
+   *   cannot be stored - which in practice means this authenticator is already
+   *   registered and `excludeCredentials` did not stop it.
    */
   async register(input: RegisterPasskeyInput, options: RequestOptions = {}): Promise<Passkey> {
     return this.http.post<Passkey>(
@@ -736,9 +696,9 @@ export class PasskeysNamespace extends Resource {
    * returns the challenge handle plus the arguments for
    * `navigator.credentials.get()`.
    *
-   * **Send this with NO credential.** The route is
-   * `allow_unauthenticated_access`, and the whole point is that there is no
-   * session yet. The transport always attaches `Authorization` when the client
+   * **Send this with NO credential.** The route accepts anonymous callers,
+   * and the whole point is that there is no session yet. The transport always
+   * attaches `Authorization` when the client
    * holds a token, and the caller cannot strip it per request, so a client that
    * might be signed in should build an anonymous one for the login flow.
    *
@@ -754,7 +714,7 @@ export class PasskeysNamespace extends Resource {
    *
    * Retrying is off here, which deviates from the transport's default of
    * replaying a `429`. The reason is the clock rather than safety: the replay
-   * sleeps out `Retry-After`, which Rack::Attack sets from a one-minute window,
+   * sleeps out `Retry-After`, which the server sets from a one-minute window,
    * and then hands back a challenge that lives two minutes and still has an OS
    * sheet and a second rate-limited request ahead of it. Waiting silently
    * inside the SDK is likelier to produce a login that dies at the last step
@@ -784,16 +744,16 @@ export class PasskeysNamespace extends Resource {
    *
    * ## An assertion is spent exactly once, so nothing here is replayed
    *
-   * The controller deletes the cached challenge BEFORE it verifies anything.
-   * Once a request has reached the controller the handle is gone whatever the
-   * outcome, so a second attempt carrying the same body answers `401 "Login
+   * The server discards the challenge BEFORE it verifies anything. Once a
+   * request has reached it the handle is gone whatever the outcome, so a
+   * second attempt carrying the same body answers `401 "Login
    * challenge expired."` and reports the wrong cause for whatever actually
    * went wrong.
    *
    * The transport's default policy already declines to replay a `POST` after a
    * torn connection or a `5xx`, which is exactly right for that reason. The one
    * outcome it WOULD replay is a `429`, and this method turns that off as well.
-   * A `429` comes from Rack::Attack, ahead of the router, so it genuinely did
+   * A `429` is answered before the request is performed, so it genuinely did
    * not spend the handle; but `Retry-After` is set from a one-minute window,
    * the challenge lives two minutes, and the OS sheet has already eaten part of
    * that. Sleeping through the rate limit inside the SDK converts it into an
@@ -813,10 +773,10 @@ export class PasskeysNamespace extends Resource {
    *   server has never seen (`"Unknown passkey."`); a deactivated account
    *   (`"This account is deactivated."`); a failed signature, wrong origin or
    *   wrong challenge (`"Passkey could not be verified."`); and a sign counter
-   *   that did not advance, which the gem treats as a cloned authenticator and
-   *   which reports as that same message. Note that passkeys synced through a
-   *   keychain report a counter of `0` forever, and `valid_sign_count?` lets
-   *   `0` against `0` through, so that last case does not fire for them.
+   *   that did not advance, which the server treats as a cloned authenticator
+   *   and reports as that same message. Note that passkeys synced through a
+   *   keychain report a counter of `0` forever, and `0` against `0` is let
+   *   through, so that last case does not fire for them.
    * @throws {OmsQuotaError} 429 when the shared per-IP bucket is spent.
    */
   async authenticate(input: AuthenticatePasskeyInput, options: RequestOptions = {}): Promise<PasskeySession> {

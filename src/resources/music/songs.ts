@@ -1,10 +1,9 @@
 /**
  * The `music.songs` namespace: the library, its lyrics and its stems.
  *
- * Everything under here is strictly single-tenant. `Song.viewable_by` is
- * `where(user: current_user)` with no grant, no share and no public branch, so
- * there is no such thing as reading somebody else's track by id: a foreign id
- * is a `404 "Resource not found"`, never a `403`. The same is true of
+ * Everything under here is strictly single-tenant: there is no such thing as
+ * reading somebody else's track by id. A foreign id is a
+ * `404 "Resource not found"`, never a `403`. The same is true of
  * `liked_songs`, of `/artist_metadata/:name` (which resolves against YOUR
  * artist roster, not a global one) and of `/songs/artist_pictures`. Cross-user
  * song payloads exist in this API, but they arrive through jams and social
@@ -14,50 +13,42 @@
  *
  * **Song ids are integers.** So are `liked_songs` ids. The ids sitting NEXT to
  * them are not: `user_id` is a string uuid, every `*_media_id` is a string, and
- * a vocal separation's own `id` is a string. On ActionCable the same song ids
- * come back as strings. Compare with `===` against the right type or nothing
- * will ever match.
+ * a vocal separation's own `id` is a string. On the realtime stream the same
+ * song ids come back as strings. Compare with `===` against the right type or
+ * nothing will ever match.
  *
  * **Media never travels inline.** A song carries ids of storage nodes, not
  * bytes and not URLs. Resolve one with `oms.media` (`GET /media/:id/data_url`
- * hands back a short-lived signed URL, which is what you give a player). The
- * `oms.storage` route `GET /fs_nodes/:id/data_url` reaches the same bytes and
- * the web frontend still uses it, but the backend calls it a temporary alias
- * for that frontend, so new code should ask `oms.media`. Prefer the compressed
- * twin either way: `compressed_audio_media_id`
- * before `audio_media_id`, `compressed_artwork_media_id` before
- * `artwork_media_id`. The originals are lossless files on a Raspberry Pi and an
- * album grid that reaches for them takes seconds per tile.
+ * hands back a short-lived signed URL, which is what you give a player).
+ * `GET /fs_nodes/:id/data_url` is a legacy alias that reaches the same bytes;
+ * new code should ask `oms.media`. Prefer the compressed twin either way:
+ * `compressed_audio_media_id` before `audio_media_id`,
+ * `compressed_artwork_media_id` before `artwork_media_id`. The originals are
+ * lossless files on slow storage and an album grid that reaches for them takes
+ * seconds per tile.
  *
- * **Every key that names a media node is sent TWICE.** `ApplicationBlueprint.
- * media_id_fields` emits `<name>_media_id` and `<name>_fs_node_id` with the
- * identical value, the second being a temporary shim for the old web frontend.
- * Read the `_media_id` spelling; the twin is declared here only so that code
- * ported from the web app keeps type-checking, and it will be removed
- * server-side without a major version of this SDK.
+ * **Every key that names a media node is sent TWICE.** `<name>_media_id` and
+ * `<name>_fs_node_id` carry the identical value, the second being a legacy
+ * alias. Read the `_media_id` spelling; the twin is declared here only so that
+ * older code keeps type-checking, and it will be removed server-side without a
+ * major version of this SDK.
  *
  * ## An OAuth token cannot reach any of this
  *
- * None of the five controllers behind this namespace (`songs`, `liked_songs`,
- * `lyrics`, `artist_metadata`, `music/external_search`) declares an
- * `oauth_scope`, and `enforce_oauth_scope!` denies by omission: an OAuth access
- * token gets `403 {"error":"insufficient_scope"}` on EVERY method here, before
- * the action runs. Music needs a session cookie or a personal token. That is a
- * server-side gap rather than a design decision, so it may open later; until it
- * does, an {@link OmsAuthError} with status 403 and that body means "wrong kind
- * of credential", not "wrong user".
+ * An OAuth access token gets `403 {"error":"insufficient_scope"}` on EVERY
+ * method here. Music needs a session cookie or a personal token. That gap may
+ * close later; until it does, an {@link OmsAuthError} with status 403 and that
+ * body means "wrong kind of credential", not "wrong user".
  *
  * ## The 60-per-minute bucket nobody expects to share
  *
- * rack-attack throttles `/lyrics*`, `/artists/*`, `/artist_metadata/*` and
- * `/music_radios/*` through ONE rule - `external_proxy/by_session`, 60 requests
- * per minute keyed by the literal `Authorization` header - because all four
- * proxy to somebody else's servers (lrclib, Genius, Last.fm, Wikipedia, Deezer)
- * and getting our IP banned there breaks the feature for everyone. One counter,
- * four route families: fetching lyrics for sixty tracks in a minute leaves zero
- * budget for artist metadata, and the 429 lands on whichever call is unlucky
- * enough to be the sixty-first. Pace a backfill at roughly one request per
- * second and it will never be seen.
+ * `/lyrics*`, `/artists/*`, `/artist_metadata/*` and `/music_radios/*` share
+ * ONE budget of 60 requests per minute, keyed by the `Authorization` header,
+ * because all four proxy to somebody else's servers (lrclib, Genius, Last.fm,
+ * Wikipedia, Deezer). One counter, four route families: fetching lyrics for
+ * sixty tracks in a minute leaves zero budget for artist metadata, and the 429
+ * lands on whichever call is unlucky enough to be the sixty-first. Pace a
+ * backfill at roughly one request per second and it will never be seen.
  *
  * The rest of the namespace lives under the general ceiling (600/min
  * authenticated), with two exceptions that have their own budgets and their own
@@ -94,8 +85,8 @@ import type { VocalSeparation } from "../tools/vocalSeparation";
  * primary keys; `users`, `sessions`, `fs_nodes`, `playback_states` and
  * `vocal_separations` are string uuids. Both spellings are accepted wherever a
  * song id is taken as an argument, because a caller that read the id off a
- * cable message is holding a string, but the JSON these methods RETURN always
- * carries a number.
+ * realtime message is holding a string, but the JSON these methods RETURN
+ * always carries a number.
  */
 export type SongId = number | string;
 
@@ -103,9 +94,9 @@ export type SongId = number | string;
 export type SongArtistRole = "primary" | "featured" | "with";
 
 /**
- * One row of `song_artists`, nested under {@link Song.artists}.
+ * One artist credit, nested under {@link Song.artists}.
  *
- * `id` is the id of the JOIN row, not of the artist - the artist's own id is
+ * `id` is the id of the credit row, not of the artist - the artist's own id is
  * `artist_id`. Getting those two the wrong way round is how a link to an artist
  * page ends up pointing at a random other artist, so prefer `slug` for routing
  * and keep `artist_id` for lookups.
@@ -117,14 +108,14 @@ export type SongArtistRole = "primary" | "featured" | "with";
  * `picture_xl`) lives on the artist record.
  */
 export interface SongArtistCredit extends Omit<BaseRecord, "id"> {
-  /** Id of the `song_artists` join row. NOT the artist id. */
+  /** Id of the credit row. NOT the artist id. */
   readonly id: number;
   readonly song_id: number;
   readonly artist_id: number;
   /** Ordering within the credits. Sort by it; the server does not. */
   readonly position: number;
   readonly role: SongArtistRole;
-  /** `null` only if the join row outlived its artist, which the schema prevents. */
+  /** `null` only if the credit outlived its artist, which the server prevents. */
   readonly name: string | null;
   readonly slug: string | null;
   /** Artist avatar the user uploaded, as a storage node id. Usually `null`. */
@@ -147,15 +138,10 @@ export type SongSourceKind = "upload" | "yt_dlp" | "spotify_sync";
 /**
  * A track in the library.
  *
- * `SongBlueprint` declares no extra fields in its `:extended` view, so the
- * shape below is what every route in this namespace answers with - index,
+ * The shape below is what every route in this namespace answers with - index,
  * show, update and import alike. There is no narrower view to guard against.
- *
- * Two fields the web frontend's own type declares do NOT exist on the wire:
- * `track_number` and `disc_number` (they are optional there and always
- * `undefined`), and neither does the legacy `artist` string column, which was
- * dropped when `song_artists` landed. {@link Song.artists} is the only artist
- * source.
+ * There is no `track_number`, no `disc_number` and no legacy `artist` string
+ * on the wire; {@link Song.artists} is the only artist source.
  */
 export interface Song extends Omit<BaseRecord, "id"> {
   /** Integer primary key. See {@link SongId}. */
@@ -202,7 +188,7 @@ export interface Song extends Omit<BaseRecord, "id"> {
   /**
    * Stamped when a separation starts and cleared when it settles, so a
    * non-null value means "a separation is in flight". It can go stale if a
-   * worker dies; `GET /songs/:id/separation` clears it as a side effect, which
+   * run dies; `GET /songs/:id/separation` clears it as a side effect, which
    * is one reason to poll that route rather than re-reading the song.
    */
   readonly vocal_separation_started_at: Timestamp | null;
@@ -238,8 +224,8 @@ export interface Song extends Omit<BaseRecord, "id"> {
 /**
  * A row of `GET /songs/albums`.
  *
- * Not a database entity: the endpoint groups the caller's songs in Ruby and
- * this is the summary it builds. `name: null` is the bucket of songs with no
+ * Not a stored record: the endpoint groups the caller's songs and this is the
+ * summary it builds. `name: null` is the bucket of songs with no
  * album, and it is a legitimate row rather than an error.
  */
 export interface SongAlbumSummary {
@@ -282,8 +268,7 @@ export interface SongSeparationStatus {
    * The run itself, or `null` when this song has never had one.
    *
    * The same `VocalSeparation` record the `tools.vocalSeparation` namespace
-   * returns - one model, one blueprint, two ways in - so it is imported rather
-   * than redeclared here. For a song-owned run `vocals_url` and
+   * returns, so it is imported rather than redeclared here. For a song-owned run `vocals_url` and
    * `instrumental_url` are permanently `null`: the stems are written onto the
    * song as storage nodes, not attached to this row.
    */
@@ -298,7 +283,7 @@ export interface LikedSong extends Omit<BaseRecord, "id"> {
   readonly song_id: number;
   /** The cursor {@link ListLikedSongsParams.before} pages on. */
   readonly liked_at: Timestamp;
-  /** Always present: the route renders the `:extended` view, which inlines it. */
+  /** Always present. */
   readonly song: Song;
 }
 
@@ -353,10 +338,8 @@ export interface ArtistMetadataSimilar {
 /**
  * The legacy payload `GET /artist_metadata/:name` answers with.
  *
- * `ArtistMetadataBlueprint` inherits `Blueprinter::Base` directly rather than
- * `ApplicationBlueprint`, so this is one of the very few records in the API
- * with NO `created_at` / `updated_at`. It also never 404s - see
- * {@link MusicSongsNamespace.artistMetadata}.
+ * One of the very few records in the API with NO `created_at` / `updated_at`.
+ * It also never 404s - see {@link MusicSongsNamespace.artistMetadata}.
  */
 export interface ArtistMetadata {
   /** `null` on the not-found branch. Integer when the artist exists. */
@@ -395,10 +378,9 @@ export interface ArtistMetadata {
 /**
  * Where an external-search hit came from.
  *
- * The frontend's own union also lists `"soundcloud"` and `"bandcamp"`. The
- * current `Music::ExternalSearch` queries Spotify, iTunes and YouTube and
- * nothing else, so those two branches are dead - keep handling them if you
- * ported code that does, but do not wait for them.
+ * `"soundcloud"` and `"bandcamp"` are kept for compatibility only: the search
+ * queries Spotify, iTunes and YouTube and nothing else, so they never appear
+ * today.
  */
 export type MusicExternalSource = "spotify" | "itunes" | "youtube" | "soundcloud" | "bandcamp";
 
@@ -491,9 +473,9 @@ export interface SongFilters {
   /**
    * Partial title match, sent as `search[title]`.
    *
-   * The comparison is slug-shaped: the server lowercases, strips accents
-   * through a `TRANSLATE`, replaces every run of non-alphanumerics with a
-   * hyphen and then does a `LIKE %...%` on both sides. So `"cafe"` finds
+   * The comparison is slug-shaped: the server lowercases, strips accents,
+   * replaces every run of non-alphanumerics with a hyphen and then does a
+   * substring match on both sides. So `"cafe"` finds
    * "Café", `"nao quero"` finds "Não Quero", and punctuation is irrelevant. It
    * is not a full-text index and there is no ranking.
    *
@@ -504,9 +486,8 @@ export interface SongFilters {
   readonly title?: string;
   /**
    * Exact album, sent as `exact_search[album]`. Pass `null` for the no-album
-   * bucket: the transport encodes it as the backend's `\b` sentinel and
-   * `Searchable.exact_search` turns that into `WHERE album IS NULL`, which is
-   * the only way to ask for it.
+   * bucket: the transport encodes it as the server's `\b` null sentinel, which
+   * is the only way to ask for it.
    *
    * Not a substring match. `search[album]` exists and IS partial, but it can
    * never express the null bucket, so this field takes the exact route and the
@@ -520,10 +501,9 @@ export interface SongFilters {
   /**
    * Narrow to one artist, by canonical name OR by slug.
    *
-   * This one is not a column and does not behave like the others. The
-   * controller reads it straight out of `params`, resolves it against YOUR
-   * artist roster (canonical name first, then slug) and joins through
-   * `song_artists`. Consequences:
+   * This one is not a column and does not behave like the others. The server
+   * resolves it against YOUR artist roster (canonical name first, then slug)
+   * and matches on credits. Consequences:
    *
    * - it is EXACT even though it is spelled like a search. `search[artist]`
    *   and `exact_search[artist]` are the same code path; there is no partial
@@ -531,8 +511,7 @@ export interface SongFilters {
    *   filter client-side or go through `oms.music.artists`;
    * - an artist you do not have resolves to nothing and yields an EMPTY list,
    *   not a 404 and not an error. An empty page is genuinely ambiguous here;
-   * - it changes what {@link MusicSongsNamespace.albums} deduplicates on, which
-   *   is the point of that endpoint's `filter_artist_id`.
+   * - it changes what {@link MusicSongsNamespace.albums} deduplicates on.
    */
   readonly artist?: string;
   /**
@@ -554,23 +533,21 @@ export interface ListSongsParams extends SongFilters, ListParams<(typeof SONG_FI
    * Defaults to `"created_at:asc"`, which is also the endpoint's own base
    * order and the one that makes paging stable. Two traps:
    *
-   * - a column the model does not have is IGNORED, silently. `modifiers[order]`
-   *   is an allowed key so the request is not rejected, and `QueryModifier`
-   *   simply returns before ordering, handing back the base order. A typo
-   *   costs you nothing but the sort you asked for;
-   * - a real column REPLACES the base order (`reorder`, not `order`), tie
-   *   breaker included. Ordering 4000 tracks by `title:asc` when several share
-   *   a title gives Postgres licence to return them in a different sequence per
-   *   page, which duplicates and drops rows across a paged walk. Prefer
-   *   `created_at` or `id` for anything you intend to page through.
+   * - a column the record does not have is IGNORED, silently. `modifiers[order]`
+   *   is an allowed key so the request is not rejected; the base order is
+   *   handed back instead. A typo costs you nothing but the sort you asked for;
+   * - a real column REPLACES the base order, tie breaker included. Ordering
+   *   4000 tracks by `title:asc` when several share a title lets the database
+   *   return them in a different sequence per page, which duplicates and drops
+   *   rows across a paged walk. Prefer `created_at` or `id` for anything you
+   *   intend to page through.
    *
    * A third `:`-separated segment pins specific values first
-   * (`"album:asc:Clube da Esquina,Acabou Chorare"`), at the cost of an extra
-   * `SELECT DISTINCT` over the column.
+   * (`"album:asc:Clube da Esquina,Acabou Chorare"`).
    */
   readonly order?: string;
   /**
-   * `modifiers[random]=true` - shuffle server-side with `RANDOM()`.
+   * `modifiers[random]=true` - shuffle server-side.
    *
    * Mutually destructive with paging: the ordering is re-evaluated per request,
    * so page 2 of a random listing is a fresh shuffle and shares rows with page
@@ -595,7 +572,7 @@ export interface ListSongAlbumsParams extends SongFilters, ListParams<(typeof SO
 /**
  * Fields {@link MusicSongsNamespace.update} can change.
  *
- * Four real columns and three virtual inputs. The virtual ones are the
+ * Four real fields and three virtual inputs. The virtual ones are the
  * complicated half; each carries its own note.
  */
 export interface UpdateSongInput {
@@ -611,14 +588,14 @@ export interface UpdateSongInput {
    * there is no comma-splitting heuristic, so a name that genuinely contains a
    * comma survives.
    *
-   * An EMPTY array is not "remove every artist": it is `blank?` server-side,
-   * which drops it back to `nil` and re-runs the legacy parser. There is no way
-   * through this endpoint to leave a song with no artists at all.
+   * An EMPTY array is not "remove every artist": the server treats it as
+   * absent and re-runs the legacy parser. There is no way through this
+   * endpoint to leave a song with no artists at all.
    */
   readonly artistNames?: string[];
   /**
    * The featured credits, replacing whatever is there. Sending this key at all
-   * is what switches the backend out of its legacy mode.
+   * is what switches the server out of its legacy mode.
    *
    * That legacy mode is a heuristic over the TITLE: with no `featured_artist_
    * names` key present, the server re-reads `"Song (feat. X)"` and rebuilds the
@@ -634,7 +611,7 @@ export interface UpdateSongInput {
   /**
    * Legacy single-line artist input, re-parsed server-side (it splits on
    * commas and on "feat."). Prefer {@link UpdateSongInput.artistNames}; this
-   * exists for parity with the old web form.
+   * exists for compatibility.
    */
   readonly artist?: string;
   /**
@@ -660,9 +637,8 @@ export interface ListLikedSongsParams {
    *
    * Deliberately not an offset. The list is ordered by `liked_at` descending
    * and liking one track mid-scroll shifts every later offset page by one,
-   * which shows a duplicate and hides a row. A `Date` is encoded as ISO-8601,
-   * which is what `Time.zone.parse` wants; an unparseable string is a
-   * `400 "Invalid before timestamp"`.
+   * which shows a duplicate and hides a row. A `Date` is encoded as ISO-8601;
+   * an unparseable string is a `400 "Invalid before timestamp"`.
    */
   readonly before?: string | Date;
 }
@@ -670,7 +646,7 @@ export interface ListLikedSongsParams {
 /** Arguments for {@link MusicSongsNamespace.startSeparation}. */
 export interface StartSongSeparationInput {
   /**
-   * Which sidecar model to run. Omit for the default. The selectable list is
+   * Which separation model to run. Omit for the default. The selectable list is
    * `oms.tools.vocalSeparation.models()`; an id that is not on it is a
    * `400 "Unknown model"`.
    */
@@ -694,9 +670,8 @@ export interface ModifySongMetadataInput {
   /** The file to retag. Hard cap 50 MiB, enforced before anything else happens. */
   readonly audio: FileInput | NativeFile;
   /**
-   * At least one tag is REQUIRED. An empty bag raises server-side and comes
-   * back as a 500 with a Discord page attached, so this method rejects it
-   * locally instead.
+   * At least one tag is REQUIRED. An empty bag comes back as a 500, so this
+   * method rejects it locally instead.
    */
   readonly metadata: SongFileMetadata;
 }
@@ -758,14 +733,14 @@ export function isMusicExternalSearchRateLimited(error: unknown): boolean {
  * `"Chico Buarque, Milton Nascimento (feat. Elis Regina)"`: primaries joined
  * with `", "`, then a `feat.` clause. Pure string building, no request.
  *
- * `with` credits are excluded unless `includeWith` is set, which mirrors what
- * the three clients do - they render only in a credits dialog and in media
- * session metadata, where completeness beats line length.
+ * `with` credits are excluded unless `includeWith` is set; they belong in a
+ * credits dialog and in media session metadata, where completeness beats line
+ * length.
  *
- * Written here because {@link Song.artists} arrives UNSORTED and every client
- * that forgot to sort by `position` printed the credits in insertion order,
- * which is roughly random. It also copes with a jam entry, whose `artist_names`
- * is a pre-joined string and whose `artists` array is empty.
+ * Written here because {@link Song.artists} arrives UNSORTED and forgetting to
+ * sort by `position` prints the credits in insertion order, which is roughly
+ * random. It also copes with a jam entry, whose `artist_names` is a pre-joined
+ * string and whose `artists` array is empty.
  */
 export function songArtistsLine(
   song: Pick<Song, "artists"> & Partial<Pick<Song, "artist_names">>,
@@ -801,15 +776,13 @@ export class MusicSongsNamespace extends Resource {
   /**
    * `GET /songs` - the caller's library, oldest first.
    *
-   * Pagination is FORCED here and nowhere else in this namespace: the
-   * controller overrides `modifiers_params` for `index` only, so a request with
-   * no page modifier is given `1:500` and one asking for more than 500 is
-   * clamped to it. That is a DoS guard, not tidiness - a five-thousand-track
-   * library serialises megabytes of JSON with every credit inlined, and a
-   * handful of concurrent unbounded listings used to exhaust the Puma threads.
-   * The SDK sends a page modifier every time, so the clamp never surprises you
-   * and {@link Paginated.pageSize} always reports the size the rows were
-   * counted against.
+   * Pagination is FORCED here and nowhere else in this namespace: a request
+   * with no page modifier is given `1:500` and one asking for more than 500 is
+   * clamped to it. That is a guard, not tidiness - a five-thousand-track
+   * library serialises megabytes of JSON with every credit inlined. The SDK
+   * sends a page modifier every time, so the clamp never surprises you and
+   * {@link Paginated.pageSize} always reports the size the rows were counted
+   * against.
    *
    * Order defaults to `created_at:asc`, the endpoint's own base order, which is
    * what makes a paged walk stable. See {@link ListSongsParams.order} before
@@ -822,7 +795,7 @@ export class MusicSongsNamespace extends Resource {
    * @throws {OmsAuthError} 401 when anonymous, 403 for an OAuth token.
    * @throws {OmsApiError} 400 naming the offending key when a filter is not in
    *   {@link SONG_FILTER_COLUMNS}. Filters fail closed on purpose: silently
-   *   dropping an unknown one used to answer with the UNFILTERED set.
+   *   dropping an unknown one would answer with the UNFILTERED set.
    */
   async list(params: ListSongsParams = {}, options: RequestOptions = {}): Promise<Paginated<Song>> {
     return paginate(params, 100, (at) =>
@@ -831,10 +804,8 @@ export class MusicSongsNamespace extends Resource {
   }
 
   /**
-   * `GET /songs/:id` - one track.
-   *
-   * Renders the `:extended` view, which `SongBlueprint` leaves identical to the
-   * default one, so this returns exactly what a row of {@link list} carries.
+   * `GET /songs/:id` - one track. Returns exactly what a row of {@link list}
+   * carries.
    *
    * @throws {OmsApiError} 404 `"Resource not found"` - for an id that does not
    *   exist AND for one that belongs to somebody else, indistinguishably. The
@@ -848,18 +819,16 @@ export class MusicSongsNamespace extends Resource {
    * `PATCH /songs/:id` - edits metadata, and optionally replaces the artwork.
    *
    * JSON normally; multipart as soon as {@link UpdateSongInput.artwork} is
-   * present, because that is the only way to carry a file. Both encodings reach
-   * the same code path server-side, and this method papers over the two places
-   * where they would otherwise behave differently:
+   * present, because that is the only way to carry a file. Both encodings
+   * behave the same server-side, and this method papers over the two places
+   * where they would otherwise differ:
    *
-   * - **clearing a column in multipart.** Every form field is a string, so
-   *   there is no `null` to send. The backend's `\b` sentinel is decoded for
-   *   update params exactly as it is for filters, so `album: null` is written
-   *   as that one character and clears the column. (The Expo app's own comment
-   *   claims multipart cannot express this and splits the request in two; it
-   *   can, and it does not need to.)
+   * - **clearing a field in multipart.** Every form field is a string, so
+   *   there is no `null` to send. The server's `\b` null sentinel is decoded
+   *   for update fields exactly as it is for filters, so `album: null` is
+   *   written as that one character and clears the field.
    * - **an empty `featuredArtistNames`.** Appending an empty array appends
-   *   nothing, and an absent key is what puts the backend back into its
+   *   nothing, and an absent key is what puts the server back into its
    *   title-parsing legacy mode - the opposite of what "no featured artists"
    *   means. This sends the single empty string the server reads as an explicit
    *   empty list.
@@ -868,8 +837,7 @@ export class MusicSongsNamespace extends Resource {
    * credits you did not touch. Send `featuredArtistNames` whenever you care
    * about them.
    *
-   * @throws {OmsAuthError} 401 when the song is not yours - `update` checks
-   *   `updatable_by?` and answers 401, not 403 or 404.
+   * @throws {OmsAuthError} 401 when the song is not yours - not 403 or 404.
    * @throws {OmsApiError} 400 `"Music storage quota exceeded"` when the artwork
    *   would not fit in the music quota.
    */
@@ -911,20 +879,20 @@ export class MusicSongsNamespace extends Resource {
    *
    * Answers **200**, not 201, with the created song. Do not branch on the code.
    *
-   * Two size limits and they are not the same one. Rails rejects anything over
-   * {@link SONG_IMPORT_MAX_BYTES} (1 GiB) with a 400 - but production sits
-   * behind Cloudflare, which refuses a request body over roughly 100 MB with
-   * its own `413` before Rails ever sees it. A big FLAC therefore fails with an
-   * HTML-ish 413 that says nothing about songs. There is no chunked import
-   * route; that ceiling is real.
+   * Two size limits and they are not the same one. The API rejects anything
+   * over {@link SONG_IMPORT_MAX_BYTES} (1 GiB) with a 400 - but the CDN in
+   * front of it refuses a request body over roughly 100 MB with its own `413`
+   * before the API ever sees it. A big FLAC therefore fails with an HTML-ish
+   * 413 that says nothing about songs. There is no chunked import route; that
+   * ceiling is real.
    *
    * On React Native pass the picker's `{ uri, name, type }` object directly -
    * it is appended verbatim and streamed off disk by the native layer.
    *
    * @throws {OmsApiError} 400 for a missing file, a file over 1 GiB, an
    *   extension outside {@link SONG_IMPORT_EXTENSIONS}, or
-   *   `"Music storage quota exceeded"`; 415 with the model's validation
-   *   messages when the audio itself will not import.
+   *   `"Music storage quota exceeded"`; 415 with validation messages when the
+   *   audio itself will not import.
    */
   async import(file: FileInput | NativeFile, options: RequestOptions = {}): Promise<Song> {
     return this.http.postForm<Song>("/songs/import", { file }, { timeoutMs: 300_000, ...options });
@@ -936,10 +904,9 @@ export class MusicSongsNamespace extends Resource {
    * Takes the same filters as {@link list}, and is the endpoint every album
    * grid is built on. It is also the most expensive read in this namespace, for
    * a reason worth understanding: the forced pagination that protects
-   * `GET /songs` is applied to the `index` action ONLY, so this action loads
-   * the whole filtered library, eager-loads the credits and deduplicates in
-   * Ruby by `[album, primary artist]`. On a five-thousand-track library that is
-   * a full table scan per call.
+   * `GET /songs` does not apply here, so this route loads the whole filtered
+   * library and deduplicates by `[album, primary artist]`. On a
+   * five-thousand-track library that is a full scan per call.
    *
    * Paging it does not fix that and is usually a mistake:
    * {@link ListSongAlbumsParams.page} pages the SONGS that get scanned, and the
@@ -970,8 +937,8 @@ export class MusicSongsNamespace extends Resource {
    *
    * A flat array of strings, ordered by name, and that is the whole payload.
    *
-   * It IGNORES every filter you could send it: the action never touches the
-   * listing scope, it plucks names straight off the artists table. This method
+   * It IGNORES every filter you could send it: it reads names straight off the
+   * roster. This method
    * therefore takes no parameters at all rather than accepting some that would
    * do nothing. It also does not go through `/artists`, so despite the shared
    * subject it does NOT spend the 60/min external-proxy budget.
@@ -990,9 +957,8 @@ export class MusicSongsNamespace extends Resource {
    * artist you already have.
    *
    * Lookup only: an artist absent from your roster returns `[]` and no stub row
-   * is created, which is deliberate - the old frontend used to send slugs and
-   * joined display strings ("100 gecs, Lil West, Tony Velour") here and
-   * polluted the artist table with them.
+   * is created, which is deliberate - a slug or a joined display string
+   * ("100 gecs, Lil West, Tony Velour") must not mint stub artists.
    *
    * The array holds zero or one entry. Zero means either "not your artist" or
    * "Deezer has never given us a picture for them", and the two are not
@@ -1021,8 +987,8 @@ export class MusicSongsNamespace extends Resource {
    *
    * The odd one out in this namespace: it writes nothing to the library, reads
    * nothing from it, and answers with BINARY rather than JSON. The file is
-   * remuxed with ffmpeg (`-c:a copy`, so the audio is never re-encoded) with the
-   * new tags and, when given one, an embedded cover.
+   * remuxed with the new tags (the audio is never re-encoded) and, when given
+   * one, an embedded cover.
    *
    * The result is buffered fully into memory in every runtime. That is
    * unavoidable - there is no URL to hand a downloader - but it means a 50 MiB
@@ -1030,17 +996,16 @@ export class MusicSongsNamespace extends Resource {
    * the server suggested in `Content-Disposition`.
    *
    * At least one tag must be present, and this method enforces that locally
-   * because the server does not fail gracefully: an empty `metadata` hash
-   * raises inside the service, escapes as a 500, and pages a human on Discord.
-   * A missing audio file does the same. Both are avoided here.
+   * because the server does not fail gracefully: an empty `metadata` bag is a
+   * 500, and so is a missing audio file. Both are avoided here.
    *
-   * The web frontend also sends `metadata[track_number]`; the backend's permit
-   * list drops it in silence, so it is not offered here.
+   * `metadata[track_number]` is dropped in silence server-side, so it is not
+   * offered here.
    *
    * @throws {TypeError} when `metadata` carries no usable tag.
    * @throws {OmsApiError} 413 `"File too big"` above
    *   {@link SONG_METADATA_MAX_BYTES}, checked before the body is read. Note
-   *   that Cloudflare's own ~100 MB body limit sits above it and never fires
+   *   that the CDN's own ~100 MB body limit sits above it and never fires
    *   first.
    */
   async modifyMetadata(input: ModifySongMetadataInput, options: RequestOptions = {}): Promise<FileOutput> {
@@ -1079,18 +1044,14 @@ export class MusicSongsNamespace extends Resource {
    * enqueued. So there is no need to guard the call site - but also no way to
    * force a re-run without deleting the stems first.
    *
-   * **Rate limit:** 20 requests per minute, from the `expensive_tools` bucket
-   * SHARED with `POST /vocal_separations`, the upscaler, transcriptions,
-   * caption jobs, jumpstyle and the yt-dlp previews. It is there because each
-   * call schedules minutes of CPU and several gigabytes of RAM on the native
-   * sidecar; a load generator that walked a library firing one separation per
-   * song pushed the machine into swap, which is exactly what this budget now
-   * prevents. Do not batch a library through it.
+   * **Rate limit:** 20 requests per minute, from a bucket SHARED with
+   * `POST /vocal_separations`, the upscaler, transcriptions, caption jobs,
+   * jumpstyle and the downloader previews. Each call schedules minutes of CPU
+   * and gigabytes of RAM. Do not batch a library through it.
    *
    * The run itself is asynchronous. Poll {@link separation} roughly every three
    * seconds; the returned row's `status` moves `pending` to `processing` to
-   * `complete` or `failed`, and there is no `canceled` no matter what the web
-   * frontend's own type says.
+   * `complete` or `failed`, and there is no `canceled`.
    *
    * @throws {OmsQuotaError} 429 when the shared expensive-tools budget is spent.
    * @throws {OmsAuthError} 401 when the song is not yours.
@@ -1119,16 +1080,15 @@ export class MusicSongsNamespace extends Resource {
    * `complete` a moment before the stems are attached, and a song can have
    * stems from a run that was swept long ago.
    *
-   * Reading this has a SIDE EFFECT, and it is a useful one:
-   * `ClearStaleSeparationFlag` runs first and clears
-   * {@link Song.vocal_separation_started_at} when the flag outlived its job (a
-   * worker that died mid-run leaves it set forever). A UI that decides "a
+   * Reading this has a SIDE EFFECT, and it is a useful one: the server first
+   * clears {@link Song.vocal_separation_started_at} when the flag outlived its
+   * run (a run that died midway leaves it set forever). A UI that decides "a
    * separation is in flight" from the song record alone can therefore be stuck
    * on a spinner that only this call will clear.
    *
    * Poll at about three seconds. Nothing on this route is throttled beyond the
-   * general ceiling, but `progress_percent` is fetched live from the sidecar on
-   * every call while the run is processing, so a tighter loop costs real work.
+   * general ceiling, but `progress_percent` is fetched live on every call
+   * while the run is processing, so a tighter loop costs real work.
    *
    * @throws {OmsApiError} 404 for a song that is not yours.
    */
@@ -1163,11 +1123,10 @@ export class MusicSongsNamespace extends Resource {
    * End of list is a short page, as everywhere in this API. There is no count.
    *
    * Each row carries a whole {@link Song} with its credits, so 500 likes is a
-   * large response; the server preloads to avoid the N+1, but the bytes are
-   * still bytes. 100 is the size the clients actually use.
+   * large response. 100 is a sensible size.
    *
-   * @throws {OmsApiError} 400 `"Invalid before timestamp"` for a cursor
-   *   `Time.zone.parse` cannot read. Pass a `Date` and this cannot happen.
+   * @throws {OmsApiError} 400 `"Invalid before timestamp"` for a cursor the
+   *   server cannot parse. Pass a `Date` and this cannot happen.
    */
   async listLiked(params: ListLikedSongsParams = {}, options: RequestOptions = {}): Promise<LikedSong[]> {
     const before = params.before instanceof Date ? params.before.toISOString() : params.before;
@@ -1184,8 +1143,8 @@ export class MusicSongsNamespace extends Resource {
   /**
    * `GET /liked_songs/ids` - just the song ids, as integers.
    *
-   * The cheap way to render heart icons over a listing. It plucks a single
-   * column with no pagination and no cap, so it returns EVERY like in one
+   * The cheap way to render heart icons over a listing. It is a single flat
+   * list with no pagination and no cap, so it returns EVERY like in one
    * array - which is the point, and also means it grows without bound. At a few
    * thousand likes it is still a handful of kilobytes.
    *
@@ -1200,8 +1159,8 @@ export class MusicSongsNamespace extends Resource {
   /**
    * `POST /liked_songs` - likes a track. Answers `201` with the new row.
    *
-   * Genuinely idempotent: the controller is a `find_or_create_by!`, so liking
-   * twice returns the same row rather than erroring or creating a duplicate.
+   * Genuinely idempotent: liking twice returns the same row rather than
+   * erroring or creating a duplicate.
    * That is why this is one of the few `POST`s in the SDK that opts INTO the
    * retry policy - a replay after a lost answer cannot produce a second like,
    * and the alternative is a heart that silently did nothing.
@@ -1271,17 +1230,16 @@ export class MusicSongsNamespace extends Resource {
    * view. Cached per song, target and lyrics digest, which means the second
    * request for a translation is free and a lyrics refetch invalidates it.
    *
-   * **Retries are disabled and this one really matters.** The hourly cap is
-   * enforced by an `increment`-then-compare counter, so a rejected call STILL
-   * INCREMENTS it: a client that retries a 429 three times has pushed itself
-   * three further past the cap without ever getting an answer. The 429 also
+   * **Retries are disabled and this one really matters.** The hourly cap
+   * counts a rejected call too: a client that retries a 429 three times has
+   * pushed itself three further past the cap without ever getting an answer. The 429 also
    * carries no `Retry-After`, so the transport would back off by its own
    * schedule - a few hundred milliseconds - into a limit measured in hours.
    * Wait out the window instead. Pass `retry` explicitly if you disagree.
    *
-   * **Two limits at once:** 60 fresh translations per user per HOUR (429,
-   * app-level), on top of the shared 60/min external-proxy bucket that every
-   * `/lyrics*` call draws on.
+   * **Two limits at once:** 60 fresh translations per user per HOUR (429), on
+   * top of the shared 60/min external-proxy bucket that every `/lyrics*` call
+   * draws on.
    *
    * @throws {OmsQuotaError} 429 from either budget.
    * @throws {OmsApiError} 400 `"Unsupported target"` for a locale outside
@@ -1308,8 +1266,8 @@ export class MusicSongsNamespace extends Resource {
    * `POST /lyrics/sync` - generates LRC timestamps for plain-text lyrics.
    *
    * Answers `201 { job_id }` and does the work in the background: it separates
-   * the vocals if there are no stems, transcribes them on the Whisper sidecar
-   * and aligns the known lines against the segments. Minutes of machine time
+   * the vocals if there are no stems, transcribes them and aligns the known
+   * lines against the segments. Minutes of machine time
    * per call, which is what the 10-per-hour cap is protecting.
    *
    * Wait for it either way: `oms.jobs.wait({ id: job_id })`, or simply re-read
@@ -1338,8 +1296,7 @@ export class MusicSongsNamespace extends Resource {
    * exceeded"`, not `429`.** Every handler that routes by status code reads
    * that as a malformed query and does the worst possible thing - rewords it
    * and tries again, spending more of a budget that is already gone. The limit
-   * is 30 requests per minute per user, counted in the controller rather than
-   * in rack-attack, which is why it never reaches the 429 path.
+   * is 30 requests per minute per user.
    * {@link isMusicExternalSearchRateLimited} is the check to use, and the
    * transport will not retry a 400 on its own, so nothing recovers silently.
    *
@@ -1357,7 +1314,7 @@ export class MusicSongsNamespace extends Resource {
    * A blank query short-circuits to three empty lists WITHOUT spending budget,
    * which makes it safe to wire straight to an input. A cached hit does spend
    * it: the rate check runs before the 15-minute cache is consulted. Debounce
-   * and require two characters, as the clients do.
+   * and require two characters.
    *
    * Every failing upstream is swallowed server-side, so a partial answer and a
    * complete one are indistinguishable - an empty `tracks` may mean "no
@@ -1387,13 +1344,10 @@ export class MusicSongsNamespace extends Resource {
    * **It never 404s.** An artist outside your roster comes back as `200` with
    * every field `null` except `name`, echoed back verbatim, and
    * `similar: []`. There is no error to catch and no flag to read: check
-   * whether `id` is null. That branch also creates nothing - the shim used to
-   * be handed slugs and joined display strings and would mint stub artists from
-   * them.
+   * whether `id` is null. That branch also creates nothing.
    *
    * The payload has no `created_at` / `updated_at`, unlike essentially every
-   * other record in this API: `ArtistMetadataBlueprint` inherits
-   * `Blueprinter::Base` directly to pin the exact legacy key set.
+   * other record in this API.
    *
    * Reading a stale artist triggers a lazy background refresh from Last.fm and
    * MusicBrainz, so the first call after a while may be slower and the second
@@ -1418,7 +1372,7 @@ export class MusicSongsNamespace extends Resource {
    * Builds the query for `/songs` and `/songs/albums`.
    *
    * `artist_role` is deliberately TOP LEVEL and not inside `exact_search`: the
-   * controller reads it off bare `params`, and nesting it would both miss the
+   * server reads it as a plain parameter, and nesting it would both miss the
    * filter and trip the unknown-key check.
    */
   private songQuery(params: ListSongsParams | ListSongAlbumsParams, at: PageAt | undefined): QueryParams {
@@ -1439,8 +1393,8 @@ export class MusicSongsNamespace extends Resource {
     if (input.position !== undefined) body["position"] = input.position;
     if (input.artist !== undefined) body["artist"] = input.artist;
     if (input.artistNames !== undefined) body["artist_names"] = input.artistNames;
-    // An empty array is `blank?` server-side, which is exactly how "explicit
-    // mode, no featured artists" is spelled: `params.key?` still sees the key.
+    // An empty array with the key present is how "explicit mode, no featured
+    // artists" is spelled.
     if (input.featuredArtistNames !== undefined) body["featured_artist_names"] = input.featuredArtistNames;
     return body;
   }
@@ -1448,9 +1402,9 @@ export class MusicSongsNamespace extends Resource {
   /**
    * Multipart fields for an update, with the two encoding differences fixed.
    *
-   * `null` becomes the `\b` sentinel, which `CrudActions` decodes back to `nil`
-   * for update params exactly as it does for filters - a form field has no
-   * other way to say "clear this column". An empty `featured_artist_names`
+   * `null` becomes the `\b` sentinel, which the server decodes back to null
+   * for update fields exactly as it does for filters - a form field has no
+   * other way to say "clear this field". An empty `featured_artist_names`
    * becomes a single empty string, because appending an empty array appends
    * nothing and an absent key means the opposite thing.
    */
