@@ -47,14 +47,7 @@
  *    per IP, after a bot pushed roughly 200 notification emails through it in
  *    one burst, plus a three-minute de-duplication window inside the
  *    controller. See {@link FeedbacksNamespace.create}.
- * 9. **"Intel" is two unrelated things sharing a prefix.** `GET /intel/*path`
- *    is a generic forwarder to a sidecar whose routes are not in the backend
- *    repository, so it stays untyped on purpose ({@link IntelProxyNamespace}).
- *    The `/intel_articles`, `/intel_reports`, `/intel_sources`,
- *    `/intel_scripts`, `/intel_items`, `/intel_config` and `/intel_stats`
- *    routes are ordinary Rails controllers with blueprints, and they are fully
- *    typed ({@link IntelNamespace}). Reach for the second set.
- * 10. **Two blog routes are private by accident.** `allow_unauthenticated_access`
+ * 9. **Two blog routes are private by accident.** `allow_unauthenticated_access`
  *    lists `index` and `show` on both blog controllers and nothing else, so the
  *    public PERMALINK (`GET /blogs/:blog/posts/:slug`) rejects anonymous
  *    readers while `GET /blog_posts/:id` serves them the same post, and the
@@ -84,63 +77,39 @@
  * rather than a throttle. See {@link ServicesStatusNamespace.uptime}.
  */
 
-import { ApiClient, Resource, pageModifier } from "../http";
-import type {
-  FileOutput,
-  Id,
-  Json,
-  PageParams,
-  Paginated,
-  QueryParams,
-  QueryValue,
-  RequestOptions,
-  Timestamp,
-} from "../types";
-import { createPage } from "../types";
+import { ApiClient, Resource } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
+import type { FileOutput, Id, Json, Paginated, QueryParams, RequestOptions, Timestamp } from "../types";
 import type { FsNode } from "./storage";
 
 // ---------------------------------------------------------------------------
 // Shared vocabulary
 // ---------------------------------------------------------------------------
 
-/**
- * Filters accepted by the four listings in this file that really are the list
- * DSL. Mirrors the shape the other namespaces use.
- *
- * `search` is a partial, accent-insensitive match; `exact_search` is equality,
- * with an array meaning `IN` and `null` meaning `IS NULL`. Both fail CLOSED:
- * a key the controller did not declare is `400 "Unknown search filter: x"`,
- * never a silently wider result. The declared keys differ per endpoint and are
- * documented on each `list()`; they are much narrower here than you would
- * guess, because most of these controllers declare no `search_params` at all
- * and inherit only `id`, `created_at` and `updated_at`.
- */
-export interface ContentListParams extends PageParams {
-  /** Partial, accent-insensitive match. Only the columns the endpoint declares. */
-  readonly search?: Record<string, QueryValue>;
-  /** Exact match. Array means `IN`, `null` means `IS NULL`. */
-  readonly exactSearch?: Record<string, QueryValue>;
-  /**
-   * Ask for rows in random order. Mutually useful with a small `pageSize`.
-   *
-   * Two side effects worth knowing: `QueryModifier` applies `RANDOM()` with
-   * `reorder`, so it REPLACES any `order` the controller set for itself, and
-   * `CrudActions#resources_stale?` short-circuits for a random listing, so the
-   * response carries no `ETag` and can never answer `304`.
-   */
-  readonly random?: boolean;
-}
+/** Filter columns of `GET /notifications`, on top of {@link BASE_FILTER_COLUMNS}. `read` and `kind` are not filterable. */
+export const NOTIFICATION_FILTER_COLUMNS = Object.freeze(["user_id"] as const);
 
-/** Builds the `modifiers`/`search`/`exact_search` query bag from {@link ContentListParams}. */
-function listQuery(params: ContentListParams, page: number, pageSize: number): QueryParams {
-  const modifiers: Record<string, QueryValue> = { page: pageModifier(page, pageSize) };
-  if (params.order !== undefined) modifiers.order = params.order;
-  if (params.random === true) modifiers.random = true;
-  const query: QueryParams = { modifiers };
-  if (params.search !== undefined) query.search = params.search;
-  if (params.exactSearch !== undefined) query.exact_search = params.exactSearch;
-  return query;
-}
+/** Filters for {@link NotificationsNamespace.list}. */
+export type ListNotificationsParams = ListParams<(typeof NOTIFICATION_FILTER_COLUMNS)[number]>;
+
+/** Filter columns of `GET /feedbacks`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const FEEDBACK_FILTER_COLUMNS = Object.freeze(["status", "user_id"] as const);
+
+/** Filters for {@link FeedbacksNamespace.list}. */
+export type ListFeedbacksParams = ListParams<(typeof FEEDBACK_FILTER_COLUMNS)[number]>;
+
+/** `GET /jokes` filters on {@link BASE_FILTER_COLUMNS} only. */
+export const JOKE_FILTER_COLUMNS = Object.freeze([] as const);
+
+/** Filters for {@link JokesNamespace.list}. */
+export type ListJokesParams = ListParams<(typeof JOKE_FILTER_COLUMNS)[number]>;
+
+/** `GET /space_invaders_games` filters on {@link BASE_FILTER_COLUMNS} only; there is no player filter. */
+export const SPACE_INVADERS_GAME_FILTER_COLUMNS = Object.freeze([] as const);
+
+/** Filters for {@link SpaceInvadersNamespace.list}. */
+export type ListSpaceInvadersGamesParams = ListParams<(typeof SPACE_INVADERS_GAME_FILTER_COLUMNS)[number]>;
 
 // ---------------------------------------------------------------------------
 // Blogs
@@ -803,16 +772,10 @@ export class NotificationsNamespace extends Resource {
    * Sends an `ETag`, so an unchanged page answers `304` and costs nothing -
    * except with `random: true`, which disables the check.
    */
-  async list(params: ContentListParams = {}, options: RequestOptions = {}): Promise<Paginated<Notification>> {
-    const load = async (p: { page: number; pageSize: number }): Promise<Notification[]> =>
-      this.http.get<Notification[]>("/notifications", {
-        ...options,
-        query: listQuery(params, p.page, p.pageSize),
-      });
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const items = await load({ page, pageSize });
-    return createPage(items, page, pageSize, load);
+  async list(params: ListNotificationsParams = {}, options: RequestOptions = {}): Promise<Paginated<Notification>> {
+    return paginate(params, 100, (at) =>
+      this.http.get<Notification[]>("/notifications", { ...options, query: listQuery(params, at) }),
+    );
   }
 
   /**
@@ -1093,19 +1056,13 @@ export class FeedbacksNamespace extends Resource {
    * `created_at`, `updated_at`). Any other key is `400`.
    *
    * The scope is ordered `created_at DESC` before the DSL runs, and
-   * `modifiers[order]` uses `reorder`, so passing {@link ContentListParams.order}
+   * `modifiers[order]` uses `reorder`, so passing {@link ListParams.order}
    * REPLACES that default rather than refining it.
    */
-  async list(params: ContentListParams = {}, options: RequestOptions = {}): Promise<Paginated<Feedback>> {
-    const load = async (p: { page: number; pageSize: number }): Promise<Feedback[]> =>
-      this.http.get<Feedback[]>("/feedbacks", {
-        ...options,
-        query: listQuery(params, p.page, p.pageSize),
-      });
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const items = await load({ page, pageSize });
-    return createPage(items, page, pageSize, load);
+  async list(params: ListFeedbacksParams = {}, options: RequestOptions = {}): Promise<Paginated<Feedback>> {
+    return paginate(params, 100, (at) =>
+      this.http.get<Feedback[]>("/feedbacks", { ...options, query: listQuery(params, at) }),
+    );
   }
 
   /**
@@ -1237,13 +1194,10 @@ export class JokesNamespace extends Resource {
    * ordering (`"lang:asc:pt,en"` puts those languages first), which the rest
    * of the SDK does not advertise because almost nothing needs it.
    */
-  async list(params: ContentListParams = {}, options: RequestOptions = {}): Promise<Paginated<Joke>> {
-    const load = async (p: { page: number; pageSize: number }): Promise<Joke[]> =>
-      this.http.get<Joke[]>("/jokes", { ...options, query: listQuery(params, p.page, p.pageSize) });
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const items = await load({ page, pageSize });
-    return createPage(items, page, pageSize, load);
+  async list(params: ListJokesParams = {}, options: RequestOptions = {}): Promise<Paginated<Joke>> {
+    return paginate(params, 100, (at) =>
+      this.http.get<Joke[]>("/jokes", { ...options, query: listQuery(params, at) }),
+    );
   }
 
   /**
@@ -1859,16 +1813,10 @@ export class SpaceInvadersNamespace extends Resource {
    *
    * No default ordering, so pass one. Sends an `ETag`.
    */
-  async list(params: ContentListParams = {}, options: RequestOptions = {}): Promise<Paginated<SpaceInvadersGame>> {
-    const load = async (p: { page: number; pageSize: number }): Promise<SpaceInvadersGame[]> =>
-      this.http.get<SpaceInvadersGame[]>("/space_invaders_games", {
-        ...options,
-        query: listQuery(params, p.page, p.pageSize),
-      });
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const items = await load({ page, pageSize });
-    return createPage(items, page, pageSize, load);
+  async list(params: ListSpaceInvadersGamesParams = {}, options: RequestOptions = {}): Promise<Paginated<SpaceInvadersGame>> {
+    return paginate(params, 100, (at) =>
+      this.http.get<SpaceInvadersGame[]>("/space_invaders_games", { ...options, query: listQuery(params, at) }),
+    );
   }
 
   /**
@@ -1914,192 +1862,10 @@ export class SpaceInvadersNamespace extends Resource {
 }
 
 // ---------------------------------------------------------------------------
-// Intel proxy
+// Intel
 // ---------------------------------------------------------------------------
 
 /**
- * The two path prefixes the proxy will forward. Mirrors
- * `IntelController::ALLOWED_PREFIXES`.
- *
- * `api` is the sidecar's JSON surface; `img` is its image surface. Anything
- * else - and any path containing `..` - is `400 "Invalid intel path."` before
- * a byte leaves the backend.
- */
-export const INTEL_ALLOWED_PREFIXES = ["api", "img"] as const;
-
-/** Connect timeout the backend applies to the sidecar, in milliseconds. */
-export const INTEL_UPSTREAM_OPEN_TIMEOUT_MS = 5_000;
-
-/** Read timeout the backend applies to the sidecar, in milliseconds. */
-export const INTEL_UPSTREAM_READ_TIMEOUT_MS = 60_000;
-
-/**
- * The `intel` proxy: a read-only passthrough to an internal service.
- *
- * ## Why this namespace has no types
- *
- * `GET /intel/*path` is not an API. It is a generic forwarder:
- * `IntelController#proxy` checks who is asking, refuses anything outside
- * {@link INTEL_ALLOWED_PREFIXES}, joins the rest of the path onto the
- * sidecar's base URL, replays the query string VERBATIM, injects an
- * `X-API-Key` that never reaches the browser, and hands back whatever comes
- * out - the upstream body, the upstream `Content-Type`, the upstream
- * `Cache-Control` and the upstream STATUS CODE, unexamined.
- *
- * The SDK cannot see that service, its routes are not in this repository, and
- * nothing in the backend validates or reshapes its answers. Publishing typed
- * `getStories()` / `getReport()` methods here would be inventing a contract
- * nobody can hold up, and it would rot the first time the sidecar changed. So
- * this namespace offers exactly what the endpoint offers: a path, a query bag,
- * and a caller-supplied result type it is the CALLER's job to justify.
- *
- * If you want typed intel data, use the native Rails endpoints instead -
- * they are real controllers with real blueprints, the web frontend moved onto
- * them and left this proxy behind, and they ARE wrapped, one family per
- * sub-namespace under {@link IntelNamespace}. This class is only for the
- * embedded hub the old page still renders and for its image bytes.
- *
- * ## Access
- *
- * Effectively a single-user endpoint. `Intel::Access.allowed?` is an admin
- * check OR a hard-coded handle allowlist, so every other authenticated caller
- * gets `403 "Intel access is restricted."` and an anonymous one gets the
- * ordinary `401` first. Do not build a shared feature on this.
- *
- * ## Errors are not the API's errors
- *
- * The upstream status is forwarded as-is, so a 4xx or 5xx here carries the
- * SIDECAR's body - which may be JSON, may be HTML, may be empty, and is
- * certainly not this API's usual bare JSON string. Read
- * {@link OmsApiError.body} defensively.
- *
- * When the sidecar cannot be reached at all - refused connection, DNS
- * failure, or a timeout past
- * {@link INTEL_UPSTREAM_OPEN_TIMEOUT_MS} / {@link INTEL_UPSTREAM_READ_TIMEOUT_MS} -
- * the backend answers `502 "Intel service unreachable."`, which is a normal
- * bare-string error.
- *
- * Only `GET` is routed. There is no way to write anything through this proxy.
- *
- * @deprecated Intel now lives ENTIRELY inside Rails. The analysis pipeline
- *   moved into Ruby and Solid Queue, and sources became per-user records with
- *   sandboxed TS scripts, so the `omelhorsite-intel-analise` sidecar this
- *   forwards to is on its way out. The route still answers today, which is why
- *   this class is still here rather than deleted, but nothing new should be
- *   built on it: when the sidecar goes, every call through here becomes a
- *   `502 "Intel service unreachable."` with no deprecation window, because the
- *   backend cannot tell a retired sidecar from a broken one.
- *
- *   Use the typed families under {@link IntelNamespace} instead: `articles`,
- *   `reports`, `sources`, `scripts`, `items`, `config` and `stats` are real
- *   controllers with real blueprints over the API's own tables.
- */
-export class IntelProxyNamespace extends Resource {
-  /**
-   * `GET /intel/<path>` - forwards a read and parses the answer as JSON.
-   *
-   * The type parameter is a PROMISE YOU are making, not one the SDK or the
-   * backend can check. Default it to `unknown` and narrow at the call site
-   * unless you own the sidecar's route.
-   *
-   * `path` is relative and must start with `api/` or `img/`
-   * (see {@link INTEL_ALLOWED_PREFIXES}). A leading slash is stripped, and
-   * each segment is percent-encoded while the separators are kept, so
-   * `"api/articles/abc def"` reaches the sidecar as `api/articles/abc%20def`.
-   * Pass an unencoded path; passing a pre-encoded one double-encodes it.
-   *
-   * `query` is encoded by the SDK's normal rules and then replayed to the
-   * sidecar untouched, `null` sentinel and all - which is worth knowing,
-   * because the sentinel is a Rails convention the sidecar has never heard of.
-   * Prefer plain values here.
-   *
-   * The route is declared `format: false`, so a trailing `.json` stays part of
-   * the path instead of being read as a Rails format.
-   *
-   * If the answer is not JSON it comes back as the raw text (the transport
-   * falls back to a string rather than throwing), so a `T` of `unknown`
-   * genuinely can be a `string`.
-   *
-   * Cost: the backend buffers the entire upstream body in memory before
-   * sending it on - there is no streaming - and holds a Puma thread for up to
-   * {@link INTEL_UPSTREAM_READ_TIMEOUT_MS} while it waits.
-   *
-   * @throws {OmsApiError} 400 `"Invalid intel path."` for a path outside the
-   *   allowed prefixes or containing `..`; 403 `"Intel access is restricted."`;
-   *   502 `"Intel service unreachable."`; or anything at all, forwarded from
-   *   the sidecar.
-   */
-  async get<T = unknown>(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<T> {
-    return this.http.get<T>(intelPath(path), { ...options, ...(query === undefined ? {} : { query }) });
-  }
-
-  /**
-   * `GET /intel/<path>` - forwards a read and keeps the bytes.
-   *
-   * For the `img/` prefix, and for any `api/` route that answers with
-   * something other than JSON. Buffers the whole body, so do not point it at
-   * anything large.
-   *
-   * {@link FileOutput.filename} will be `undefined`: the backend sends
-   * `Content-Disposition: inline` with no filename. `contentType` is whatever
-   * the sidecar declared.
-   */
-  async fetch(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<FileOutput> {
-    return this.http.download(intelPath(path), { ...options, ...(query === undefined ? {} : { query }) });
-  }
-
-  /**
-   * The absolute URL of a proxied path, for an `<img src>` or an `<a href>`.
-   *
-   * Builds the string and makes no request. Useful only for a cookie-session
-   * browser client on the API's origin: the proxy requires an authenticated,
-   * allowlisted caller, so a bare URL opened without a credential is a `401`.
-   */
-  url(path: string, query?: QueryParams): string {
-    return this.http.url(intelPath(path), query);
-  }
-}
-
-/**
- * Turns a caller's relative intel path into a request path.
- *
- * Strips leading slashes, then percent-encodes each segment while keeping the
- * separators, so slashes survive and spaces and accents do not. Deliberately
- * does NOT reject a path outside {@link INTEL_ALLOWED_PREFIXES}: that rule
- * lives in the controller, the SDK does not know when it will be widened, and
- * a 400 from the server naming the real rule is more useful than a local guess
- * that could be out of date. `..` is left alone for the same reason - it is
- * escaped nowhere and rejected server-side.
- */
-function intelPath(path: string): string {
-  const segments = path.replace(/^\/+/, "").split("/");
-  return `/intel/${segments.map((segment) => encodeURIComponent(segment)).join("/")}`;
-}
-
-// ---------------------------------------------------------------------------
-// Intel: the native Rails endpoints
-// ---------------------------------------------------------------------------
-
-/**
- * ## Why these ARE typed, when the proxy above is not
- *
- * The two halves of "intel" look alike and are nothing alike.
- * {@link IntelProxyNamespace} forwards `GET /intel/*path` to a service whose
- * routes are not in the backend repository, so its answers are genuinely
- * unknowable. Everything below is the opposite: seven ordinary Rails
- * controllers over eight of the backend's own tables, each with a Blueprinter
- * blueprint that names every key it emits. `IntelArticleBlueprint`,
- * `IntelReportBlueprint`, `IntelSourceBlueprint`, `IntelScriptBlueprint`,
- * `IntelItemBlueprint` and `IntelConfigBlueprint` are the contract, and
- * `IntelStatsController#show` hand-writes its hash literally. Nothing here is
- * forwarded, nothing here is opaque, and the SDK types it the way it types any
- * other resource.
- *
- * Where the two meet: the sidecar behind the proxy is the OLD, separate intel
- * product embedded in the web app's `/intel` page. The routes below are the one
- * that replaced it. Reach for these first; the proxy is for the embedded hub
- * and for image bytes.
- *
  * ## Access: this is effectively a one-user feature
  *
  * `IntelAccess` runs `before_action :require_intel_access` on all seven
@@ -2614,8 +2380,11 @@ export interface IntelStats {
   readonly last24h: number;
 }
 
+/** Filter columns of `GET /intel_articles`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const INTEL_ARTICLE_FILTER_COLUMNS = Object.freeze(["title", "summary", "category", "importance", "enriched"] as const);
+
 /** Filters for {@link IntelArticlesNamespace.list}. */
-export interface ListIntelArticlesParams extends ContentListParams {
+export interface ListIntelArticlesParams extends ListParams<(typeof INTEL_ARTICLE_FILTER_COLUMNS)[number]> {
   /**
    * Free-text search over `title`, `summary` AND `details`.
    *
@@ -2624,7 +2393,7 @@ export interface ListIntelArticlesParams extends ContentListParams {
    * not in `search_params` at all) and why an unknown-filter 400 cannot
    * happen for it.
    *
-   * Three ways it differs from {@link ContentListParams.search}:
+   * Three ways it differs from {@link ListParams.search}:
    *
    * - it is **accent-SENSITIVE**. The controller does `LOWER(col) LIKE
    *   LOWER(term)`, with no unaccenting, while the list DSL's `search` strips
@@ -2660,21 +2429,27 @@ export interface ListIntelArticlesParams extends ContentListParams {
   readonly sort?: "recent" | "importance";
 }
 
+/** Filter columns of `GET /intel_reports`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const INTEL_REPORT_FILTER_COLUMNS = Object.freeze(["kind"] as const);
+
 /** Filters for {@link IntelReportsNamespace.list}. */
-export interface ListIntelReportsParams extends ContentListParams {
+export interface ListIntelReportsParams extends ListParams<(typeof INTEL_REPORT_FILTER_COLUMNS)[number]> {
   /**
    * Narrow to one window, e.g. `"day"`. Sent as `exact_search[kind]`, so it is
    * equality rather than a prefix match - `"6h"` will not also match `"6hx"`.
    *
-   * Passing it through {@link ContentListParams.search} instead would be a
+   * Passing it through {@link ListParams.search} instead would be a
    * partial match and would work too; `kind` is on this controller's
    * `search_params` allowlist. Equality is what you want.
    */
   readonly kind?: IntelReportKind;
 }
 
+/** Filter columns of `GET /intel_sources`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const INTEL_SOURCE_FILTER_COLUMNS = Object.freeze(["name", "health", "enabled", "intel_script_id"] as const);
+
 /** Filters for {@link IntelSourcesNamespace.list}. */
-export interface ListIntelSourcesParams extends ContentListParams {
+export interface ListIntelSourcesParams extends ListParams<(typeof INTEL_SOURCE_FILTER_COLUMNS)[number]> {
   /** Only healthy / only broken feeds. Sent as `exact_search[health]`. */
   readonly health?: IntelSourceHealth;
   /** Only enabled, or only the ones that switched themselves off. */
@@ -2683,8 +2458,11 @@ export interface ListIntelSourcesParams extends ContentListParams {
   readonly scriptId?: Id;
 }
 
+/** Filter columns of `GET /intel_scripts`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const INTEL_SCRIPT_FILTER_COLUMNS = Object.freeze(["name", "builtin", "slug"] as const);
+
 /** Filters for {@link IntelScriptsNamespace.list}. */
-export interface ListIntelScriptsParams extends ContentListParams {
+export interface ListIntelScriptsParams extends ListParams<(typeof INTEL_SCRIPT_FILTER_COLUMNS)[number]> {
   /**
    * `true` for the platform scripts, `false` for yours. Omit for both - the
    * listing scope is `builtin OR mine`, so both populations are mixed by
@@ -2693,8 +2471,11 @@ export interface ListIntelScriptsParams extends ContentListParams {
   readonly builtin?: boolean;
 }
 
+/** Filter columns of `GET /intel_items`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const INTEL_ITEM_FILTER_COLUMNS = Object.freeze(["intel_source_id", "external_id", "title", "content", "url"] as const);
+
 /** Filters for {@link IntelItemsNamespace.list}. */
-export interface ListIntelItemsParams extends ContentListParams {
+export interface ListIntelItemsParams extends ListParams<(typeof INTEL_ITEM_FILTER_COLUMNS)[number]> {
   /** Only items produced by one source. Sent as `exact_search[intel_source_id]`. */
   readonly sourceId?: Id;
 }
@@ -2833,18 +2614,14 @@ export class IntelArticlesNamespace extends Resource {
    *   account outside the allowlist; 400 for an unrecognised filter key.
    */
   async list(params: ListIntelArticlesParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelArticle>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 50;
+    const top: QueryParams = {};
+    if (params.q !== undefined) top["q"] = params.q;
+    if (params.minImportance !== undefined) top["min_importance"] = params.minImportance;
+    if (params.sort !== undefined) top["sort"] = params.sort;
 
-    const load = (at: { page: number; pageSize: number }): Promise<IntelArticle[]> => {
-      const query = listQuery(params, at.page, at.pageSize);
-      if (params.q !== undefined) query.q = params.q;
-      if (params.minImportance !== undefined) query.min_importance = params.minImportance;
-      if (params.sort !== undefined) query.sort = params.sort;
-      return this.http.get<IntelArticle[]>("/intel_articles", { ...options, query });
-    };
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    return paginate(params, 50, (at) =>
+      this.http.get<IntelArticle[]>("/intel_articles", { ...options, query: listQuery(params, at, { top }) }),
+    );
   }
 
   /**
@@ -2905,24 +2682,10 @@ export class IntelReportsNamespace extends Resource {
    *   allowlist.
    */
   async list(params: ListIntelReportsParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelReport>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 50;
-    const exactSearch = {
-      ...params.exactSearch,
-      ...(params.kind === undefined ? {} : { kind: params.kind }),
-    };
-
-    const load = (at: { page: number; pageSize: number }): Promise<IntelReport[]> =>
-      this.http.get<IntelReport[]>("/intel_reports", {
-        ...options,
-        query: listQuery(
-          { ...params, ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }) },
-          at.page,
-          at.pageSize,
-        ),
-      });
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = { exactSearch: { kind: params.kind } };
+    return paginate(params, 50, (at) =>
+      this.http.get<IntelReport[]>("/intel_reports", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -2970,33 +2733,13 @@ export class IntelSourcesNamespace extends Resource {
    * @throws {OmsApiError} 403 outside the allowlist.
    */
   async list(params: ListIntelSourcesParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelSource>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const exactSearch = {
-      ...params.exactSearch,
-      ...(params.health === undefined ? {} : { health: params.health }),
-      ...(params.enabled === undefined ? {} : { enabled: params.enabled }),
-      ...(params.scriptId === undefined ? {} : { intel_script_id: params.scriptId }),
+    const base = {
+      order: "created_at:desc",
+      exactSearch: { health: params.health, enabled: params.enabled, intel_script_id: params.scriptId },
     };
-
-    const load = (at: { page: number; pageSize: number }): Promise<IntelSource[]> =>
-      this.http.get<IntelSource[]>("/intel_sources", {
-        ...options,
-        query: listQuery(
-          {
-            ...params,
-            // Explicitly, not by spread order: an `order: undefined` present on
-            // the caller's object would otherwise overwrite the default with
-            // undefined and leave the listing unordered again.
-            order: params.order ?? "created_at:desc",
-            ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }),
-          },
-          at.page,
-          at.pageSize,
-        ),
-      });
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    return paginate(params, 100, (at) =>
+      this.http.get<IntelSource[]>("/intel_sources", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -3147,31 +2890,10 @@ export class IntelScriptsNamespace extends Resource {
    * @throws {OmsApiError} 403 outside the allowlist.
    */
   async list(params: ListIntelScriptsParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelScript>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const exactSearch = {
-      ...params.exactSearch,
-      ...(params.builtin === undefined ? {} : { builtin: params.builtin }),
-    };
-
-    const load = (at: { page: number; pageSize: number }): Promise<IntelScript[]> =>
-      this.http.get<IntelScript[]>("/intel_scripts", {
-        ...options,
-        query: listQuery(
-          {
-            ...params,
-            // Explicitly, not by spread order: an `order: undefined` present on
-            // the caller's object would otherwise overwrite the default with
-            // undefined and leave the listing unordered again.
-            order: params.order ?? "created_at:desc",
-            ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }),
-          },
-          at.page,
-          at.pageSize,
-        ),
-      });
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = { order: "created_at:desc", exactSearch: { builtin: params.builtin } };
+    return paginate(params, 100, (at) =>
+      this.http.get<IntelScript[]>("/intel_scripts", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -3301,31 +3023,10 @@ export class IntelItemsNamespace extends Resource {
    * The controller sets no ordering; the SDK sends `created_at:desc`.
    */
   async list(params: ListIntelItemsParams = {}, options: RequestOptions = {}): Promise<Paginated<IntelItem>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 25;
-    const exactSearch = {
-      ...params.exactSearch,
-      ...(params.sourceId === undefined ? {} : { intel_source_id: params.sourceId }),
-    };
-
-    const load = (at: { page: number; pageSize: number }): Promise<IntelItem[]> =>
-      this.http.get<IntelItem[]>("/intel_items", {
-        ...options,
-        query: listQuery(
-          {
-            ...params,
-            // Explicitly, not by spread order: an `order: undefined` present on
-            // the caller's object would otherwise overwrite the default with
-            // undefined and leave the listing unordered again.
-            order: params.order ?? "created_at:desc",
-            ...(Object.keys(exactSearch).length === 0 ? {} : { exactSearch }),
-          },
-          at.page,
-          at.pageSize,
-        ),
-      });
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = { order: "created_at:desc", exactSearch: { intel_source_id: params.sourceId } };
+    return paginate(params, 25, (at) =>
+      this.http.get<IntelItem[]>("/intel_items", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -3504,13 +3205,6 @@ export function intelArticleImageUrl(
 /**
  * The `intel` namespace, reachable as `oms.content.intel`.
  *
- * Seven typed families over the backend's own tables, plus {@link proxy} for
- * the untyped passthrough to the old sidecar. The three proxy methods are also
- * mirrored on this class so that code written against 0.3.0's
- * `oms.content.intel.get(path)` keeps working; new code should say
- * `oms.content.intel.proxy.get(path)`, which cannot be confused with
- * {@link IntelArticlesNamespace.get}.
- *
  * A tour of the data model, because the names do not give it away:
  *
  * 1. a {@link IntelScript} knows HOW to fetch one kind of feed;
@@ -3542,13 +3236,6 @@ export class IntelNamespace extends Resource {
   readonly config: IntelConfigNamespace;
   /** Dashboard counters, in one expensive call. */
   readonly stats: IntelStatsNamespace;
-  /**
-   * The untyped passthrough to the old intel sidecar.
-   *
-   * @deprecated See {@link IntelProxyNamespace}. Kept only because the route
-   *   still answers; the typed families above are the intel API now.
-   */
-  readonly proxy: IntelProxyNamespace;
 
   constructor(http: ApiClient) {
     super(http);
@@ -3559,40 +3246,6 @@ export class IntelNamespace extends Resource {
     this.items = new IntelItemsNamespace(http);
     this.config = new IntelConfigNamespace(http);
     this.stats = new IntelStatsNamespace(http);
-    this.proxy = new IntelProxyNamespace(http);
-  }
-
-  /**
-   * Alias for {@link IntelProxyNamespace.get}. Kept so 0.3.0 call sites still
-   * compile; prefer `oms.content.intel.proxy.get(path)`.
-   *
-   * @deprecated The intel sidecar is being retired: intel now lives entirely
-   *   inside Rails. See {@link IntelProxyNamespace}.
-   */
-  async get<T = unknown>(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<T> {
-    return this.proxy.get<T>(path, query, options);
-  }
-
-  /**
-   * Alias for {@link IntelProxyNamespace.fetch}. Kept so 0.3.0 call sites still
-   * compile; prefer `oms.content.intel.proxy.fetch(path)`.
-   *
-   * @deprecated The intel sidecar is being retired: intel now lives entirely
-   *   inside Rails. See {@link IntelProxyNamespace}.
-   */
-  async fetch(path: string, query?: QueryParams, options: RequestOptions = {}): Promise<FileOutput> {
-    return this.proxy.fetch(path, query, options);
-  }
-
-  /**
-   * Alias for {@link IntelProxyNamespace.url}. Kept so 0.3.0 call sites still
-   * compile; prefer `oms.content.intel.proxy.url(path)`.
-   *
-   * @deprecated The intel sidecar is being retired: intel now lives entirely
-   *   inside Rails. See {@link IntelProxyNamespace}.
-   */
-  url(path: string, query?: QueryParams): string {
-    return this.proxy.url(path, query);
   }
 }
 

@@ -35,7 +35,9 @@
  *    {@link MusicRadiosNamespace}.
  */
 
-import { Resource, pageModifier } from "../../http";
+import { Resource } from "../../http";
+import { listQuery, paginate } from "../../listing";
+import type { ListParams } from "../../listing";
 import type {
   FileInput,
   Id,
@@ -409,8 +411,11 @@ export interface TopArtistRow {
   readonly play_count: number;
 }
 
+/** Filter columns of `GET /playlists`. */
+export const PLAYLIST_FILTER_COLUMNS = Object.freeze(["id", "name", "created_at", "updated_at"] as const);
+
 /** Filters for {@link MusicPlaylistsNamespace.list}. */
-export interface ListPlaylistsParams extends PageParams {
+export interface ListPlaylistsParams extends ListParams<(typeof PLAYLIST_FILTER_COLUMNS)[number]> {
   /**
    * Partial, accent-insensitive match on the name, sent as `search[name]`.
    *
@@ -466,8 +471,20 @@ export interface UpdatePlaylistInput {
   readonly artworkMediaId?: string | null;
 }
 
+/** Filter columns of `GET /playlist_songs`. */
+export const PLAYLIST_SONG_FILTER_COLUMNS = Object.freeze([
+  "id",
+  "playlist_id",
+  "song_id",
+  "position",
+  "origin",
+  "hidden",
+  "created_at",
+  "updated_at",
+] as const);
+
 /** Filters for {@link PlaylistSongsNamespace.list}. */
-export interface ListPlaylistSongsParams extends PageParams {
+export interface ListPlaylistSongsParams extends ListParams<(typeof PLAYLIST_SONG_FILTER_COLUMNS)[number]> {
   readonly playlistId?: MusicPlaylistId;
   readonly songId?: number;
   readonly ids?: readonly MusicPlaylistSongId[];
@@ -613,14 +630,10 @@ export class MusicPlaylistsNamespace extends Resource {
     params: ListPlaylistsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MusicPlaylist>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const order = params.order ?? "created_at:desc";
-
-    const load = (at: { page: number; pageSize: number }): Promise<MusicPlaylist[]> =>
-      this.fetchPage({ ...at, order, ...params }, options);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = { order: "created_at:desc", search: { name: params.name }, exactSearch: { id: params.ids } };
+    return paginate(params, 100, (at) =>
+      this.http.get<MusicPlaylist[] | undefined>("/playlists", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -858,19 +871,6 @@ export class MusicPlaylistsNamespace extends Resource {
     );
   }
 
-  /** One page of the playlist listing. */
-  private async fetchPage(
-    at: { page: number; pageSize: number; order: string } & ListPlaylistsParams,
-    options: RequestOptions,
-  ): Promise<MusicPlaylist[]> {
-    const query: QueryParams = {
-      modifiers: { page: pageModifier(at.page, at.pageSize), order: at.order },
-      ...(at.name === undefined ? {} : { search: { name: at.name } }),
-      ...(at.ids === undefined ? {} : { exact_search: { id: [...at.ids] } }),
-    };
-    const items = await this.http.get<MusicPlaylist[] | undefined>("/playlists", { ...options, query });
-    return items ?? [];
-  }
 }
 
 /**
@@ -907,14 +907,22 @@ export class PlaylistSongsNamespace extends Resource {
     params: ListPlaylistSongsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MusicPlaylistSong>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const order = params.order ?? "position:asc";
-
-    const load = (at: { page: number; pageSize: number }): Promise<MusicPlaylistSong[]> =>
-      this.fetchPage({ ...at, order, ...params }, options);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = {
+      order: "position:asc",
+      exactSearch: {
+        playlist_id: params.playlistId,
+        song_id: params.songId,
+        id: params.ids,
+        origin: params.origin,
+        hidden: params.hidden,
+      },
+    };
+    return paginate(params, 100, (at) =>
+      this.http.get<MusicPlaylistSong[] | undefined>("/playlist_songs", {
+        ...options,
+        query: listQuery(params, at, base),
+      }),
+    );
   }
 
   /**
@@ -1016,28 +1024,6 @@ export class PlaylistSongsNamespace extends Resource {
     );
   }
 
-  /** One page of the join-row listing. */
-  private async fetchPage(
-    at: { page: number; pageSize: number; order: string } & ListPlaylistSongsParams,
-    options: RequestOptions,
-  ): Promise<MusicPlaylistSong[]> {
-    const exact: QueryParams = {};
-    if (at.playlistId !== undefined) exact["playlist_id"] = at.playlistId;
-    if (at.songId !== undefined) exact["song_id"] = at.songId;
-    if (at.ids !== undefined) exact["id"] = [...at.ids];
-    if (at.origin !== undefined) exact["origin"] = at.origin;
-    if (at.hidden !== undefined) exact["hidden"] = at.hidden;
-
-    const query: QueryParams = {
-      modifiers: { page: pageModifier(at.page, at.pageSize), order: at.order },
-      ...(Object.keys(exact).length === 0 ? {} : { exact_search: exact }),
-    };
-    const items = await this.http.get<MusicPlaylistSong[] | undefined>("/playlist_songs", {
-      ...options,
-      query,
-    });
-    return items ?? [];
-  }
 }
 
 /**

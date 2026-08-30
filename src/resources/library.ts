@@ -70,7 +70,9 @@
 
 import { OmsApiError, OmsError } from "../errors";
 import type { FormFields } from "../http";
-import { NULL_SENTINEL, Resource, buildFormData, pageModifier, readJson, supportsResponseStreaming } from "../http";
+import { NULL_SENTINEL, Resource, buildFormData, readJson, supportsResponseStreaming } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../listing";
 import type {
   FileInput,
   FileOutput,
@@ -501,7 +503,20 @@ export function bookChatIsIncremental(): boolean {
 // ---------------------------------------------------------------------------
 // Inputs
 
-/** Filters `GET /books` accepts. Anything else is a `400` naming the key. */
+/** Filter columns of `GET /books`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const BOOK_FILTER_COLUMNS = Object.freeze(["title", "author", "format", "user_id"] as const);
+
+/** `extra_options` keys of `GET /books`. */
+export const BOOK_EXTRA_OPTION_KEYS = Object.freeze(["scope", "owner_handle", "tags"] as const);
+
+/** `extra_options` of `GET /books`. {@link ListBooksParams} has camelCased shortcuts for each key. */
+export interface BookExtraOptions {
+  readonly scope?: "mine" | "explore";
+  readonly owner_handle?: string;
+  readonly tags?: readonly string[];
+}
+
+/** Shortcuts over the filter columns of `GET /books`. */
 export interface BookFilters {
   /** Partial, accent-insensitive match on the title (`search[title]`). */
   readonly title?: string;
@@ -513,14 +528,10 @@ export interface BookFilters {
   readonly userId?: Id;
   /** Exact ids. An array becomes `IN (...)`. */
   readonly ids?: readonly BookId[];
-  /** Escape hatch: extra `search[...]` keys. Unknown keys are a 400. */
-  readonly search?: Record<string, QueryValue>;
-  /** Escape hatch: extra `exact_search[...]` keys. Unknown keys are a 400. */
-  readonly exactSearch?: Record<string, QueryValue>;
 }
 
 /** Arguments for {@link LibraryBooksNamespace.list}. */
-export interface ListBooksParams extends BookFilters, PageParams {
+export interface ListBooksParams extends BookFilters, ListParams<(typeof BOOK_FILTER_COLUMNS)[number], BookExtraOptions> {
   /**
    * `"mine"` narrows to the caller's own books, `"explore"` to everybody
    * else's. Omitted, the listing is own + all public, mixed together.
@@ -612,8 +623,11 @@ export interface UpdateBookInput {
   readonly cover?: FileInput | NativeFile;
 }
 
+/** Filter columns of `GET /book_shelves`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const BOOK_SHELF_FILTER_COLUMNS = Object.freeze(["user_id", "visibility"] as const);
+
 /** Arguments for {@link LibraryShelvesNamespace.list}. */
-export interface ListBookShelvesParams extends PageParams {
+export interface ListBookShelvesParams extends ListParams<(typeof BOOK_SHELF_FILTER_COLUMNS)[number]> {
   /** Exact owner id. The only way to ask for one person's shelves. */
   readonly userId?: Id;
   /** Exact visibility. */
@@ -622,10 +636,6 @@ export interface ListBookShelvesParams extends PageParams {
   readonly ids?: readonly BookShelfId[];
   /** `"column:asc"` / `"column:desc"`. Defaults to the endpoint's own ordering. */
   readonly order?: string;
-  /** Escape hatch: extra `search[...]` keys. Unknown keys are a 400. */
-  readonly search?: Record<string, QueryValue>;
-  /** Escape hatch: extra `exact_search[...]` keys. Unknown keys are a 400. */
-  readonly exactSearch?: Record<string, QueryValue>;
 }
 
 /** Arguments for {@link LibraryShelvesNamespace.create}. */
@@ -650,18 +660,17 @@ export interface UpdateBookShelfInput {
   readonly position?: number;
 }
 
+/** Filter columns of `GET /book_annotations`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const BOOK_ANNOTATION_FILTER_COLUMNS = Object.freeze(["book_id", "kind"] as const);
+
 /** Arguments for {@link LibraryAnnotationsNamespace.list}. */
-export interface ListBookAnnotationsParams extends PageParams {
+export interface ListBookAnnotationsParams extends ListParams<(typeof BOOK_ANNOTATION_FILTER_COLUMNS)[number]> {
   /** Exact book id. The filter every reader screen uses. */
   readonly bookId?: BookId;
   /** Exact kind, or an array of kinds (which becomes `IN (...)`). */
   readonly kind?: BookAnnotationKind | readonly BookAnnotationKind[];
   /** `"column:asc"` / `"column:desc"`. Defaults to `created_at:asc`. */
   readonly order?: string;
-  /** Escape hatch: extra `search[...]` keys. Unknown keys are a 400. */
-  readonly search?: Record<string, QueryValue>;
-  /** Escape hatch: extra `exact_search[...]` keys. Unknown keys are a 400. */
-  readonly exactSearch?: Record<string, QueryValue>;
 }
 
 /** Arguments for {@link LibraryAnnotationsNamespace.create}. */
@@ -786,15 +795,18 @@ export class LibraryBooksNamespace extends Resource {
    *   unknown one used to answer with the UNFILTERED set.
    */
   async list(params: ListBooksParams = {}, options: RequestOptions = {}): Promise<Paginated<Book>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-
-    const load = (at: { page: number; pageSize: number }): Promise<Book[]> =>
-      this.http
-        .get<Book[] | undefined>("/books", { ...options, query: this.bookQuery(params, at) })
-        .then((rows) => rows ?? []);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base: ListQueryBase = {
+      search: { title: params.title, author: params.author },
+      exactSearch: { format: params.format, user_id: params.userId, id: params.ids },
+      extraOptions: {
+        scope: params.scope,
+        owner_handle: params.ownerHandle,
+        tags: params.tags !== undefined && params.tags.length > 0 ? params.tags : undefined,
+      },
+    };
+    return paginate(params, 100, (at) =>
+      this.http.get<Book[] | undefined>("/books", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1239,34 +1251,6 @@ export class LibraryBooksNamespace extends Resource {
    * allowlist - `BooksController` declares only those three, so any other key
    * there is a 400.
    */
-  private bookQuery(params: ListBooksParams, at?: { page: number; pageSize: number }): QueryParams {
-    const search: Record<string, QueryValue> = { ...(params.search ?? {}) };
-    if (params.title !== undefined) search["title"] = params.title;
-    if (params.author !== undefined) search["author"] = params.author;
-
-    const exact: Record<string, QueryValue> = { ...(params.exactSearch ?? {}) };
-    if (params.format !== undefined) exact["format"] = params.format;
-    if (params.userId !== undefined) exact["user_id"] = params.userId;
-    if (params.ids !== undefined) exact["id"] = [...params.ids];
-
-    const modifiers: Record<string, QueryValue> = {};
-    if (at) modifiers["page"] = pageModifier(at.page, at.pageSize);
-    if (params.order !== undefined) modifiers["order"] = params.order;
-    if (params.random) modifiers["random"] = true;
-
-    const extra: Record<string, QueryValue> = {};
-    if (params.scope !== undefined) extra["scope"] = params.scope;
-    if (params.ownerHandle !== undefined) extra["owner_handle"] = params.ownerHandle;
-    if (params.tags !== undefined && params.tags.length > 0) extra["tags"] = [...params.tags];
-
-    return {
-      ...(Object.keys(search).length > 0 ? { search } : {}),
-      ...(Object.keys(exact).length > 0 ? { exact_search: exact } : {}),
-      ...(Object.keys(modifiers).length > 0 ? { modifiers } : {}),
-      ...(Object.keys(extra).length > 0 ? { extra_options: extra } : {}),
-    };
-  }
-
   /** JSON body for an update. `null` stays `null`; the transport does not touch a body. */
   private updateBody(input: UpdateBookInput): Record<string, unknown> {
     const body: Record<string, unknown> = {};
@@ -1342,15 +1326,12 @@ export class LibraryShelvesNamespace extends Resource {
    *   bucket is a 400.
    */
   async list(params: ListBookShelvesParams = {}, options: RequestOptions = {}): Promise<Paginated<BookShelf>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-
-    const load = (at: { page: number; pageSize: number }): Promise<BookShelf[]> =>
-      this.http
-        .get<BookShelf[] | undefined>("/book_shelves", { ...options, query: this.shelfQuery(params, at) })
-        .then((rows) => rows ?? []);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base: ListQueryBase = {
+      exactSearch: { user_id: params.userId, visibility: params.visibility, id: params.ids },
+    };
+    return paginate(params, 100, (at) =>
+      this.http.get<BookShelf[] | undefined>("/book_shelves", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1519,25 +1500,6 @@ export class LibraryShelvesNamespace extends Resource {
     );
   }
 
-  /** Builds the query for {@link list}. Both filterable columns are exact-match. */
-  private shelfQuery(params: ListBookShelvesParams, at?: { page: number; pageSize: number }): QueryParams {
-    const search: Record<string, QueryValue> = { ...(params.search ?? {}) };
-
-    const exact: Record<string, QueryValue> = { ...(params.exactSearch ?? {}) };
-    if (params.userId !== undefined) exact["user_id"] = params.userId;
-    if (params.visibility !== undefined) exact["visibility"] = params.visibility;
-    if (params.ids !== undefined) exact["id"] = [...params.ids];
-
-    const modifiers: Record<string, QueryValue> = {};
-    if (at) modifiers["page"] = pageModifier(at.page, at.pageSize);
-    if (params.order !== undefined) modifiers["order"] = params.order;
-
-    return {
-      ...(Object.keys(search).length > 0 ? { search } : {}),
-      ...(Object.keys(exact).length > 0 ? { exact_search: exact } : {}),
-      ...(Object.keys(modifiers).length > 0 ? { modifiers } : {}),
-    };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1572,18 +1534,13 @@ export class LibraryAnnotationsNamespace extends Resource {
     params: ListBookAnnotationsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<BookAnnotation>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-
-    const load = (at: { page: number; pageSize: number }): Promise<BookAnnotation[]> =>
-      this.http
-        .get<BookAnnotation[] | undefined>("/book_annotations", {
-          ...options,
-          query: this.annotationQuery(params, at),
-        })
-        .then((rows) => rows ?? []);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base: ListQueryBase = { exactSearch: { book_id: params.bookId, kind: params.kind } };
+    return paginate(params, 100, (at) =>
+      this.http.get<BookAnnotation[] | undefined>("/book_annotations", {
+        ...options,
+        query: listQuery(params, at, base),
+      }),
+    );
   }
 
   /**
@@ -1732,27 +1689,6 @@ export class LibraryAnnotationsNamespace extends Resource {
     await this.http.delete<void>(`/book_annotations/${idSegment(id)}`, options);
   }
 
-  /** Builds the query for {@link list}. Both filterable columns are exact-match. */
-  private annotationQuery(
-    params: ListBookAnnotationsParams,
-    at?: { page: number; pageSize: number },
-  ): QueryParams {
-    const search: Record<string, QueryValue> = { ...(params.search ?? {}) };
-
-    const exact: Record<string, QueryValue> = { ...(params.exactSearch ?? {}) };
-    if (params.bookId !== undefined) exact["book_id"] = params.bookId;
-    if (params.kind !== undefined) exact["kind"] = typeof params.kind === "string" ? params.kind : [...params.kind];
-
-    const modifiers: Record<string, QueryValue> = {};
-    if (at) modifiers["page"] = pageModifier(at.page, at.pageSize);
-    if (params.order !== undefined) modifiers["order"] = params.order;
-
-    return {
-      ...(Object.keys(search).length > 0 ? { search } : {}),
-      ...(Object.keys(exact).length > 0 ? { exact_search: exact } : {}),
-      ...(Object.keys(modifiers).length > 0 ? { modifiers } : {}),
-    };
-  }
 }
 
 // ---------------------------------------------------------------------------

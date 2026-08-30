@@ -5,9 +5,8 @@
  * places where this API does something a reader would not guess, and where
  * getting it wrong is silent rather than loud:
  *
- * 1. `PATCH /movie_addons/:id` assigns `manifest_json` unconditionally, so a
- *    partial patch wipes it and 400s. The manifest must be on the wire every
- *    time, and `moveToGroup` must put it there.
+ * 1. `PATCH /movie_addons/:id` is a partial update: only the fields given go
+ *    on the wire, and `moveToGroup` sends the group alone.
  * 2. `finished` is three-state. `null` and "absent" mean the same thing to the
  *    server, and only a real boolean makes "marcar como nao visto" stick.
  * 3. `/movie_watch_progresses/bulk` truncates past 200 entries in SILENCE and
@@ -123,33 +122,30 @@ describe("addons", () => {
     expect(page.pageSize).toBe(25);
   });
 
-  test("update always sends manifest_json, even when only the group changes", async () => {
+  test("update sends only the fields it was given", async () => {
     const { movies, calls } = harness(addon({ movie_addon_group_id: "gggggggggggg" }));
 
-    await movies.addons.update("aaaaaaaaaaaa", {
-      manifest_json: { id: "org.example", name: "Example" },
-      movie_addon_group_id: "gggggggggggg",
-    });
+    await movies.addons.update("aaaaaaaaaaaa", { movie_addon_group_id: "gggggggggggg" });
 
     expect(calls[0]!.method).toBe("PATCH");
-    // The controller does `permitted[:manifest_json] = params[:manifest_json]`
-    // unconditionally, so an absent key becomes nil and trips a presence
-    // validation. The manifest is not optional on a patch.
-    expect(calls[0]!.body).toHaveProperty("manifest_json");
-    expect(calls[0]!.body!.movie_addon_group_id).toBe("gggggggggggg");
+    expect(calls[0]!.body).toEqual({ movie_addon_group_id: "gggggggggggg" });
   });
 
-  test("moveToGroup carries the manifest across and can un-group with null", async () => {
+  test("update refuses an empty manifest when one is given", async () => {
+    const { movies, calls } = harness(addon());
+
+    await expect(
+      movies.addons.update("aaaaaaaaaaaa", { manifest_json: {} as unknown as StremioManifest }),
+    ).rejects.toThrow(OmsError);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("moveToGroup sends the group alone and can un-group with null", async () => {
     const { movies, calls } = harness(addon());
 
     await movies.addons.moveToGroup(addon(), null);
 
-    expect(calls[0]!.body!.manifest_json).toEqual({
-      id: "org.example",
-      name: "Example",
-      version: "1.0.0",
-    });
-    expect(calls[0]!.body!.movie_addon_group_id).toBeNull();
+    expect(calls[0]!.body).toEqual({ movie_addon_group_id: null });
   });
 
   test("moveToGroup refuses a shared addon before spending a request", async () => {

@@ -95,7 +95,9 @@
 import type { Job } from "./jobs";
 import type { QuotaPeriod, QuotaResource, QuotaUnit } from "./quotas";
 import type { VocalSeparation } from "./tools/vocalSeparation";
-import { Resource, pageModifier } from "../http";
+import { Resource } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
 import type { OmsScope } from "../auth/tokens";
 import {
   createPage,
@@ -917,12 +919,12 @@ export interface LinkedIdentity {
   readonly updated_at: Timestamp;
 }
 
+/** Filter columns of `GET /identities`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const LINKED_IDENTITY_FILTER_COLUMNS = Object.freeze(["user_id"] as const);
+
 /** Filters for {@link LinkedIdentitiesNamespace.list}. */
-export interface ListLinkedIdentitiesParams extends PageParams {
-  /**
-   * `modifiers[order]`, e.g. `"created_at:desc"`. Defaults to
-   * `"created_at:desc"`.
-   */
+export interface ListLinkedIdentitiesParams extends ListParams<(typeof LINKED_IDENTITY_FILTER_COLUMNS)[number]> {
+  /** Defaults to `"created_at:desc"`. */
   readonly order?: string;
 }
 
@@ -960,19 +962,10 @@ export class LinkedIdentitiesNamespace extends Resource {
     params: ListLinkedIdentitiesParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<LinkedIdentity>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const order = params.order ?? "created_at:desc";
-
-    const load = async (at: { page: number; pageSize: number }): Promise<LinkedIdentity[]> => {
-      const query: QueryParams = {
-        modifiers: { page: pageModifier(at.page, at.pageSize), order },
-      };
-      const items = await this.http.get<LinkedIdentity[] | undefined>("/identities", { ...options, query });
-      return items ?? [];
-    };
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = { order: "created_at:desc" };
+    return paginate(params, 100, (at) =>
+      this.http.get<LinkedIdentity[] | undefined>("/identities", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1543,13 +1536,23 @@ export class AdminQuotasNamespace extends Resource {
  */
 export type AdminJob = Job;
 
+/** Filter columns of `GET /admin/jobs`. */
+export const ADMIN_JOB_FILTER_COLUMNS = Object.freeze([
+  "id",
+  "job_type",
+  "status",
+  "created_at",
+  "updated_at",
+  "finished_at",
+] as const);
+
 /** Filters for {@link AdminJobsNamespace.list}. */
-export interface ListAdminJobsParams extends PageParams {
-  /** `exact_search[status]`. An array becomes an `IN`. */
+export interface ListAdminJobsParams extends ListParams<(typeof ADMIN_JOB_FILTER_COLUMNS)[number]> {
+  /** Exact status. An array becomes an `IN`. */
   readonly status?: string | readonly string[];
-  /** `exact_search[job_type]`. An array becomes an `IN`. */
+  /** Exact job type. An array becomes an `IN`. */
   readonly jobType?: string | readonly string[];
-  /** `modifiers[order]`. Defaults to `"created_at:desc"`. */
+  /** Defaults to `"created_at:desc"`. */
   readonly order?: string;
 }
 
@@ -1595,28 +1598,10 @@ export class AdminJobsNamespace extends Resource {
     params: ListAdminJobsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<AdminJob>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const order = params.order ?? "created_at:desc";
-
-    const exact: Record<string, string | string[]> = {};
-    if (params.status !== undefined) {
-      exact["status"] = Array.isArray(params.status) ? [...params.status] : String(params.status);
-    }
-    if (params.jobType !== undefined) {
-      exact["job_type"] = Array.isArray(params.jobType) ? [...params.jobType] : String(params.jobType);
-    }
-
-    const load = async (at: { page: number; pageSize: number }): Promise<AdminJob[]> => {
-      const query: QueryParams = {
-        modifiers: { page: pageModifier(at.page, at.pageSize), order },
-        ...(Object.keys(exact).length === 0 ? {} : { exact_search: exact }),
-      };
-      const items = await this.http.get<AdminJob[] | undefined>("/admin/jobs", { ...options, query });
-      return items ?? [];
-    };
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base = { order: "created_at:desc", exactSearch: { status: params.status, job_type: params.jobType } };
+    return paginate(params, 100, (at) =>
+      this.http.get<AdminJob[] | undefined>("/admin/jobs", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1946,11 +1931,23 @@ export class AdminShortLinksNamespace extends Resource {
  */
 export type AdminVocalSeparation = VocalSeparation;
 
+/** Filter columns of `GET /admin/vocal_separations`. */
+export const ADMIN_VOCAL_SEPARATION_FILTER_COLUMNS = Object.freeze([
+  "id",
+  "status",
+  "model_id",
+  "created_at",
+  "finished_at",
+  "user_id",
+  "song_id",
+] as const);
+
 /** Filters for {@link AdminVocalSeparationsNamespace.list}. */
-export interface ListAdminVocalSeparationsParams extends PageParams {
-  /** `exact_search[status]`. An array becomes an `IN`. */
+export interface ListAdminVocalSeparationsParams
+  extends ListParams<(typeof ADMIN_VOCAL_SEPARATION_FILTER_COLUMNS)[number]> {
+  /** Exact status. An array becomes an `IN`. */
   readonly status?: string | readonly string[];
-  /** `exact_search[model_id]`. An array becomes an `IN`. */
+  /** Exact model id. An array becomes an `IN`. */
   readonly modelId?: string | readonly string[];
   /**
    * `"song"` for runs started from the music library, `"tool"` for uploads.
@@ -1993,33 +1990,17 @@ export class AdminVocalSeparationsNamespace extends Resource {
     params: ListAdminVocalSeparationsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<AdminVocalSeparation>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-    const order = params.order ?? "created_at:desc";
-
-    const exact: Record<string, string | string[]> = {};
-    if (params.status !== undefined) {
-      exact["status"] = Array.isArray(params.status) ? [...params.status] : String(params.status);
-    }
-    if (params.modelId !== undefined) {
-      exact["model_id"] = Array.isArray(params.modelId) ? [...params.modelId] : String(params.modelId);
-    }
-    if (params.userId !== undefined) exact["user_id"] = params.userId;
-
-    const load = async (at: { page: number; pageSize: number }): Promise<AdminVocalSeparation[]> => {
-      const query: QueryParams = {
-        modifiers: { page: pageModifier(at.page, at.pageSize), order },
-        ...(Object.keys(exact).length === 0 ? {} : { exact_search: exact }),
-        ...(params.source === undefined ? {} : { source: params.source }),
-      };
-      const items = await this.http.get<AdminVocalSeparation[] | undefined>("/admin/vocal_separations", {
-        ...options,
-        query,
-      });
-      return items ?? [];
+    const base = {
+      order: "created_at:desc",
+      exactSearch: { status: params.status, model_id: params.modelId, user_id: params.userId },
+      top: params.source === undefined ? {} : { source: params.source },
     };
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    return paginate(params, 100, (at) =>
+      this.http.get<AdminVocalSeparation[] | undefined>("/admin/vocal_separations", {
+        ...options,
+        query: listQuery(params, at, base),
+      }),
+    );
   }
 
   /**

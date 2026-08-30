@@ -19,7 +19,9 @@
  */
 
 import { OmsError } from "../errors";
-import { Resource, pageModifier } from "../http";
+import { Resource } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../listing";
 import {
   createPage,
   type BaseRecord,
@@ -193,8 +195,11 @@ export interface UpdateShortLinkInput {
   readonly endpoint?: string;
 }
 
+/** Filter columns of `GET /short_links`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const SHORT_LINK_FILTER_COLUMNS = Object.freeze(["user_id"] as const);
+
 /** Filters for {@link ShortLinksNamespace.list}. */
-export interface ListShortLinksParams extends PageParams {
+export interface ListShortLinksParams extends ListParams<(typeof SHORT_LINK_FILTER_COLUMNS)[number]> {
   /**
    * Narrow to one owner, sent as `exact_search[user_id]`.
    *
@@ -231,14 +236,10 @@ export class ShortLinksNamespace extends Resource {
    * @throws {OmsAuthError} 401 when anonymous.
    */
   async list(params: ListShortLinksParams = {}, options: RequestOptions = {}): Promise<Paginated<ShortLink>> {
-    const pageSize = params.pageSize ?? 100;
-    const page = params.page ?? 1;
-    const order = params.order ?? "created_at:desc";
-
-    const load = (at: { page: number; pageSize: number }): Promise<ShortLink[]> =>
-      this.fetchPage({ ...at, order, ...(params.userId === undefined ? {} : { userId: params.userId }) }, options);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    const base: ListQueryBase = { order: "created_at:desc", exactSearch: { user_id: params.userId } };
+    return paginate(params, 100, (at) =>
+      this.http.get<ShortLink[] | undefined>("/short_links", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -368,10 +369,7 @@ export class ShortLinksNamespace extends Resource {
     at: { page: number; pageSize: number; order: string; userId?: Id },
     options: RequestOptions,
   ): Promise<ShortLink[]> {
-    const query: QueryParams = {
-      modifiers: { page: pageModifier(at.page, at.pageSize), order: at.order },
-      ...(at.userId === undefined ? {} : { exact_search: { user_id: at.userId } }),
-    };
+    const query = listQuery({}, at, { order: at.order, exactSearch: { user_id: at.userId } });
     const items = await this.http.get<ShortLink[] | undefined>("/short_links", { ...options, query });
     return items ?? [];
   }

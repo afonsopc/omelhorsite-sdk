@@ -67,7 +67,9 @@
  */
 
 import { OmsApiError } from "../../errors";
-import { NULL_SENTINEL, Resource, buildFormData, filenameFromDisposition, pageModifier, readJson } from "../../http";
+import { NULL_SENTINEL, Resource, buildFormData, filenameFromDisposition, readJson } from "../../http";
+import { listQuery, paginate } from "../../listing";
+import type { ListParams, PageAt } from "../../listing";
 import {
   createPage,
   type BaseRecord,
@@ -461,7 +463,7 @@ export interface MusicExternalSearchResult {
  * `artist` is on the list but is not a column - see
  * {@link ListSongsParams.artist}.
  */
-export const SONG_FILTER_COLUMNS: readonly string[] = Object.freeze([
+export const SONG_FILTER_COLUMNS = Object.freeze([
   "id",
   "created_at",
   "updated_at",
@@ -470,7 +472,7 @@ export const SONG_FILTER_COLUMNS: readonly string[] = Object.freeze([
   "position",
   "year",
   "artist",
-]);
+] as const);
 
 /** Columns the backend will accept in `modifiers[order]`. */
 export const SONG_ORDER_COLUMNS: readonly string[] = Object.freeze([
@@ -542,27 +544,10 @@ export interface SongFilters {
    * excluded even if they also appear as a feature.
    */
   readonly artistRole?: SongArtistRole;
-  /**
-   * Escape hatch for a partial match on a column {@link SongFilters} does not
-   * name, sent verbatim as `search[...]`.
-   *
-   * Only the keys in {@link SONG_FILTER_COLUMNS} are accepted and an unknown
-   * one is a 400, so do not forward user-controlled keys. Two behaviours
-   * surprise people: on a NUMBER column (`year`, `position`, `id`) `search` is
-   * an exact `IN`, not a range or a prefix; and any blank value is dropped
-   * instead of matching nothing.
-   */
-  readonly search?: Readonly<Record<string, QueryValue>>;
-  /**
-   * Escape hatch for an equality filter, sent verbatim as `exact_search[...]`.
-   * Same allowlist, same fail-closed 400. An array becomes `IN`, `null`
-   * becomes `IS NULL`.
-   */
-  readonly exactSearch?: Readonly<Record<string, QueryValue>>;
 }
 
 /** Arguments for {@link MusicSongsNamespace.list}. */
-export interface ListSongsParams extends SongFilters, PageParams {
+export interface ListSongsParams extends SongFilters, ListParams<(typeof SONG_FILTER_COLUMNS)[number]> {
   /**
    * `modifiers[order]`, as `"column:asc"` or `"column:desc"`.
    *
@@ -596,7 +581,7 @@ export interface ListSongsParams extends SongFilters, PageParams {
 }
 
 /** Arguments for {@link MusicSongsNamespace.albums}. */
-export interface ListSongAlbumsParams extends SongFilters {
+export interface ListSongAlbumsParams extends SongFilters, ListParams<(typeof SONG_FILTER_COLUMNS)[number]> {
   /**
    * Page of SONGS to scan, not of albums. Read
    * {@link MusicSongsNamespace.albums} before setting it; omitting it is
@@ -840,15 +825,9 @@ export class MusicSongsNamespace extends Resource {
    *   dropping an unknown one used to answer with the UNFILTERED set.
    */
   async list(params: ListSongsParams = {}, options: RequestOptions = {}): Promise<Paginated<Song>> {
-    const page = params.page ?? 1;
-    const pageSize = params.pageSize ?? 100;
-
-    const load = (at: { page: number; pageSize: number }): Promise<Song[]> =>
-      this.http
-        .get<Song[] | undefined>("/songs", { ...options, query: this.songQuery(params, at) })
-        .then((rows) => rows ?? []);
-
-    return createPage(await load({ page, pageSize }), page, pageSize, load);
+    return paginate(params, 100, (at) =>
+      this.http.get<Song[] | undefined>("/songs", { ...options, query: this.songQuery(params, at) }),
+    );
   }
 
   /**
@@ -1442,34 +1421,13 @@ export class MusicSongsNamespace extends Resource {
    * controller reads it off bare `params`, and nesting it would both miss the
    * filter and trip the unknown-key check.
    */
-  private songQuery(
-    params: SongFilters & { order?: string; random?: boolean },
-    at?: { page: number; pageSize: number },
-  ): QueryParams {
-    const search: Record<string, QueryValue> = { ...(params.search ?? {}) };
-    if (params.title !== undefined) search["title"] = params.title;
-
-    const exact: Record<string, QueryValue> = { ...(params.exactSearch ?? {}) };
-    if (params.album !== undefined) exact["album"] = params.album;
-    if (params.year !== undefined) exact["year"] = params.year;
-    if (params.ids !== undefined) exact["id"] = params.ids;
-    if (params.artist !== undefined) exact["artist"] = params.artist;
-
-    const modifiers: Record<string, QueryValue> = {};
-    if (at) modifiers["page"] = pageModifier(at.page, at.pageSize);
-    // Only send an order when there is one to send: an explicit
-    // `modifiers[order]` of "" would be ignored anyway, and the endpoint's own
-    // base order (created_at asc, id asc) is what keeps paging stable.
-    if (params.order !== undefined) modifiers["order"] = params.order;
-    else if (at) modifiers["order"] = "created_at:asc";
-    if (params.random) modifiers["random"] = true;
-
-    return {
-      ...(Object.keys(search).length > 0 ? { search } : {}),
-      ...(Object.keys(exact).length > 0 ? { exact_search: exact } : {}),
-      ...(Object.keys(modifiers).length > 0 ? { modifiers } : {}),
-      ...(params.artistRole === undefined ? {} : { artist_role: params.artistRole }),
-    };
+  private songQuery(params: ListSongsParams | ListSongAlbumsParams, at: PageAt | undefined): QueryParams {
+    return listQuery(params, at, {
+      order: at === undefined ? undefined : "created_at:asc",
+      search: { title: params.title },
+      exactSearch: { album: params.album, year: params.year, id: params.ids, artist: params.artist },
+      top: params.artistRole === undefined ? {} : { artist_role: params.artistRole },
+    });
   }
 
   /** JSON body for an update. `null` stays `null`; the transport does not touch a body. */

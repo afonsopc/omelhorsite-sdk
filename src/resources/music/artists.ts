@@ -45,7 +45,9 @@
  */
 
 import { OmsError } from "../../errors";
-import { ApiClient, Resource, pageModifier } from "../../http";
+import { ApiClient, Resource } from "../../http";
+import { listQuery, paginate } from "../../listing";
+import type { ListParams } from "../../listing";
 import type {
   FileInput,
   NativeFile,
@@ -287,7 +289,9 @@ export interface ArtistExtended extends Artist {
  * `CrudActions#reject_unknown_filter_keys!` fails closed on purpose, because
  * the alternative (dropping the key) answers with the UNFILTERED table.
  */
-export interface ListArtistsParams {
+export const ARTIST_FILTER_COLUMNS = Object.freeze(["id", "name", "slug", "canonical_name", "created_at"] as const);
+
+export interface ListArtistsParams extends ListParams<(typeof ARTIST_FILTER_COLUMNS)[number]> {
   /**
    * Substring match on the display name - `search[name]`. This is the roster
    * search box.
@@ -1009,11 +1013,13 @@ export class MusicArtistsNamespace extends Resource {
    *   query.
    */
   async list(params: ListArtistsParams = {}, options: RequestOptions = {}): Promise<Paginated<Artist>> {
-    const size = resolvePageSize(params.pageSize ?? ARTIST_ROSTER_PAGE_SIZE);
-    const load: PageLoader<Artist> = ({ page, pageSize }) =>
-      this.http.get<Artist[]>("/artists", { ...options, query: artistQuery(params, page, pageSize) });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = {
+      search: { name: params.name },
+      exactSearch: { slug: params.slug, canonical_name: params.canonicalName },
+    };
+    return paginate(params, ARTIST_ROSTER_PAGE_SIZE, (at) =>
+      this.http.get<Artist[]>("/artists", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1223,28 +1229,6 @@ export class MusicArtistsNamespace extends Resource {
       { retry: false, ...options },
     );
   }
-}
-
-/**
- * Builds the roster query.
- *
- * `name` goes through `search` (the slugifying `LIKE` a search box wants);
- * `slug` and `canonical_name` go through `exact_search`, which is plain
- * `where(...)` equality. Both are already normalised identifiers, so a `LIKE`
- * on them would be slower and would match too much.
- *
- * `created_at` and `updated_at` are in the server's allowlist and are
- * deliberately NOT offered here: `QuerySearcher#date_search` turns the value
- * into a `Date` and compares it for EQUALITY against a timestamp column, so a
- * date filter matches only rows written at exactly midnight. There is no range
- * form. Filter on time client-side, or order by it and stop reading.
- */
-function artistQuery(params: ListArtistsParams, page: number, pageSize: number): QueryParams {
-  return {
-    search: { name: params.name },
-    exact_search: { slug: params.slug, canonical_name: params.canonicalName },
-    modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-  };
 }
 
 /** Fails fast on a value the server would answer for with a framework error. */

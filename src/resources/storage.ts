@@ -42,9 +42,10 @@
  * filter is dropped without a word. {@link StorageNamespace.list} is built
  * around that difference; do not collapse the two filters back together.
  */
-import { type ApiClient, filenameFromDisposition, NULL_SENTINEL, pageModifier, Resource } from "../http";
+import { type ApiClient, filenameFromDisposition, NULL_SENTINEL, Resource } from "../http";
 import { OmsApiError, OmsError } from "../errors";
-import { createPage } from "../types";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../listing";
 import type {
   BaseRecord,
   FetchLike,
@@ -145,12 +146,30 @@ export interface FsStream {
 }
 
 /** Filters for {@link StorageNamespace.list}. */
-export interface ListFsNodesParams extends PageParams {
+/** Filter columns of `GET /fs_nodes`. */
+export const FS_NODE_FILTER_COLUMNS = Object.freeze(["id", "created_at", "updated_at", "name", "parent_id"] as const);
+
+/** `extra_options` keys of `GET /fs_nodes`. */
+export const FS_NODE_EXTRA_OPTION_KEYS = Object.freeze(["parent_id", "include_pending"] as const);
+
+/**
+ * `extra_options` of `GET /fs_nodes`. `parent_id` here returns the folder's
+ * children AND the folder itself; the `parent_id` column in `exactSearch`
+ * returns the children only, and is the only one that can say `null`.
+ */
+export interface FsNodeExtraOptions {
+  readonly parent_id?: Id;
+  readonly include_pending?: boolean;
+}
+
+/** Filters for {@link StorageNamespace.list}. */
+export interface ListFsNodesParams extends ListParams<(typeof FS_NODE_FILTER_COLUMNS)[number], FsNodeExtraOptions> {
   /**
    * Directory to list. `null` lists the caller's ROOT nodes (home, trash,
-   * vault), which the server selects through its `\b` null sentinel.
+   * vault). Omitted, no parent filter is applied and the listing spans the
+   * caller's whole tree, which is what a name search across folders wants.
    */
-  readonly parentId: Id | null;
+  readonly parentId?: Id | null;
   /**
    * Include nodes whose bytes never landed. Off by default, because a
    * half-finished upload is not something a user wants to see - and because a
@@ -187,6 +206,9 @@ export interface CopyFsNodesInput {
   readonly ids: Id[];
   readonly newParentId: Id;
 }
+
+/** `GET /fs_grants` filters on {@link BASE_FILTER_COLUMNS} only. */
+export type ListFsGrantsParams = ListParams<never>;
 
 /**
  * A sharing grant on a node.
@@ -255,22 +277,14 @@ export class FsGrantsNamespace extends Resource {
    *
    * @throws {OmsAuthError} 401 when anonymous.
    */
-  async list(params: PageParams = {}, options: RequestOptions = {}): Promise<Paginated<FsGrant>> {
-    const pageSize = params.pageSize ?? 100;
-    const load = async (page: { page: number; pageSize: number }): Promise<FsGrant[]> =>
-      (await this.http.get<FsGrant[]>("/fs_grants", {
+  async list(params: ListFsGrantsParams = {}, options: RequestOptions = {}): Promise<Paginated<FsGrant>> {
+    return paginate(params, 100, (at) =>
+      this.http.get<FsGrant[]>("/fs_grants", {
         ...options,
-        query: {
-          modifiers: {
-            page: pageModifier(page.page, page.pageSize),
-            ...(params.order === undefined ? {} : { order: params.order }),
-          },
-        },
+        query: listQuery(params, at),
         headers: noRevalidate(options.headers),
-      })) ?? [];
-
-    const first = params.page ?? 1;
-    return createPage(await load({ page: first, pageSize }), first, pageSize, load);
+      }),
+    );
   }
 
   /** `GET /fs_grants/:id` - one grant, with its node, grantor and grantee expanded. */
@@ -417,35 +431,25 @@ export class StorageNamespace extends Resource {
    * revalidate on its own, because a 304 has no body and would surface here as
    * an error rather than as an empty page.
    */
-  async list(params: ListFsNodesParams, options: RequestOptions = {}): Promise<Paginated<FsNode>> {
-    const pageSize = params.pageSize ?? 200;
-    const parentId = params.parentId ?? null;
-    // See the note above: only exact_search can express "no parent", so at the
-    // top of the tree the request is built as though includeSelf were off.
-    const foldSelfIn = parentId !== null && params.includeSelf === true;
-
-    const extraOptions: Record<string, QueryValue> = {};
-    if (foldSelfIn) extraOptions["parent_id"] = parentId;
-    if (params.includePending) extraOptions["include_pending"] = true;
-
-    const load = async (page: { page: number; pageSize: number }): Promise<FsNode[]> =>
-      (await this.http.get<FsNode[]>("/fs_nodes", {
+  async list(params: ListFsNodesParams = {}, options: RequestOptions = {}): Promise<Paginated<FsNode>> {
+    const parentId = params.parentId;
+    // Only exact_search can express "no parent", so at the top of the tree
+    // the request is built as though includeSelf were off.
+    const foldSelfIn = parentId !== undefined && parentId !== null && params.includeSelf === true;
+    const base: ListQueryBase = {
+      exactSearch: foldSelfIn || parentId === undefined ? {} : { parent_id: parentId ?? NULL_SENTINEL },
+      extraOptions: {
+        parent_id: foldSelfIn ? parentId : undefined,
+        include_pending: params.includePending ? true : undefined,
+      },
+    };
+    return paginate(params, 200, (at) =>
+      this.http.get<FsNode[]>("/fs_nodes", {
         ...options,
-        query: {
-          // The sentinel travels as a literal string rather than as `null`, so
-          // this call does not depend on how the encoder treats null.
-          ...(foldSelfIn ? {} : { exact_search: { parent_id: parentId ?? NULL_SENTINEL } }),
-          ...(Object.keys(extraOptions).length > 0 ? { extra_options: extraOptions } : {}),
-          modifiers: {
-            page: pageModifier(page.page, page.pageSize),
-            ...(params.order === undefined ? {} : { order: params.order }),
-          },
-        },
+        query: listQuery(params, at, base),
         headers: noRevalidate(options.headers),
-      })) ?? [];
-
-    const first = params.page ?? 1;
-    return createPage(await load({ page: first, pageSize }), first, pageSize, load);
+      }),
+    );
   }
 
   /**

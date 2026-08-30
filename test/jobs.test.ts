@@ -145,8 +145,8 @@ describe("jobs.list", () => {
 
     const url = new URL(calls[0]!.url);
     expect(url.pathname).toBe("/jobs");
-    expect(url.searchParams.getAll("search[status][]")).toEqual(["complete", "failed"]);
-    expect(url.searchParams.get("search[job_type]")).toBe("omsvs");
+    expect(url.searchParams.getAll("exact_search[status][]")).toEqual(["complete", "failed"]);
+    expect(url.searchParams.get("exact_search[job_type]")).toBe("omsvs");
     expect(url.searchParams.get("modifiers[page]")).toBe("1:2");
     // The index is conditional-GET aware; a 304 would arrive here as a failure.
     expect(calls[0]!.headers["cache-control"]).toBe("no-cache");

@@ -12,7 +12,9 @@
  */
 
 import { OmsError, OmsNetworkError } from "../errors";
-import { type ApiClient, Resource, type TokenProvider, pageModifier } from "../http";
+import { type ApiClient, Resource, type TokenProvider } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
 import type {
   FileInput,
   Id,
@@ -23,7 +25,7 @@ import type {
   RequestOptions,
   Timestamp,
 } from "../types";
-import { createPage, readFileInput, resolvePageNumber, resolvePageSize } from "../types";
+import { DEFAULT_PAGE_SIZE, readFileInput } from "../types";
 
 /** Lifecycle of a ticket. */
 export type TicketStatus = "open" | "closed";
@@ -124,16 +126,21 @@ export interface CreateTicketInput {
   readonly initialMessage?: string;
   readonly context?: TicketContext;
   /**
-   * Files to attach. The SDK turns each one into the data URI the endpoint
-   * expects, so every attachment is buffered in memory.
+   * Files to attach, as bytes or as an already-encoded data URL. Bytes are
+   * base64-encoded here, so every attachment is buffered in memory.
    *
-   * Backend caps: {@link TICKET_MAX_ATTACHMENTS} files,
+   * Server caps: {@link TICKET_MAX_ATTACHMENTS} files,
    * {@link TICKET_MAX_ATTACHMENT_BYTES} in total, `image/*` and `video/*`
-   * only - and an attachment that breaks any of them is dropped in SILENCE,
-   * with the ticket still answering 201. The SDK therefore validates before
-   * sending and raises rather than let a screenshot disappear.
+   * only. An attachment over a cap is dropped server-side with the ticket
+   * still answering 201, so the SDK validates first and throws instead.
    */
-  readonly attachments?: FileInput[];
+  readonly attachments?: ReadonlyArray<FileInput | TicketAttachmentDataUrl>;
+}
+
+/** An attachment that is already a `data:<mime>;base64,...` URL. */
+export interface TicketAttachmentDataUrl {
+  readonly dataUrl: string;
+  readonly filename: string;
 }
 
 /** Fields that can change after a ticket exists. */
@@ -141,15 +148,21 @@ export interface UpdateTicketInput {
   readonly status?: TicketStatus;
 }
 
+/** Filter columns of `GET /tickets`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const TICKET_FILTER_COLUMNS = Object.freeze(["status", "user_id"] as const);
+
 /** Filters for {@link TicketsNamespace.list}. */
-export interface ListTicketsParams extends PageParams {
+export interface ListTicketsParams extends ListParams<(typeof TICKET_FILTER_COLUMNS)[number]> {
   readonly status?: TicketStatus;
   /** Administrators only: someone else's tickets. */
   readonly userId?: Id;
 }
 
+/** Filter columns of `GET /ticket_messages`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const TICKET_MESSAGE_FILTER_COLUMNS = Object.freeze(["ticket_id", "sender_id", "created_at"] as const);
+
 /** Filters for {@link TicketMessagesNamespace.list}. */
-export interface ListTicketMessagesParams extends PageParams {
+export interface ListTicketMessagesParams extends ListParams<(typeof TICKET_MESSAGE_FILTER_COLUMNS)[number]> {
   readonly ticketId: TicketId;
 }
 
@@ -170,14 +183,10 @@ export class TicketMessagesNamespace extends Resource {
    * does not need this; reach for it when a thread is long enough to page.
    */
   async list(params: ListTicketMessagesParams, options: RequestOptions = {}): Promise<Paginated<TicketMessage>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<TicketMessage> = ({ page, pageSize }) =>
-      this.http.get<TicketMessage[]>("/ticket_messages", {
-        ...options,
-        query: messageQuery(params, page, pageSize),
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { exactSearch: { ticket_id: params.ticketId } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<TicketMessage[]>("/ticket_messages", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -224,11 +233,10 @@ export class TicketsNamespace extends Resource {
    * view. Call {@link get} for the thread.
    */
   async list(params: ListTicketsParams = {}, options: RequestOptions = {}): Promise<Paginated<Ticket>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<Ticket> = ({ page, pageSize }) =>
-      this.http.get<Ticket[]>("/tickets", { ...options, query: ticketQuery(params, page, pageSize) });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { exactSearch: { status: params.status, user_id: params.userId } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<Ticket[]>("/tickets", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /** `GET /tickets/:id` - the ticket with its whole message thread. */
@@ -479,14 +487,13 @@ function base64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/**
- * Turns the caller's files into the `{ data_url, filename }` entries the
- * endpoint reads, refusing anything the backend would silently drop.
- */
-async function encodeAttachments(files: FileInput[]): Promise<Array<{ data_url: string; filename: string }>> {
+/** Turns the caller's attachments into `{ data_url, filename }` entries, refusing anything the server would drop. */
+async function encodeAttachments(
+  files: ReadonlyArray<FileInput | TicketAttachmentDataUrl>,
+): Promise<Array<{ data_url: string; filename: string }>> {
   if (files.length > TICKET_MAX_ATTACHMENTS) {
     throw new OmsError(
-      `A ticket takes at most ${TICKET_MAX_ATTACHMENTS} attachments, got ${files.length}. The backend would keep the first ${TICKET_MAX_ATTACHMENTS} and drop the rest without saying so.`,
+      `A ticket takes at most ${TICKET_MAX_ATTACHMENTS} attachments, got ${files.length}; the server keeps the first ${TICKET_MAX_ATTACHMENTS} and drops the rest silently.`,
       "invalid_request",
     );
   }
@@ -495,25 +502,46 @@ async function encodeAttachments(files: FileInput[]): Promise<Array<{ data_url: 
   let total = 0;
 
   for (const input of files) {
-    const { blob, filename, contentType } = await readFileInput(input);
+    const { dataUrl, filename, contentType, size } = await encodeAttachment(input);
     if (!TICKET_ATTACHMENT_TYPES.some((prefix) => contentType.startsWith(prefix))) {
       throw new OmsError(
         `Attachment "${filename}" is ${contentType}; a ticket accepts image/* and video/* only.`,
         "invalid_request",
       );
     }
-    total += blob.size;
+    total += size;
     if (total > TICKET_MAX_ATTACHMENT_BYTES) {
       throw new OmsError(
-        `Ticket attachments exceed ${TICKET_MAX_ATTACHMENT_BYTES} bytes in total. The backend attaches what fits and drops the rest without saying so.`,
+        `Ticket attachments exceed ${TICKET_MAX_ATTACHMENT_BYTES} bytes in total; the server attaches what fits and drops the rest silently.`,
         "invalid_request",
       );
     }
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    entries.push({ data_url: `data:${contentType};base64,${base64(bytes)}`, filename });
+    entries.push({ data_url: dataUrl, filename });
   }
 
   return entries;
+}
+
+const DATA_URL = /^data:([^;,]+)(;[^,]*)?,(.*)$/s;
+
+async function encodeAttachment(
+  input: FileInput | TicketAttachmentDataUrl,
+): Promise<{ dataUrl: string; filename: string; contentType: string; size: number }> {
+  if ("dataUrl" in input) {
+    const match = DATA_URL.exec(input.dataUrl);
+    if (!match) {
+      throw new OmsError(`Attachment "${input.filename}" is not a data URL.`, "invalid_request");
+    }
+    const payload = match[3] ?? "";
+    const base64Encoded = (match[2] ?? "").split(";").includes("base64");
+    const size = base64Encoded
+      ? Math.floor((payload.length * 3) / 4) - (payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0)
+      : decodeURIComponent(payload).length;
+    return { dataUrl: input.dataUrl, filename: input.filename, contentType: match[1] ?? "", size };
+  }
+  const { blob, filename, contentType } = await readFileInput(input);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return { dataUrl: `data:${contentType};base64,${base64(bytes)}`, filename, contentType, size: blob.size };
 }
 
 /** Keeps only the four context keys the backend stores. */
@@ -524,28 +552,6 @@ function pickContext(context: TicketContext): TicketContext {
     if (typeof value === "string" && value.length > 0) out[key] = value;
   }
   return out;
-}
-
-/**
- * Filters go through `exact_search`, not `search`.
- *
- * They share one allowlist, but `search` on a string column is a normalised
- * LIKE (lowercased, accents folded, wrapped in `%`), which for an id or a
- * status is both slower and wrong at the edges. `exact_search` is plain
- * equality.
- */
-function ticketQuery(params: ListTicketsParams, page: number, pageSize: number): QueryParams {
-  return {
-    exact_search: { status: params.status, user_id: params.userId },
-    modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-  };
-}
-
-function messageQuery(params: ListTicketMessagesParams, page: number, pageSize: number): QueryParams {
-  return {
-    exact_search: { ticket_id: params.ticketId },
-    modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-  };
 }
 
 

@@ -8,7 +8,9 @@
  */
 
 import { OmsApiError } from "../errors";
-import { type ApiClient, Resource, buildFormData, pageModifier, readJson } from "../http";
+import { type ApiClient, Resource, buildFormData, readJson } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
 import { objectStoreFetch } from "./storage/upload";
 import type {
   BaseRecord,
@@ -21,7 +23,7 @@ import type {
   RequestOptions,
   Timestamp,
 } from "../types";
-import { createPage, resolvePageNumber, resolvePageSize } from "../types";
+import { DEFAULT_PAGE_SIZE } from "../types";
 
 /**
  * A user as the API renders them.
@@ -193,8 +195,11 @@ export interface AccountSession extends BaseRecord {
   readonly user?: User;
 }
 
+/** Filter columns of `GET /sessions`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const ACCOUNT_SESSION_FILTER_COLUMNS = Object.freeze(["user_id"] as const);
+
 /** Filters for {@link AccountSessionsNamespace.list}. */
-export interface ListAccountSessionsParams extends PageParams {
+export interface ListAccountSessionsParams extends ListParams<(typeof ACCOUNT_SESSION_FILTER_COLUMNS)[number]> {
   /** Administrators only: someone else's sessions. */
   readonly userId?: Id;
 }
@@ -220,14 +225,10 @@ export class AccountSessionsNamespace extends Resource {
    * sees everyone's and can narrow with `userId`.
    */
   async list(params: ListAccountSessionsParams = {}, options: RequestOptions = {}): Promise<Paginated<AccountSession>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<AccountSession> = ({ page, pageSize }) =>
-      this.http.get<AccountSession[]>("/sessions", {
-        ...options,
-        query: sessionQuery(params, page, pageSize),
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { exactSearch: { user_id: params.userId } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<AccountSession[]>("/sessions", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /** `GET /sessions/mine` - the session the current credential resolves to. */
@@ -482,16 +483,4 @@ function updateBody(input: UpdateAccountInput): Record<string, unknown> {
   };
 }
 
-/**
- * Filters go through `exact_search`, not `search`. They share one allowlist,
- * but `search` on a string column is a normalised LIKE (lowercased, accents
- * folded, wrapped in `%`), which for an id is both slower and wrong at the
- * edges. `exact_search` is plain equality.
- */
-function sessionQuery(params: ListAccountSessionsParams, page: number, pageSize: number): QueryParams {
-  return {
-    exact_search: { user_id: params.userId },
-    modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-  };
-}
 

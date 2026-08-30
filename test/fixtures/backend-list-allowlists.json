@@ -1,0 +1,671 @@
+{
+  "account_usage": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/base": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/chests": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/event_alerts": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/jobs": {
+    "search": [
+      "id",
+      "job_type",
+      "status",
+      "created_at",
+      "updated_at",
+      "finished_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/notepads": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/oauth_applications": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/short_links": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/user_quotas": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/vocal_separations": {
+    "search": [
+      "id",
+      "status",
+      "model_id",
+      "created_at",
+      "finished_at",
+      "user_id",
+      "song_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "analysis": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "application": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "artist_imports": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "artist_metadata": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "artist_syncs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "artists": {
+    "search": [
+      "id",
+      "name",
+      "slug",
+      "canonical_name",
+      "created_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "assistant_chats": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "assistant/auth": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "authorized_applications": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "background_removals": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "blog_posts": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "blogs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "book_annotations": {
+    "search": [
+      "book_id",
+      "kind"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "book_chats": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "book_shelves": {
+    "search": [
+      "user_id",
+      "visibility"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "books": {
+    "search": [
+      "title",
+      "author",
+      "format",
+      "user_id"
+    ],
+    "extra_options": [
+      "scope",
+      "owner_handle",
+      "tags"
+    ],
+    "custom": []
+  },
+  "caption_jobs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "chest_entries": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "chests": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "compat": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "configs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "dynamic_qrs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "feedbacks": {
+    "search": [
+      "status",
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "form_attachments": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "form_submissions": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "forms": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "fs_grants": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "fs_nodes": {
+    "search": [
+      "id",
+      "created_at",
+      "updated_at",
+      "name",
+      "parent_id"
+    ],
+    "extra_options": [
+      "parent_id",
+      "include_pending"
+    ],
+    "custom": []
+  },
+  "group_chat_messages": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "group_chats": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "identities": {
+    "search": [
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_articles": {
+    "search": [
+      "title",
+      "summary",
+      "category",
+      "importance",
+      "enriched"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_configs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_items": {
+    "search": [
+      "intel_source_id",
+      "external_id",
+      "title",
+      "content",
+      "url"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_reports": {
+    "search": [
+      "kind"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_scripts": {
+    "search": [
+      "name",
+      "builtin",
+      "slug"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_sources": {
+    "search": [
+      "name",
+      "health",
+      "enabled",
+      "intel_script_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "intel_stats": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "ip_lookup": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "jams": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "jobs": {
+    "search": [
+      "id",
+      "job_type",
+      "status",
+      "created_at",
+      "updated_at",
+      "finished_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "jokes": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "jumpstyle_jobs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "liked_songs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "link_trees": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "lyrics": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "media": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "messages": {
+    "search": [
+      "id",
+      "created_at",
+      "updated_at",
+      "content",
+      "sender_id",
+      "receiver_id",
+      "read_at"
+    ],
+    "extra_options": [
+      "user_id",
+      "other_user_id"
+    ],
+    "custom": []
+  },
+  "movie_addon_grants": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "movie_addon_groups": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "movie_addons": {
+    "search": [
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "movie_collection_items": {
+    "search": [
+      "id",
+      "movie_collection_id",
+      "movie_type",
+      "movie_id",
+      "position",
+      "created_at",
+      "updated_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "movie_collections": {
+    "search": [
+      "id",
+      "name",
+      "kind",
+      "created_at",
+      "updated_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "movie_watch_progresses": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music_assistant": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music_dj": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music_mixes": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music_radios": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music_storage": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music/external_search": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "notepads": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "notifications": {
+    "search": [
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "oauth_applications": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "oauth/authorizations": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "oauth/device_authorizations": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "oauth/device_codes": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "oauth/discovery": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "play_events": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "playlist_follows": {
+    "search": [
+      "id",
+      "playlist_id",
+      "created_at",
+      "updated_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "playlist_imports": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "playlist_songs": {
+    "search": [
+      "id",
+      "playlist_id",
+      "song_id",
+      "position",
+      "origin",
+      "hidden",
+      "created_at",
+      "updated_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "playlists": {
+    "search": [
+      "id",
+      "name",
+      "created_at",
+      "updated_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "quotas": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "relationships": {
+    "search": [
+      "requester_id",
+      "accepter_id"
+    ],
+    "extra_options": [
+      "user_id"
+    ],
+    "custom": []
+  },
+  "s_r_machine": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "service_usages": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "services_status": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "sessions": {
+    "search": [
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "short_links": {
+    "search": [
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "song_imports": {
+    "search": [
+      "id",
+      "state",
+      "playlist_id",
+      "user_id",
+      "created_at",
+      "updated_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "songs": {
+    "search": [
+      "id",
+      "created_at",
+      "updated_at",
+      "title",
+      "album",
+      "position",
+      "year"
+    ],
+    "extra_options": [],
+    "custom": [
+      "artist"
+    ]
+  },
+  "space_invaders_games": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "spotify_syncs": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "ticket_messages": {
+    "search": [
+      "ticket_id",
+      "sender_id",
+      "created_at"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "tickets": {
+    "search": [
+      "status",
+      "user_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "tools_downloader": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "transcriptions": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "upscales": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "users": {
+    "search": [
+      "name",
+      "handle"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "vocal_separations": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "webauthn_credentials": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  }
+}

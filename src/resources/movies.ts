@@ -24,24 +24,19 @@
  *    OAuth access token gets `403 {"error":"insufficient_scope"}` on every
  *    route in this file. Cookie sessions and personal tokens work; third-party
  *    OAuth clients do not. See {@link MoviesNamespace}.
- * 3. **`PATCH /movie_addons/:id` wipes `manifest_json` unless you resend it.**
- *    The controller assigns the key unconditionally, so a partial patch sends
- *    `nil` into a `presence: true` validation and answers `400`. That is why
- *    {@link UpdateMovieAddonInput.manifest_json} is REQUIRED here, and why
- *    {@link MovieAddonsNamespace.moveToGroup} exists.
- * 4. **Listing collections has a side effect**: it is the only place that
+ * 3. **Listing collections has a side effect**: it is the only place that
  *    creates the user's "Favoritos" row. See
  *    {@link MovieCollectionsNamespace.list}.
- * 5. **`POST /movie_watch_progresses` is an upsert that answers `200`, not
+ * 4. **`POST /movie_watch_progresses` is an upsert that answers `200`, not
  *    `201`**, and its identity is `(user, movie_id, video_id)` - `movie_type`
  *    is NOT part of the key. It is one of the very few creates in the API that
  *    breaks the 201 convention, because it is not really a create.
- * 6. **`finished` is a three-state field, not a boolean.** Omitted means "you
+ * 5. **`finished` is a three-state field, not a boolean.** Omitted means "you
  *    decide from the position"; `true`/`false` means "the user said so". A
  *    `null` is deleted by the controller and reads as omitted, which is
  *    exactly the bug that once made "marcar como nao visto" silently do
  *    nothing. See {@link MovieWatchProgressInput.finished}.
- * 7. **`last_watched_at` is only defaulted on INSERT.** The model does
+ * 6. **`last_watched_at` is only defaulted on INSERT.** The model does
  *    `self.last_watched_at ||= Time.current`, so an upsert onto an existing row
  *    that omits it keeps the OLD timestamp - and the Continue Watching list is
  *    ordered by exactly that column. Always send one. See
@@ -53,7 +48,9 @@
  * never applies.
  */
 
-import { ApiClient, Resource, pageModifier } from "../http";
+import { ApiClient, Resource } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
 import { OmsError } from "../errors";
 import type {
   BaseRecord,
@@ -65,7 +62,7 @@ import type {
   RequestOptions,
   Timestamp,
 } from "../types";
-import { createPage, resolvePageNumber, resolvePageSize } from "../types";
+import { DEFAULT_PAGE_SIZE } from "../types";
 import type { User } from "./account";
 
 // ---------------------------------------------------------------------------
@@ -177,22 +174,10 @@ export interface CreateMovieAddonInput {
   readonly movie_addon_group_id?: Id | null;
 }
 
-/**
- * Arguments for {@link MovieAddonsNamespace.update}.
- *
- * `manifest_json` is required, and that is not an oversight to work around.
- * `MovieAddonsController#movie_addon_params` is shared by create and update and
- * ends with an unconditional `permitted[:manifest_json] = params[:manifest_json]`,
- * so a PATCH that omits the key assigns `nil` over the stored manifest and then
- * trips `validates :manifest_json, presence: true`. The row survives (the save
- * failed) but the call is a `400`, which is how `moveAddonToGroup` in the web
- * frontend is broken today - it sends `{ movie_addon_group_id }` alone. Resend
- * the manifest you already hold; {@link MovieAddonsNamespace.moveToGroup} does
- * it for you.
- */
+/** Arguments for {@link MovieAddonsNamespace.update}. Every field is optional; omitted ones are left alone. */
 export interface UpdateMovieAddonInput {
-  /** Resend the stored manifest verbatim. See the interface docs for why. */
-  readonly manifest_json: StremioManifest;
+  /** A replacement manifest. Must be a non-empty object. */
+  readonly manifest_json?: StremioManifest;
   /** `null` un-groups the addon. Omitting the key leaves the group alone. */
   readonly movie_addon_group_id?: Id | null;
   /**
@@ -212,12 +197,15 @@ export interface UpdateMovieAddonInput {
  * the query - so there is deliberately no way to list by
  * `movie_addon_group_id`. Group client-side off the field on each row.
  */
-export interface ListMovieAddonsParams extends PageParams {
+export interface ListMovieAddonsParams extends ListParams<(typeof MOVIE_ADDON_FILTER_COLUMNS)[number]> {
   /** Exact match. Use it to split your own addons from the shared ones. */
   readonly userId?: Id;
   /** Exact match on the primary key. */
   readonly id?: Id;
 }
+
+/** Filter columns of `GET /movie_addons`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const MOVIE_ADDON_FILTER_COLUMNS = Object.freeze(["user_id"] as const);
 
 /** Arguments for {@link MovieAddonGroupsNamespace.create}. */
 export interface CreateMovieAddonGroupInput {
@@ -237,10 +225,13 @@ export interface MovieAddonGroup extends BaseRecord {
 }
 
 /** Filters for {@link MovieAddonGroupsNamespace.list}. */
-export interface ListMovieAddonGroupsParams extends PageParams {
+export interface ListMovieAddonGroupsParams extends ListParams<never> {
   /** Exact match on the primary key. The only filter this index allows. */
   readonly id?: Id;
 }
+
+/** `GET /movie_addon_groups` filters on {@link BASE_FILTER_COLUMNS} only. */
+export const MOVIE_ADDON_GROUP_FILTER_COLUMNS = Object.freeze([] as const);
 
 /**
  * A share: one addon, or one whole group, handed to one other user.
@@ -298,10 +289,13 @@ export interface CreateMovieAddonGrantInput {
  * one addon - those are `400`s. Filter on `grantor_id` / `grantee_id` /
  * `movie_addon_id` client-side after listing.
  */
-export interface ListMovieAddonGrantsParams extends PageParams {
+export interface ListMovieAddonGrantsParams extends ListParams<never> {
   /** Exact match on the primary key. */
   readonly id?: Id;
 }
+
+/** `GET /movie_addon_grants` filters on {@link BASE_FILTER_COLUMNS} only. */
+export const MOVIE_ADDON_GRANT_FILTER_COLUMNS = Object.freeze([] as const);
 
 // ---------------------------------------------------------------------------
 // Collections
@@ -401,7 +395,7 @@ export interface UpdateMovieCollectionInput {
  * Allowlist: `id`, `name`, `kind`, `created_at`, `updated_at`. Anything else is
  * `400 "Unknown search filter: ..."`.
  */
-export interface ListMovieCollectionsParams extends PageParams {
+export interface ListMovieCollectionsParams extends ListParams<(typeof MOVIE_COLLECTION_FILTER_COLUMNS)[number]> {
   /** Exact match, or `IN (...)` when given an array. */
   readonly id?: Id | readonly Id[];
   /**
@@ -412,6 +406,9 @@ export interface ListMovieCollectionsParams extends PageParams {
   /** Exact match. `"favorites"` finds the one system row. */
   readonly kind?: MovieCollectionKind;
 }
+
+/** Filter columns of `GET /movie_collections`. */
+export const MOVIE_COLLECTION_FILTER_COLUMNS = Object.freeze(["id", "name", "kind", "created_at", "updated_at"] as const);
 
 /** Arguments for {@link MovieCollectionItemsNamespace.create}. */
 export interface CreateMovieCollectionItemInput {
@@ -431,7 +428,8 @@ export interface CreateMovieCollectionItemInput {
  * Allowlist: `id`, `movie_collection_id`, `movie_type`, `movie_id`,
  * `position`, `created_at`, `updated_at`.
  */
-export interface ListMovieCollectionItemsParams extends PageParams {
+export interface ListMovieCollectionItemsParams
+  extends ListParams<(typeof MOVIE_COLLECTION_ITEM_FILTER_COLUMNS)[number]> {
   /** Exact match, or `IN (...)` when given an array. */
   readonly id?: Id | readonly Id[];
   /**
@@ -447,6 +445,17 @@ export interface ListMovieCollectionItemsParams extends PageParams {
   /** Exact match on the sort key. */
   readonly position?: number;
 }
+
+/** Filter columns of `GET /movie_collection_items`. */
+export const MOVIE_COLLECTION_ITEM_FILTER_COLUMNS = Object.freeze([
+  "id",
+  "movie_collection_id",
+  "movie_type",
+  "movie_id",
+  "position",
+  "created_at",
+  "updated_at",
+] as const);
 
 // ---------------------------------------------------------------------------
 // Watch progress
@@ -632,17 +641,10 @@ export class MovieAddonGroupsNamespace extends Resource {
     params: ListMovieAddonGroupsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MovieAddonGroup>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<MovieAddonGroup> = ({ page, pageSize }) =>
-      this.http.get<MovieAddonGroup[]>("/movie_addon_groups", {
-        ...options,
-        query: {
-          exact_search: { id: params.id },
-          modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-        },
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { exactSearch: { id: params.id } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<MovieAddonGroup[]>("/movie_addon_groups", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -736,17 +738,10 @@ export class MovieAddonGrantsNamespace extends Resource {
     params: ListMovieAddonGrantsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MovieAddonGrant>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<MovieAddonGrant> = ({ page, pageSize }) =>
-      this.http.get<MovieAddonGrant[]>("/movie_addon_grants", {
-        ...options,
-        query: {
-          exact_search: { id: params.id },
-          modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-        },
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { exactSearch: { id: params.id } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<MovieAddonGrant[]>("/movie_addon_grants", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -866,17 +861,10 @@ export class MovieAddonsNamespace extends Resource {
     params: ListMovieAddonsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MovieAddon>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<MovieAddon> = ({ page, pageSize }) =>
-      this.http.get<MovieAddon[]>("/movie_addons", {
-        ...options,
-        query: {
-          exact_search: { id: params.id, user_id: params.userId },
-          modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-        },
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { exactSearch: { id: params.id, user_id: params.userId } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<MovieAddon[]>("/movie_addons", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -923,25 +911,10 @@ export class MovieAddonsNamespace extends Resource {
   }
 
   /**
-   * `PATCH /movie_addons/:id` - `200`.
+   * `PATCH /movie_addons/:id` - `200`. A partial update: omitted fields are
+   * left alone. Only the owner may update; a shared row is `401`.
    *
-   * **This is not a partial update, whatever the verb says.**
-   * `movie_addon_params` is shared between create and update and finishes with
-   * an unconditional `permitted[:manifest_json] = params[:manifest_json]`, so
-   * the key is always assigned - as `nil` when you did not send one. `nil` then
-   * fails `validates :manifest_json, presence: true` and the whole call is
-   * `400 "Manifest json can't be blank"`. Nothing is written; the row is fine.
-   * It simply cannot be patched without resending the manifest.
-   *
-   * That is a live divergence: the web frontend's
-   * `MovieAddonsService.update(id, { movie_addon_group_id })` sends the group
-   * alone and therefore 400s. {@link UpdateMovieAddonInput.manifest_json} is
-   * required here so the same mistake is a compile error, and
-   * {@link moveToGroup} carries the manifest across for you.
-   *
-   * Only the owner may update: a shared row is `401`.
-   *
-   * @throws {OmsError} `invalid_request` when `manifest_json` is missing or empty.
+   * @throws {OmsError} `invalid_request` when `manifest_json` is given but empty.
    * @throws {OmsApiError} 404 for an id you cannot see, 401 for one you can see
    *   but do not own.
    */
@@ -950,11 +923,11 @@ export class MovieAddonsNamespace extends Resource {
     input: UpdateMovieAddonInput,
     options: RequestOptions = {},
   ): Promise<MovieAddon> {
-    assertManifest(input.manifest_json);
+    if (input.manifest_json !== undefined) assertManifest(input.manifest_json);
     return this.http.patch<MovieAddon>(
       `/movie_addons/${encodeURIComponent(id)}`,
       {
-        manifest_json: input.manifest_json,
+        ...(input.manifest_json === undefined ? {} : { manifest_json: input.manifest_json }),
         ...("movie_addon_group_id" in input
           ? { movie_addon_group_id: input.movie_addon_group_id ?? null }
           : {}),
@@ -966,11 +939,6 @@ export class MovieAddonsNamespace extends Resource {
 
   /**
    * Files an addon under a group, or un-groups it with `null`.
-   *
-   * Sugar over {@link update} that exists purely because the endpoint demands
-   * the manifest back on every patch. Pass the {@link MovieAddon} you already
-   * hold and its `manifest_json` is resent unchanged; there is no extra request
-   * and no fetch of the manifest.
    *
    * Refuses a shared addon before the round trip: the server would answer
    * `401`, and the message here says why.
@@ -988,11 +956,7 @@ export class MovieAddonsNamespace extends Resource {
         "invalid_request",
       );
     }
-    return this.update(
-      addon.id,
-      { manifest_json: addon.manifest_json, movie_addon_group_id: groupId },
-      options,
-    );
+    return this.update(addon.id, { movie_addon_group_id: groupId }, options);
   }
 
   /**
@@ -1044,23 +1008,21 @@ export class MovieCollectionItemsNamespace extends Resource {
     params: ListMovieCollectionItemsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MovieCollectionItem>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<MovieCollectionItem> = ({ page, pageSize }) =>
+    const base = {
+      exactSearch: {
+        id: params.id,
+        movie_collection_id: params.collectionId,
+        movie_type: params.movieType,
+        movie_id: params.movieId,
+        position: params.position,
+      },
+    };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
       this.http.get<MovieCollectionItem[]>("/movie_collection_items", {
         ...options,
-        query: {
-          exact_search: {
-            id: idFilter(params.id),
-            movie_collection_id: idFilter(params.collectionId),
-            movie_type: params.movieType,
-            movie_id: params.movieId,
-            position: params.position,
-          },
-          modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-        },
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+        query: listQuery(params, at, base),
+      }),
+    );
   }
 
   /**
@@ -1182,18 +1144,10 @@ export class MovieCollectionsNamespace extends Resource {
     params: ListMovieCollectionsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<MovieCollection>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<MovieCollection> = ({ page, pageSize }) =>
-      this.http.get<MovieCollection[]>("/movie_collections", {
-        ...options,
-        query: {
-          search: { name: params.name },
-          exact_search: { id: idFilter(params.id), kind: params.kind },
-          modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-        },
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = { search: { name: params.name }, exactSearch: { id: params.id, kind: params.kind } };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<MovieCollection[]>("/movie_collections", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1588,19 +1542,6 @@ export class MoviesNamespace extends Resource {
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-/**
- * Normalises an id filter for `exact_search`.
- *
- * Only the indexes whose controller declared `id: []` (collections and
- * collection items) accept the array form; on the others `permit` drops it and
- * you get the unfiltered list, which is why those params types only take a
- * scalar.
- */
-function idFilter(value: Id | readonly Id[] | undefined): QueryParams[string] {
-  if (value === undefined) return undefined;
-  return typeof value === "string" ? value : [...value];
-}
 
 /**
  * Copies the keys that were actually supplied.

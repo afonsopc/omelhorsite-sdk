@@ -69,21 +69,12 @@
  */
 
 import { OmsError, OmsNetworkError } from "../errors";
-import { type ApiClient, Resource, type TokenProvider, pageModifier } from "../http";
+import { type ApiClient, Resource, type TokenProvider } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../listing";
 import type { User } from "./account";
-import type {
-  BaseRecord,
-  FileInput,
-  Id,
-  NativeFile,
-  PageLoader,
-  PageParams,
-  Paginated,
-  QueryParams,
-  RequestOptions,
-  Timestamp,
-} from "../types";
-import { MAX_PAGE_SIZE, createPage, isNativeFile, resolvePageNumber, resolvePageSize } from "../types";
+import type { BaseRecord, FileInput, Id, NativeFile, Paginated, QueryParams, RequestOptions, Timestamp } from "../types";
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, isNativeFile } from "../types";
 
 /* -------------------------------------------------------------------------- */
 /* Identifiers                                                                */
@@ -364,8 +355,29 @@ export class SocialNamespace extends Resource {
 /* Direct messages                                                            */
 /* -------------------------------------------------------------------------- */
 
+/** Filter columns of `GET /messages`. */
+export const MESSAGE_FILTER_COLUMNS = Object.freeze([
+  "id",
+  "created_at",
+  "updated_at",
+  "content",
+  "sender_id",
+  "receiver_id",
+  "read_at",
+] as const);
+
+/** `extra_options` keys of `GET /messages`. */
+export const MESSAGE_EXTRA_OPTION_KEYS = Object.freeze(["user_id", "other_user_id"] as const);
+
+/** `extra_options` of `GET /messages`. Each matches rows where the user is either end. */
+export interface MessageExtraOptions {
+  readonly user_id?: Id;
+  readonly other_user_id?: Id;
+}
+
 /** Filters accepted by {@link DirectMessagesNamespace.list}. */
-export interface ListMessagesParams extends PageParams {
+export interface ListMessagesParams
+  extends ListParams<(typeof MESSAGE_FILTER_COLUMNS)[number], MessageExtraOptions> {
   /**
    * The other end of the conversation. Sent as
    * `extra_options[other_user_id]`, which the server expands to
@@ -509,11 +521,19 @@ export class DirectMessagesNamespace extends Resource {
    * Costs one request against the general authenticated ceiling (600/min).
    */
   async list(params: ListMessagesParams = {}, options: RequestOptions = {}): Promise<Paginated<DirectMessage>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<DirectMessage> = ({ page, pageSize }) =>
-      this.http.get<DirectMessage[]>("/messages", { ...options, query: messageQuery(params, page, pageSize) });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base: ListQueryBase = {
+      order: "created_at:desc",
+      search: { content: params.contentContains },
+      exactSearch: {
+        sender_id: params.senderId,
+        receiver_id: params.receiverId,
+        ...(params.unreadOnly === true ? { read_at: null } : {}),
+      },
+      extraOptions: { user_id: params.userId, other_user_id: params.withUser },
+    };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<DirectMessage[]>("/messages", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -779,8 +799,20 @@ export class DirectMessagesNamespace extends Resource {
 /* Relationships                                                              */
 /* -------------------------------------------------------------------------- */
 
+/** Filter columns of `GET /relationships`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const RELATIONSHIP_FILTER_COLUMNS = Object.freeze(["requester_id", "accepter_id"] as const);
+
+/** `extra_options` keys of `GET /relationships`. */
+export const RELATIONSHIP_EXTRA_OPTION_KEYS = Object.freeze(["user_id"] as const);
+
+/** `extra_options` of `GET /relationships`. `user_id` matches rows where the user is either end. */
+export interface RelationshipExtraOptions {
+  readonly user_id?: Id;
+}
+
 /** Filters accepted by {@link RelationshipsNamespace.list}. */
-export interface ListRelationshipsParams extends PageParams {
+export interface ListRelationshipsParams
+  extends ListParams<(typeof RELATIONSHIP_FILTER_COLUMNS)[number], RelationshipExtraOptions> {
   /**
    * `extra_options[user_id]`: rows where this user is either end.
    *
@@ -911,14 +943,14 @@ export class RelationshipsNamespace extends Resource {
     params: ListRelationshipsParams = {},
     options: RequestOptions = {},
   ): Promise<Paginated<Relationship>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<Relationship> = ({ page, pageSize }) =>
-      this.http.get<Relationship[]>("/relationships", {
-        ...options,
-        query: relationshipQuery(params, page, pageSize),
-      });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base: ListQueryBase = {
+      order: "created_at:desc",
+      exactSearch: { requester_id: params.requesterId, accepter_id: params.accepterId },
+      extraOptions: { user_id: params.userId },
+    };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<Relationship[]>("/relationships", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1765,32 +1797,6 @@ export function canEditMessage(
 /* -------------------------------------------------------------------------- */
 /* Internals                                                                  */
 /* -------------------------------------------------------------------------- */
-
-/** Builds the query for `GET /messages`. */
-function messageQuery(params: ListMessagesParams, page: number, pageSize: number): QueryParams {
-  return {
-    search: { content: params.contentContains },
-    exact_search: {
-      sender_id: params.senderId,
-      receiver_id: params.receiverId,
-      // `null` is written out as the backspace sentinel by `encodeQuery`, which
-      // the controller decodes back to `nil`, which `exact_search` turns into
-      // `WHERE read_at IS NULL`. An empty string would match nothing.
-      ...(params.unreadOnly === true ? { read_at: null } : {}),
-    },
-    extra_options: { user_id: params.userId, other_user_id: params.withUser },
-    modifiers: { order: params.order ?? "created_at:desc", page: pageModifier(page, pageSize) },
-  };
-}
-
-/** Builds the query for `GET /relationships`. */
-function relationshipQuery(params: ListRelationshipsParams, page: number, pageSize: number): QueryParams {
-  return {
-    exact_search: { requester_id: params.requesterId, accepter_id: params.accepterId },
-    extra_options: { user_id: params.userId },
-    modifiers: { order: params.order ?? "created_at:desc", page: pageModifier(page, pageSize) },
-  };
-}
 
 /** Fails fast on a value the server would answer for with a framework error. */
 function assertPresent(field: string, value: string): void {

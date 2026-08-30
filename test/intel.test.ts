@@ -1,17 +1,8 @@
 /**
- * `bun test` coverage for the typed intel families in `resources/content.ts`.
+ * `bun test` coverage for the intel families in `resources/content.ts`.
  *
- * Intel is the one place in this SDK where the same word covers two endpoints
- * with nothing in common: `GET /intel/*path` is a blind forwarder to a sidecar
- * this repository cannot see, while `/intel_articles` and its six siblings are
- * ordinary Rails controllers with Blueprinter blueprints. The first stays
- * untyped on purpose; the second is typed here. So the first thing asserted is
- * that adding the second did not move the first: `content.intel.proxy.get()`
- * and the 0.3.0 spelling `content.intel.get()` must both still build
- * `/intel/...` and must never be confused with `intel.articles.get()`.
- *
- * The rest is about the shapes that have already cost bugs elsewhere in this
- * API and that intel repeats:
+ * The shapes that have already cost bugs elsewhere in this API and that intel
+ * repeats:
  *
  * - **top-level filters are not `search` filters.** `q`, `min_importance` and
  *   `sort` are read straight off `params` by `IntelArticlesController`, not
@@ -40,7 +31,6 @@ import {
   INTEL_SOURCE_DISABLE_AFTER_FAILURES,
   INTEL_SOURCE_HEALTHS,
   IntelNamespace,
-  IntelProxyNamespace,
   intelArticleImageUrl,
   type IntelArticle,
   type IntelConfig,
@@ -146,41 +136,15 @@ function source(overrides: Partial<IntelSource> = {}): IntelSource {
 }
 
 // ---------------------------------------------------------------------------
-// The proxy is still the proxy
+// Paths
 // ---------------------------------------------------------------------------
 
-describe("the untyped proxy survived being given typed siblings", () => {
-  test("`.proxy` is the proxy class and builds /intel/<path>", async () => {
-    const { intel, calls } = harness([{ ok: true }]);
-    expect(intel.proxy).toBeInstanceOf(IntelProxyNamespace);
-
-    await intel.proxy.get("api/stats");
-
-    expect(calls[0]?.path).toBe("/intel/api/stats");
-  });
-
-  test("the 0.3.0 spelling `intel.get(path)` still forwards to the proxy", async () => {
-    const { intel, calls } = harness([{ ok: true }]);
-
-    await intel.get("api/articles/abc def");
-
-    // Segment-encoded, separators kept - the proxy's own rule, unchanged.
-    expect(calls[0]?.path).toBe("/intel/api/articles/abc%20def");
-  });
-
-  test("`intel.url()` still builds an absolute proxy URL without a request", () => {
-    const { intel, calls } = harness([]);
-    expect(intel.url("img/cover.png")).toBe(`${BASE_URL}/intel/img/cover.png`);
-    expect(calls).toHaveLength(0);
-  });
-
-  test("the typed families do NOT go through the proxy path", async () => {
+describe("paths", () => {
+  test("articles list under /intel_articles", async () => {
     const { intel, calls } = harness([[]]);
 
     await intel.articles.list();
 
-    // `/intel_articles`, not `/intel/articles`. One underscore is the whole
-    // difference between a real controller and a blind forwarder.
     expect(calls[0]?.path).toBe("/intel_articles");
   });
 });

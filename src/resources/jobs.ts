@@ -45,8 +45,9 @@
  */
 
 import { OmsTimeoutError } from "../errors";
-import { Resource, pageModifier, sleep } from "../http";
-import { createPage } from "../types";
+import { Resource, sleep } from "../http";
+import { listQuery, paginate } from "../listing";
+import type { ListParams } from "../listing";
 import type {
   BaseRecord,
   Id,
@@ -170,10 +171,20 @@ export interface JobRef {
   readonly watchToken?: string;
 }
 
+/** Filter columns of `GET /jobs`. */
+export const JOB_FILTER_COLUMNS = Object.freeze([
+  "id",
+  "job_type",
+  "status",
+  "created_at",
+  "updated_at",
+  "finished_at",
+] as const);
+
 /** Filters for {@link JobsNamespace.list}. */
-export interface ListJobsParams extends PageParams {
-  readonly status?: JobStatus | JobStatus[];
-  readonly jobType?: string | string[];
+export interface ListJobsParams extends ListParams<(typeof JOB_FILTER_COLUMNS)[number]> {
+  readonly status?: JobStatus | readonly JobStatus[];
+  readonly jobType?: string | readonly string[];
 }
 
 /** Pause before the second poll, in milliseconds. */
@@ -298,27 +309,14 @@ export class JobsNamespace extends Resource {
    *   `updated_at`, `finished_at`).
    */
   async list(params: ListJobsParams = {}, options: RequestOptions = {}): Promise<Paginated<Job>> {
-    const pageSize = params.pageSize ?? 100;
-
-    const search: Record<string, QueryValue> = {};
-    if (params.status !== undefined) search["status"] = asFilter(params.status);
-    if (params.jobType !== undefined) search["job_type"] = asFilter(params.jobType);
-
-    const load = async (page: { page: number; pageSize: number }): Promise<Job[]> =>
-      (await this.http.get<Job[]>("/jobs", {
+    const base = { exactSearch: { status: params.status, job_type: params.jobType } };
+    return paginate(params, 100, (at) =>
+      this.http.get<Job[]>("/jobs", {
         ...options,
-        query: {
-          ...(Object.keys(search).length > 0 ? { search } : {}),
-          modifiers: {
-            page: pageModifier(page.page, page.pageSize),
-            ...(params.order === undefined ? {} : { order: params.order }),
-          },
-        },
+        query: listQuery(params, at, base),
         headers: noRevalidate(options.headers),
-      })) ?? [];
-
-    const first = params.page ?? 1;
-    return createPage(await load({ page: first, pageSize }), first, pageSize, load);
+      }),
+    );
   }
 
   /**

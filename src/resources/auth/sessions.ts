@@ -100,7 +100,9 @@
  */
 
 import { OmsApiError } from "../../errors";
-import { Resource, pageModifier } from "../../http";
+import { Resource } from "../../http";
+import { listQuery, paginate } from "../../listing";
+import type { BASE_FILTER_COLUMNS, ListParams } from "../../listing";
 import type { AccountSession, User } from "../account";
 import type {
   Id,
@@ -110,7 +112,7 @@ import type {
   QueryParams,
   RequestOptions,
 } from "../../types";
-import { createPage, resolvePageNumber, resolvePageSize } from "../../types";
+import { DEFAULT_PAGE_SIZE } from "../../types";
 
 /**
  * Name of the httpOnly cookie the backend sets on every session-minting
@@ -353,14 +355,11 @@ export interface ChangeEmailInput {
   readonly newEmailCode: string;
 }
 
-/**
- * Filters for {@link AuthSessionsNamespace.listUsers}.
- *
- * `name` and `handle` are the ONLY filterable columns (`search_params :name,
- * :handle` on the controller). Any other key is rejected with `400 "Unknown
- * search filter"`, not ignored - this list DSL fails closed.
- */
-export interface ListUsersParams extends PageParams {
+/** Filter columns of `GET /users`, on top of {@link BASE_FILTER_COLUMNS}. */
+export const USER_FILTER_COLUMNS = Object.freeze(["name", "handle"] as const);
+
+/** Filters for {@link AuthSessionsNamespace.listUsers}. */
+export interface ListUsersParams extends ListParams<(typeof USER_FILTER_COLUMNS)[number]> {
   /** Substring match on the display name, accent-folded and case-insensitive. */
   readonly name?: string;
   /** Substring match on the handle, accent-folded and case-insensitive. */
@@ -964,11 +963,13 @@ export class AuthSessionsNamespace extends Resource {
    * Counts against the general authenticated ceiling, 600 a minute.
    */
   async listUsers(params: ListUsersParams = {}, options: RequestOptions = {}): Promise<Paginated<User>> {
-    const size = resolvePageSize(params.pageSize);
-    const load: PageLoader<User> = ({ page, pageSize }) =>
-      this.http.get<User[]>("/users", { ...options, query: userQuery(params, page, pageSize) });
-    const first = resolvePageNumber(params.page);
-    return createPage(await load({ page: first, pageSize: size }), first, size, load);
+    const base = {
+      search: { name: params.name, handle: params.handle },
+      exactSearch: { handle: params.exactHandle },
+    };
+    return paginate(params, DEFAULT_PAGE_SIZE, (at) =>
+      this.http.get<User[]>("/users", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
@@ -1017,18 +1018,3 @@ export class AuthSessionsNamespace extends Resource {
   }
 }
 
-/**
- * Builds the query for {@link AuthSessionsNamespace.listUsers}.
- *
- * `search` is the normalised LIKE (lowercased, accents folded, wrapped in `%`);
- * `exact_search` is plain equality. They share one allowlist of columns, which
- * for this controller is `name` and `handle` and nothing else, so an
- * `exactHandle` filter is legal while an `exactEmail` one would be a 400.
- */
-function userQuery(params: ListUsersParams, page: number, pageSize: number): QueryParams {
-  return {
-    search: { name: params.name, handle: params.handle },
-    exact_search: { handle: params.exactHandle },
-    modifiers: { order: params.order, page: pageModifier(page, pageSize) },
-  };
-}

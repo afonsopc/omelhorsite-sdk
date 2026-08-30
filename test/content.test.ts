@@ -410,6 +410,7 @@ describe("jokes and config", () => {
   test("an unknown search key fails closed with a 400 from the server", async () => {
     const { content } = harness({ body: "Unknown search filter: lang", status: 400 });
 
+    // @ts-expect-error `lang` is not a filter column, and the type says so first.
     const thrown = await content.jokes.list({ search: { lang: "pt" } }).catch((e: unknown) => e);
 
     expect(thrown).toBeInstanceOf(OmsApiError);
@@ -549,48 +550,3 @@ describe("space invaders", () => {
   });
 });
 
-describe("intel proxy", () => {
-  test("builds the path, keeps the separators, and forwards the query", async () => {
-    const { content, calls } = harness({ body: { anything: true } });
-
-    const answer = await content.intel.get("api/articles/abc def", { min_importance: 3 });
-
-    expect(answer).toEqual({ anything: true });
-    expect(calls[0]?.path).toBe("/intel/api/articles/abc%20def");
-    expect(calls[0]?.search).toBe("?min_importance=3");
-  });
-
-  test("a leading slash is stripped so the glob route still matches", async () => {
-    const { content, calls } = harness({ body: {} });
-
-    await content.intel.get("/api/stats");
-
-    expect(calls[0]?.path).toBe("/intel/api/stats");
-  });
-
-  test("a non-JSON upstream body comes back as text rather than throwing", async () => {
-    const { content } = harness({ text: "<html>nope</html>" });
-
-    const answer = await content.intel.get<string>("api/whatever");
-
-    expect(answer).toBe("<html>nope</html>");
-  });
-
-  test("the upstream status is forwarded, body and all", async () => {
-    const { content } = harness({ body: { detail: "not found upstream" }, status: 404 });
-
-    const thrown = await content.intel.get("api/missing").catch((e: unknown) => e);
-
-    expect(thrown).toBeInstanceOf(OmsApiError);
-    expect((thrown as OmsApiError).status).toBe(404);
-    // Not this API's usual bare JSON string: whatever the sidecar sent.
-    expect((thrown as OmsApiError).body).toEqual({ detail: "not found upstream" });
-  });
-
-  test("url() is a pure string builder", () => {
-    const { content, calls } = harness({ body: null });
-
-    expect(content.intel.url("img/cover.png")).toBe(`${BASE_URL}/intel/img/cover.png`);
-    expect(calls).toHaveLength(0);
-  });
-});

@@ -278,23 +278,23 @@ describe("song imports: waiting", () => {
 });
 
 describe("song imports: listing", () => {
-  test("filters go under search[] with 1-based paging", async () => {
+  test("filters go under exact_search[] with 1-based paging", async () => {
     const { imports, calls } = harness({ body: [songImport()] });
 
     await imports.list({ state: "failed", playlistId: 12, pageSize: 25 });
 
     const query = calls[0]?.url.searchParams;
-    expect(query?.get("search[state]")).toBe("failed");
-    expect(query?.get("search[playlist_id]")).toBe("12");
+    expect(query?.get("exact_search[state]")).toBe("failed");
+    expect(query?.get("exact_search[playlist_id]")).toBe("12");
     expect(query?.get("modifiers[page]")).toBe("1:25");
   });
 
-  test("an array filter becomes the IN form Rails reads", async () => {
+  test("an array filter becomes the IN form", async () => {
     const { imports, calls } = harness({ body: [] });
 
     await imports.list({ state: ["pending", "processing"] });
 
-    expect(calls[0]?.url.searchParams.getAll("search[state][]")).toEqual(["pending", "processing"]);
+    expect(calls[0]?.url.searchParams.getAll("exact_search[state][]")).toEqual(["pending", "processing"]);
   });
 
   test("the documented filter columns are the six the controller allows", () => {

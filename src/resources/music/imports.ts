@@ -53,7 +53,9 @@
  * session cookie or a personal token, like the rest of music.
  */
 
-import { type ApiClient, Resource, buildFormData, filenameFromDisposition, pageModifier } from "../../http";
+import { type ApiClient, Resource, buildFormData, filenameFromDisposition } from "../../http";
+import { listQuery, paginate } from "../../listing";
+import type { ListParams } from "../../listing";
 import { createPage } from "../../types";
 import type {
   BaseRecord,
@@ -297,16 +299,16 @@ export interface CreateSongImportInput {
  * The controller allowlists six columns and nothing else. An unrecognised
  * `search[...]` key is a `400` naming it, never a silently wider result.
  */
-export interface ListSongImportsParams extends PageParams {
-  readonly state?: SongImportState | SongImportState[];
-  readonly playlistId?: number | string | Array<number | string>;
-  /** Only ever your own id: the index is scoped `where(user: current_user)`. */
+export interface ListSongImportsParams extends ListParams<(typeof SONG_IMPORT_FILTER_COLUMNS)[number]> {
+  readonly state?: SongImportState | readonly SongImportState[];
+  readonly playlistId?: number | string | ReadonlyArray<number | string>;
+  /** Only ever your own id: the listing is scoped to the caller. */
   readonly userId?: Id;
-  readonly id?: SongImportId | SongImportId[];
+  readonly id?: SongImportId | readonly SongImportId[];
 }
 
-/** The exact `search[...]` keys `SongImportsController` allows. */
-export const SONG_IMPORT_FILTER_COLUMNS: readonly string[] = Object.freeze([
+/** Filter columns of `GET /song_imports`. */
+export const SONG_IMPORT_FILTER_COLUMNS = Object.freeze([
   "id",
   "state",
   "playlist_id",
@@ -404,28 +406,12 @@ export class MusicImportsNamespace extends Resource {
    *   {@link SONG_IMPORT_FILTER_COLUMNS}.
    */
   async list(params: ListSongImportsParams = {}, options: RequestOptions = {}): Promise<Paginated<SongImport>> {
-    const pageSize = params.pageSize ?? 100;
-
-    const search: Record<string, QueryValue> = {};
-    if (params.state !== undefined) search["state"] = asFilter(params.state);
-    if (params.playlistId !== undefined) search["playlist_id"] = asFilter(params.playlistId);
-    if (params.userId !== undefined) search["user_id"] = params.userId;
-    if (params.id !== undefined) search["id"] = asFilter(params.id);
-
-    const load = async (page: { page: number; pageSize: number }): Promise<SongImport[]> =>
-      (await this.http.get<SongImport[]>("/song_imports", {
-        ...options,
-        query: {
-          ...(Object.keys(search).length > 0 ? { search } : {}),
-          modifiers: {
-            page: pageModifier(page.page, page.pageSize),
-            ...(params.order === undefined ? {} : { order: params.order }),
-          },
-        },
-      })) ?? [];
-
-    const first = params.page ?? 1;
-    return createPage(await load({ page: first, pageSize }), first, pageSize, load);
+    const base = {
+      exactSearch: { state: params.state, playlist_id: params.playlistId, user_id: params.userId, id: params.id },
+    };
+    return paginate(params, 100, (at) =>
+      this.http.get<SongImport[]>("/song_imports", { ...options, query: listQuery(params, at, base) }),
+    );
   }
 
   /**
