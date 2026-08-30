@@ -163,9 +163,13 @@ const nodes = await oms.storage.upload(
 );
 ```
 
-Progress arrives per finished file or part, never per byte. A file rejected on
-its own (quota, name collision) does not throw; it is missing from the
-returned array, so compare lengths when partial success matters.
+In a browser or on React Native, progress is reported byte by byte (the bytes
+travel through `XMLHttpRequest`); elsewhere it arrives per finished file or
+part. The same goes for every other upload: pass `onUploadProgress` in the
+options of `tools.*.create`, `library.books.create` or
+`chests.entries.createWithUpload`. A file rejected on its own (quota, name
+collision) does not throw; it is missing from the returned array, so compare
+lengths when partial success matters.
 
 ## Long jobs: `create` / `get`, and `run`
 

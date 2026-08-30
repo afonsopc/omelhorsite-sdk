@@ -189,10 +189,14 @@ export class ChestEntriesNamespace extends Resource {
    * The file is buffered whole: the MD5 the presigned signature covers has to
    * be computed over all of it.
    */
-  async createWithUpload(input: CreateChestFileInput, options: OperationOptions = {}): Promise<ChestEntry> {
+  async createWithUpload(
+    input: CreateChestFileInput,
+    options: OperationOptions & { readonly onReserved?: (entry: ChestEntry) => void } = {},
+  ): Promise<ChestEntry> {
     const { blob, filename } = await readFileInput(input.file);
     const name = input.name ?? filename;
 
+    const { onReserved, ...operation } = options;
     const entry = await this.http.post<ChestEntry>(
       "/chest_entries",
       {
@@ -202,8 +206,11 @@ export class ChestEntriesNamespace extends Resource {
         size: blob.size,
         chest_token: input.chestToken,
       },
-      { retry: false, ...options },
+      { retry: false, ...operation },
     );
+    // The entry exists from here on, so a caller can offer a cancel that
+    // deletes it while the bytes are still going up.
+    onReserved?.(entry);
 
     try {
       const checksum = await md5Base64(blob);

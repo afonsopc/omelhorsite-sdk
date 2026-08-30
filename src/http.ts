@@ -38,6 +38,7 @@ import {
   type FileInput,
   type FileOutput,
   type NativeFile,
+  type ProgressCallback,
   type QueryParams,
   type QueryValue,
   type RequestOptions,
@@ -48,6 +49,7 @@ import {
   resolvePageNumber,
   resolvePageSize,
 } from "./types";
+import { xhrAvailable, xhrFetch } from "./internal/xhr";
 
 /** Production API root. Override only for a local backend or a test double. */
 export const DEFAULT_BASE_URL = "https://backend.omelhorsite.pt";
@@ -138,11 +140,11 @@ export function supportsResponseStreaming(): boolean {
  * True in a browser and in React Native (RN's networking is XHR underneath and
  * `xhr.upload.onprogress` fires there); false in a Worker-class isolate and in
  * Bun's server runtime. See {@link Progress} for the whole argument and
- * `UploadManagerOptions.fetch` for the recipe - this only reports whether that
- * recipe can be used here, so a UI can decide between a real bar and a
- * per-file tick.
+ * `RequestOptions.onUploadProgress`; this reports whether that can work here,
+ * so a UI can decide between a real bar and a per-file tick.
  *
- * The SDK never uses XHR itself. It cannot: the core has to load in an isolate.
+ * A request that asks for `onUploadProgress` travels through it when it is
+ * present; nothing else in the SDK touches it.
  */
 export function supportsUploadProgress(): boolean {
   const xhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest;
@@ -337,6 +339,7 @@ export class ApiClient {
   readonly baseUrl: string;
 
   private readonly fetchImpl: FetchLike;
+  private readonly customFetch: boolean;
   private readonly tokens: TokenProvider | undefined;
   private readonly sessionCookie: boolean;
   private readonly baseHeaders: Record<string, string>;
@@ -354,6 +357,7 @@ export class ApiClient {
     }
     // Unbind from the client so a host `fetch` that checks its receiver still works.
     this.fetchImpl = (input, init) => injected(input, init);
+    this.customFetch = options.fetch !== undefined;
 
     if (options.sessionCookie && options.tokens) {
       throw new TypeError(
@@ -540,6 +544,22 @@ export class ApiClient {
     };
   }
 
+  /**
+   * The transport a request should travel on: the client's fetch, or an
+   * `XMLHttpRequest` when upload progress was asked for and the runtime has
+   * one. A custom `fetch` is never bypassed.
+   */
+  transportFor(onUploadProgress?: ProgressCallback): FetchLike {
+    if (onUploadProgress && !this.customFetch && xhrAvailable()) return xhrFetch(onUploadProgress);
+    return this.fetchImpl;
+  }
+
+  /** `PATCH` with a multipart body, parsed as JSON. */
+  async patchForm<T>(path: string, fields: FormFields, options: GetOptions = {}): Promise<T> {
+    const form = await buildFormData(fields);
+    return this.requestJson<T>("PATCH", path, { ...options, body: form, isFormData: true });
+  }
+
   /** Absolute URL for a path, with the query string applied. */
   url(path: string, query?: QueryParams): string {
     const suffix = path.startsWith("/") ? path : `/${path}`;
@@ -583,7 +603,10 @@ export class ApiClient {
 
       let response: Response;
       try {
-        response = await this.fetchImpl(url, await this.buildInit(method, options, deadline.signal));
+        response = await this.transportFor(options.onUploadProgress)(
+          url,
+          await this.buildInit(method, options, deadline.signal),
+        );
       } catch (thrown) {
         deadline.dispose();
         const failure = classifyFetchFailure(thrown, { method, url, attempts: attempt, timeoutMs, options });

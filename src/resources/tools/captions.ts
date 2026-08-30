@@ -910,17 +910,31 @@ export class CaptionsNamespace extends Resource {
     // bar would restart at zero on the attempt that finishes the upload.
     let loaded = 0;
     for (const offset of offsets) if (done.has(offset)) loaded += Math.min(partSize, total - offset);
-    onProgress?.({ phase: "upload", loaded, total });
+    // Bytes of the parts still travelling, so the bar moves between parts too.
+    const inFlight = new Map<number, number>();
+    const report = (): void => {
+      let extra = 0;
+      inFlight.forEach((bytes) => (extra += bytes));
+      onProgress?.({ phase: "upload", loaded: loaded + extra, total });
+    };
+    report();
 
     const concurrency = Math.max(1, Math.trunc(input.concurrency ?? CAPTION_UPLOAD_CONCURRENCY));
     await runCaptionParts(pending, concurrency, async (offset) => {
       const chunk = blob.slice(offset, Math.min(offset + partSize, total));
-      await this.uploadPart(session, offset, chunk, request);
+      await this.uploadPart(session, offset, chunk, {
+        ...request,
+        onUploadProgress: (progress) => {
+          inFlight.set(offset, Math.min(progress.loaded, Math.max(0, chunk.size - 1)));
+          report();
+        },
+      });
+      inFlight.delete(offset);
       onPart?.(offset, chunk.size);
       // Safe to accumulate from inside the pool: the lanes interleave only at
       // an await, so no two of these ever run at the same time.
       loaded += chunk.size;
-      onProgress?.({ phase: "upload", loaded, total });
+      report();
     });
 
     return this.finishUpload(session, request);

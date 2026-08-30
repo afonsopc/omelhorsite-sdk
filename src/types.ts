@@ -283,6 +283,15 @@ export interface RequestOptions {
   /** Extra request headers. Merged over the client's, under `Authorization`. */
   readonly headers?: Record<string, string>;
   /**
+   * Called with the bytes sent so far while the request body goes up.
+   *
+   * Honoured where `XMLHttpRequest` exists (browsers, React Native) and the
+   * client was built without a custom `fetch`, which is when the request is
+   * sent through it instead. Elsewhere the request goes out as usual and this
+   * is never called.
+   */
+  readonly onUploadProgress?: ProgressCallback;
+  /**
    * Per-call retry override, and the ONLY way to put a mutating request in
    * scope for a retry.
    *

@@ -11,6 +11,7 @@ import { AdminNotepadsNamespace } from "./notepads";
 import { AdminOauthApplicationsNamespace } from "./oauthApplications";
 import { AdminQuotasNamespace } from "./quotas";
 import { AdminShortLinksNamespace } from "./shortLinks";
+import { AdminUsersNamespace } from "./users";
 import { AdminVocalSeparationsNamespace } from "./vocalSeparations";
 
 export * from "./authorizedApplications";
@@ -24,6 +25,7 @@ export * from "./oauthApplications";
 export * from "./quotas";
 export * from "./shortLinks";
 export * from "./types";
+export * from "./users";
 export * from "./vocalSeparations";
 
 /**
@@ -77,6 +79,8 @@ export class AdminNamespace extends Resource {
   readonly notepads: AdminNotepadsNamespace;
   /** The Discord alert catalogue. **Administrators only.** */
   readonly eventAlerts: AdminEventAlertsNamespace;
+  /** Any account, admin-only fields included. */
+  readonly users: AdminUsersNamespace;
 
   constructor(http: ConstructorParameters<typeof Resource>[0]) {
     super(http);
@@ -91,5 +95,6 @@ export class AdminNamespace extends Resource {
     this.chests = new AdminChestsNamespace(http);
     this.notepads = new AdminNotepadsNamespace(http);
     this.eventAlerts = new AdminEventAlertsNamespace(http);
+    this.users = new AdminUsersNamespace(http);
   }
 }

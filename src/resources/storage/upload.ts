@@ -71,6 +71,7 @@ import {
   type FileInput,
   type Id,
   type OperationOptions,
+  type Progress,
   type ProgressCallback,
   type RequestOptions,
 } from "../../types";
@@ -393,12 +394,14 @@ export class UploadManager extends Resource {
   readonly gate: StorageRateGate;
 
   private readonly transport: FetchLike;
+  private readonly ownTransport: boolean;
   private readonly md5: Md5Base64Fn;
 
   constructor(http: ApiClient, options: UploadManagerOptions = {}) {
     super(http);
     this.gate = new StorageRateGate(FS_UPLOAD_RATE_LIMIT);
     this.transport = options.fetch ?? objectStoreFetch(http);
+    this.ownTransport = options.fetch === undefined;
     this.md5 = options.md5 ?? md5Base64;
   }
 
@@ -453,18 +456,31 @@ export class UploadManager extends Resource {
     );
 
     const total = prepared.reduce((sum, entry) => sum + entry.blob.size, 0);
-    let loaded = 0;
-    const report = (delta: number): void => {
-      loaded += delta;
-      options.onProgress?.({ phase: "upload", loaded, total });
+    // Finished files plus the bytes of the ones still travelling: each file
+    // reports its own cumulative count, which is folded into one run-level
+    // figure here so the aggregate bar never jumps backwards.
+    let completed = 0;
+    const inFlight = new Map<string, number>();
+    const emit = (): void => {
+      let extra = 0;
+      inFlight.forEach((bytes) => (extra += bytes));
+      options.onProgress?.({ phase: "upload", loaded: completed + extra, total });
     };
-    report(0);
+    const fileProgress =
+      (clientId: string, size: number): ProgressCallback =>
+      (progress) => {
+        inFlight.set(clientId, Math.min(progress.loaded, size));
+        emit();
+      };
+    const fileDone = (clientId: string, size: number): void => {
+      inFlight.delete(clientId);
+      completed += size;
+      emit();
+    };
+    emit();
 
-    // The run-level callback is stripped here, once, so that nothing below can
-    // hand it to a per-file driver: putDirect and uploadMultipart both accept
-    // an onProgress that reports a SINGLE file, and firing the run's callback
-    // with one file's loaded/total makes the aggregate bar jump backwards.
-    // `report` above is the only thing that may call it.
+    // The run-level callback is stripped here, once: the per-file drivers get
+    // a callback of their own through `fileProgress`.
     const { onProgress: _runProgress, ...transfer } = options;
 
     const batchSize = Math.min(MAX_BATCH, Math.max(1, Math.trunc(input.batchSize ?? DEFAULT_BATCH_SIZE)));
@@ -512,10 +528,11 @@ export class UploadManager extends Resource {
                 // would square the number of PUTs in flight at the store.
                 await this.uploadMultipart(plan.fs_node_id, entry.blob, {
                   ...transfer,
-                  onPart: (bytes) => report(bytes),
+                  onProgress: fileProgress(entry.clientId, entry.blob.size),
                   onSession: (token) => open.set(plan.fs_node_id, token),
                 });
                 open.delete(plan.fs_node_id);
+                fileDone(entry.clientId, entry.blob.size);
               } else {
                 if (!plan.upload) {
                   throw new OmsError(
@@ -523,11 +540,15 @@ export class UploadManager extends Resource {
                     "api_error",
                   );
                 }
-                await this.putDirect(plan.upload, entry.blob, transfer);
+                await this.putDirect(plan.upload, entry.blob, {
+                  ...transfer,
+                  onProgress: fileProgress(entry.clientId, entry.blob.size),
+                });
                 attachments.push({ fs_node_id: plan.fs_node_id, blob_signed_id: plan.upload.blob_signed_id });
-                report(entry.blob.size);
+                fileDone(entry.clientId, entry.blob.size);
               }
             } catch (thrown) {
+              inFlight.delete(entry.clientId);
               // A file that failed on its own does not take the batch with it:
               // it is reported like a server-side rejection so the caller sees
               // one uniform list.
@@ -661,8 +682,19 @@ export class UploadManager extends Resource {
     body: Blob,
     options: RequestOptions & { onProgress?: ProgressCallback } = {},
   ): Promise<string | null> {
-    const etag = await this.putBytes(target.url, target.headers, body, options);
-    options.onProgress?.({ phase: "upload", loaded: body.size, total: body.size });
+    const { onProgress, ...request } = options;
+    const size = body.size;
+    const etag = await this.putBytes(target.url, target.headers, body, {
+      ...request,
+      ...(onProgress
+        ? {
+            onUploadProgress: (progress: Progress) => {
+              if (progress.loaded < size) onProgress({ phase: "upload", loaded: progress.loaded, total: size });
+            },
+          }
+        : {}),
+    });
+    onProgress?.({ phase: "upload", loaded: size, total: size });
     return etag;
   }
 
@@ -853,7 +885,14 @@ export class UploadManager extends Resource {
       Math.max(0, Math.min(partNumber * partSize, body.size) - (partNumber - 1) * partSize);
     let loaded = 0;
     for (const partNumber of done.keys()) loaded += bytesOfPart(partNumber);
-    options.onProgress?.({ phase: "upload", loaded, total: body.size });
+    // Bytes of the parts still travelling, so the bar moves between parts too.
+    const inFlight = new Map<number, number>();
+    const report = (): void => {
+      let extra = 0;
+      inFlight.forEach((bytes) => (extra += bytes));
+      options.onProgress?.({ phase: "upload", loaded: loaded + extra, total: body.size });
+    };
+    report();
 
     if (partCount > MAX_PARTS) {
       throw new OmsError(
@@ -883,7 +922,14 @@ export class UploadManager extends Resource {
         // No headers: the presigned upload_part signature covers the query
         // string, and an unexpected header is at best ignored and at worst a
         // signature mismatch.
-        const etag = await this.putBytes(url, {}, chunk, options);
+        const etag = await this.putBytes(url, {}, chunk, {
+          ...options,
+          onUploadProgress: (progress: Progress) => {
+            inFlight.set(partNumber, Math.min(progress.loaded, Math.max(0, chunk.size - 1)));
+            report();
+          },
+        });
+        inFlight.delete(partNumber);
         if (!etag) {
           throw new OmsError(
             "storage: the object store did not expose the part ETag. In a browser this means the bucket's CORS policy is missing ETag in Access-Control-Expose-Headers.",
@@ -896,7 +942,7 @@ export class UploadManager extends Resource {
         // Safe to accumulate from inside the pool: the lanes interleave only at
         // an await, so no two of these ever run at the same time.
         loaded += chunk.size;
-        options.onProgress?.({ phase: "upload", loaded, total: body.size });
+        report();
       });
     }
 
@@ -916,10 +962,17 @@ export class UploadManager extends Resource {
     const retry = options.retry === false ? false : resolveRetry(options.retry ?? { maxAttempts: 4 });
     const maxAttempts = retry === false ? 1 : Math.max(1, retry.maxAttempts);
 
+    // Byte-level progress rides XHR when the runtime has it and no custom
+    // transport was given; a custom one is never bypassed.
+    const transport =
+      this.ownTransport && options.onUploadProgress
+        ? this.http.transportFor(options.onUploadProgress)
+        : this.transport;
+
     for (let attempt = 1; ; attempt += 1) {
       let response: Response;
       try {
-        response = await this.transport(url, {
+        response = await transport(url, {
           method: "PUT",
           headers,
           body,
