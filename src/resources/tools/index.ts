@@ -51,6 +51,7 @@ import { DownloaderNamespace } from "./downloader";
 import { JumpstyleNamespace } from "./jumpstyle";
 import { TranscriptionNamespace } from "./transcription";
 import { UpscaleNamespace } from "./upscale";
+import { SRMachineNamespace } from "./srMachine";
 import { VocalSeparationNamespace } from "./vocalSeparation";
 
 export * from "./backgroundRemoval";
@@ -59,6 +60,7 @@ export * from "./downloader";
 export * from "./jumpstyle";
 export * from "./transcription";
 export * from "./upscale";
+export * from "./srMachine";
 export * from "./vocalSeparation";
 
 /**
@@ -382,6 +384,8 @@ export class ToolsNamespace extends Resource {
   readonly jumpstyle: JumpstyleNamespace;
   /** Fetches media from a public URL. */
   readonly downloader: DownloaderNamespace;
+  /** Fetch, convert and package a track. Administrators only. */
+  readonly srMachine: SRMachineNamespace;
 
   constructor(http: ApiClient) {
     super(http);
@@ -392,5 +396,6 @@ export class ToolsNamespace extends Resource {
     this.captions = new CaptionsNamespace(http);
     this.jumpstyle = new JumpstyleNamespace(http);
     this.downloader = new DownloaderNamespace(http);
+    this.srMachine = new SRMachineNamespace(http);
   }
 }

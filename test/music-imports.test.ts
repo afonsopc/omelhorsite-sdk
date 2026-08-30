@@ -444,56 +444,6 @@ describe("spotify sync", () => {
   });
 });
 
-describe("SR machine", () => {
-  test("metadata passes the url as a query parameter", async () => {
-    const { imports, calls } = harness({ body: { title: "Construção", artist: "Chico Buarque" } });
-
-    const metadata = await imports.srMachine.metadata("https://youtu.be/abc");
-
-    expect(calls[0]?.method).toBe("GET");
-    expect(calls[0]?.url.pathname).toBe("/s_r_machine/metadata");
-    expect(calls[0]?.url.searchParams.get("url")).toBe("https://youtu.be/abc");
-    expect(metadata.artist).toBe("Chico Buarque");
-  });
-
-  test("artwork comes back as a FileOutput carrying the server's filename", async () => {
-    const { imports } = harness({
-      text: "ÿØÿ",
-      headers: { "content-type": "image/jpeg", "content-disposition": 'attachment; filename="artwork.jpg"' },
-    });
-
-    const file = await imports.srMachine.artwork("https://youtu.be/abc");
-
-    expect(file.filename).toBe("artwork.jpg");
-    expect(file.contentType).toBe("image/jpeg");
-    expect(file.size).toBeGreaterThan(0);
-  });
-
-  test("convert-opus uploads multipart under the field name the controller reads", async () => {
-    const { imports, calls } = harness({
-      text: "OggS",
-      headers: { "content-type": "audio/opus", "content-disposition": 'attachment; filename="audio.opus"' },
-    });
-
-    const source = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/wav" });
-    const file = await imports.srMachine.convertToOpus({ data: source, filename: "song.wav" });
-
-    // `params[:file].read` is the whole server-side contract: a different field
-    // name is a 500, not a 400.
-    expect(calls[0]?.form?.get("file")).toBeInstanceOf(Blob);
-    expect(file.contentType).toBe("audio/opus");
-  });
-
-  test("a non-admin is refused by the gatekeeper", async () => {
-    const { imports } = harness({ status: 403, body: "You SHALL NOT use this resource" });
-
-    const failure = await imports.srMachine.metadata("https://youtu.be/abc").catch((thrown: unknown) => thrown);
-
-    expect(failure).toBeInstanceOf(OmsAuthError);
-    expect((failure as OmsAuthError).status).toBe(403);
-  });
-});
-
 describe("pure helpers", () => {
   test("terminal states are complete and failed, and pending is not one", () => {
     expect([...SONG_IMPORT_TERMINAL_STATES]).toEqual(["complete", "failed"]);

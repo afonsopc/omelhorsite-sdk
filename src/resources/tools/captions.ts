@@ -666,7 +666,18 @@ export class CaptionsNamespace extends Resource {
    *   quota is spent either way and the words still land on the row.
    */
   async transcribe(id: Id, input: TranscribeCaptionInput, options: ToolRunOptions = {}): Promise<CaptionJob> {
-    const started = await this.http.post<CaptionJob>(
+    const started = await this.startTranscribe(id, input, options);
+    return this.settle(id, started, options, "the transcription");
+  }
+
+  /**
+   * `POST /caption_jobs/:id/transcribe` without waiting: answers the row as
+   * soon as it is `"transcribing"`. For a screen that polls {@link get} itself
+   * and shows progress meanwhile. Same errors as {@link transcribe}, minus the
+   * timeouts.
+   */
+  async startTranscribe(id: Id, input: TranscribeCaptionInput, options: RequestOptions = {}): Promise<CaptionJob> {
+    return this.http.post<CaptionJob>(
       `/caption_jobs/${encodeURIComponent(id)}/transcribe`,
       {
         start: input.start,
@@ -675,7 +686,6 @@ export class CaptionsNamespace extends Resource {
       },
       { ...options, retry: options.retry ?? false },
     );
-    return this.settle(id, started, options, "the transcription");
   }
 
   /**
@@ -704,6 +714,16 @@ export class CaptionsNamespace extends Resource {
    *   `code: "aborted"` when the signal fires. Neither cancels the render.
    */
   async render(id: Id, input: RenderCaptionInput = {}, options: ToolRunOptions = {}): Promise<CaptionJob> {
+    const started = await this.startRender(id, input, options);
+    return this.settle(id, started, options, "the render");
+  }
+
+  /**
+   * `POST /caption_jobs/:id/render` without waiting: answers the row as soon
+   * as it is `"rendering"`. Same word handling and errors as {@link render},
+   * minus the timeouts.
+   */
+  async startRender(id: Id, input: RenderCaptionInput = {}, options: RequestOptions = {}): Promise<CaptionJob> {
     const words = input.words ?? (await this.get(id, options)).words ?? [];
     if (words.length === 0) {
       throw new OmsError(
@@ -713,7 +733,7 @@ export class CaptionsNamespace extends Resource {
       );
     }
 
-    const started = await this.http.post<CaptionJob>(
+    return this.http.post<CaptionJob>(
       `/caption_jobs/${encodeURIComponent(id)}/render`,
       {
         words,
@@ -721,7 +741,6 @@ export class CaptionsNamespace extends Resource {
       },
       { ...options, retry: options.retry ?? false },
     );
-    return this.settle(id, started, options, "the render");
   }
 
   /**
