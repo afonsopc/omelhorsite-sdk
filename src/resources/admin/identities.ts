@@ -50,7 +50,7 @@ export const LINKED_IDENTITY_FILTER_COLUMNS = Object.freeze(["user_id"] as const
 /** Filters for {@link LinkedIdentitiesNamespace.list}. */
 export interface ListLinkedIdentitiesParams extends ListParams<(typeof LINKED_IDENTITY_FILTER_COLUMNS)[number]> {
   /** Defaults to `"created_at:desc"`. */
-  readonly order?: string;
+  readonly order?: string | null;
 }
 
 /**

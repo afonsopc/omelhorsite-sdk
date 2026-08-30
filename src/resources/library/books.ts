@@ -123,7 +123,7 @@ export interface ListBooksParams extends BookFilters, ListParams<(typeof BOOK_FI
    */
   readonly tags?: readonly string[];
   /** `"column:asc"` / `"column:desc"`. See {@link LibraryBooksNamespace.list}. */
-  readonly order?: string;
+  readonly order?: string | null;
   /** Random ordering. Disables the `ETag`, and is not stable across pages. */
   readonly random?: boolean;
 }

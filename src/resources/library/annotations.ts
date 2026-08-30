@@ -23,7 +23,7 @@ export interface ListBookAnnotationsParams extends ListParams<(typeof BOOK_ANNOT
   /** Exact kind, or an array of kinds (which becomes `IN (...)`). */
   readonly kind?: BookAnnotationKind | readonly BookAnnotationKind[];
   /** `"column:asc"` / `"column:desc"`. Defaults to `created_at:asc`. */
-  readonly order?: string;
+  readonly order?: string | null;
 }
 
 /** Arguments for {@link LibraryAnnotationsNamespace.create}. */

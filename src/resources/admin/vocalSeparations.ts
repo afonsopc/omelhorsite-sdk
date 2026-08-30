@@ -44,7 +44,7 @@ export interface ListAdminVocalSeparationsParams
   /** `exact_search[user_id]`. */
   readonly userId?: Id;
   /** `modifiers[order]`. Defaults to `"created_at:desc"`. */
-  readonly order?: string;
+  readonly order?: string | null;
 }
 
 /**

@@ -74,7 +74,7 @@ export interface ListBookShelvesParams extends ListParams<(typeof BOOK_SHELF_FIL
   /** Exact ids. An array becomes `IN (...)`. */
   readonly ids?: readonly BookShelfId[];
   /** `"column:asc"` / `"column:desc"`. Defaults to the endpoint's own ordering. */
-  readonly order?: string;
+  readonly order?: string | null;
 }
 
 /** Arguments for {@link LibraryShelvesNamespace.create}. */

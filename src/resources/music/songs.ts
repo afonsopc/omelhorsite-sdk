@@ -545,7 +545,7 @@ export interface ListSongsParams extends SongFilters, ListParams<(typeof SONG_FI
    * A third `:`-separated segment pins specific values first
    * (`"album:asc:Clube da Esquina,Acabou Chorare"`).
    */
-  readonly order?: string;
+  readonly order?: string | null;
   /**
    * `modifiers[random]=true` - shuffle server-side.
    *

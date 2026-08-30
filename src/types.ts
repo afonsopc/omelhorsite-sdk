@@ -457,8 +457,12 @@ export interface PageParams {
    * the wire. See {@link resolvePageSize}.
    */
   readonly pageSize?: number;
-  /** `"column:asc"` or `"column:desc"`, passed through as `modifiers[order]`. */
-  readonly order?: string;
+  /**
+   * `"column:asc"` or `"column:desc"`, sent as `modifiers[order]`. `null` sends
+   * none at all, not even a resource's default, which is what a caller relying
+   * on the server's own base order wants.
+   */
+  readonly order?: string | null;
 }
 
 /**

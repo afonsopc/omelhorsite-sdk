@@ -32,7 +32,7 @@ export interface ListAdminJobsParams extends ListParams<(typeof ADMIN_JOB_FILTER
   /** Exact job type. An array becomes an `IN`. */
   readonly jobType?: string | readonly string[];
   /** Defaults to `"created_at:desc"`. */
-  readonly order?: string;
+  readonly order?: string | null;
 }
 
 /** What {@link AdminJobsNamespace.cleanupStuck} answers with. */

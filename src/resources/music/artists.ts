@@ -298,7 +298,7 @@ export interface ListArtistsParams extends ListParams<(typeof ARTIST_FILTER_COLU
    * field is computed per response and cannot be sorted on. Sort client-side,
    * or read {@link MusicArtistsNamespace.overview}, which ranks for you.
    */
-  readonly order?: string;
+  readonly order?: string | null;
 }
 
 /** Body accepted by {@link MusicArtistsNamespace.update}. */

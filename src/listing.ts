@@ -99,7 +99,9 @@ export function listQuery(params: ListParams<string, object>, at: PageAt | undef
 
   const modifiers: Record<string, QueryValue> = {};
   if (at !== undefined) modifiers["page"] = pageModifier(at.page, at.pageSize);
-  const order = params.order ?? base.order;
+  // A random listing must send no order: the server only shuffles when none is
+  // given. `null` says the same thing explicitly.
+  const order = params.order === null ? undefined : (params.order ?? (params.random === true ? undefined : base.order));
   if (order !== undefined) modifiers["order"] = order;
   if (params.random === true) modifiers["random"] = true;
 

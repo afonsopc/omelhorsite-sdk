@@ -65,6 +65,16 @@ describe("listQuery", () => {
     });
   });
 
+  test("random sends no order, not even the resource's default", () => {
+    const query = listQuery({ random: true }, { page: 1, pageSize: 10 }, { order: "created_at:asc" });
+    expect(query.modifiers).toEqual({ page: "1:10", random: true });
+  });
+
+  test("order: null sends no order at all", () => {
+    const query = listQuery({ order: null }, { page: 1, pageSize: 10 }, { order: "created_at:desc" });
+    expect(query.modifiers).toEqual({ page: "1:10" });
+  });
+
   test("no page is written when the caller wants the whole scope", () => {
     expect(listQuery({ search: { title: "x" } }, undefined)).toEqual({ search: { title: "x" } });
   });
