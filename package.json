@@ -1,6 +1,6 @@
 {
   "name": "@omelhorsite/sdk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "TypeScript SDK for the omelhorsite API. Isolate-safe: no node builtins, no environment access, no stdout.",
   "type": "module",
   "license": "UNLICENSED",
