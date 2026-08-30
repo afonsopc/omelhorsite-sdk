@@ -2,7 +2,28 @@ import { describe, expect, test } from "bun:test";
 
 import { OmsApiError } from "../src/errors";
 import { ApiClient } from "../src/http";
-import { AccountSessionsNamespace } from "../src/resources/account";
+import { AccountNamespace, AccountSessionsNamespace } from "../src/resources/account";
+
+describe("account.update", () => {
+  test("null reaches the wire, so a column can be cleared", async () => {
+    const bodies: unknown[] = [];
+    const http = new ApiClient({
+      baseUrl: BASE_URL,
+      tokens: { getToken: () => "t" },
+      fetch: async (input, init) => {
+        if (typeof init?.body === "string") bodies.push(JSON.parse(init.body));
+        return new Response(JSON.stringify({ id: "u1", handle: "afonso" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    await new AccountNamespace(http).update({ libraryName: null, libraryDescription: "x", bio: null });
+
+    expect(bodies).toEqual([{ library_name: null, library_description: "x", bio: null }]);
+  });
+});
 
 const BASE_URL = "https://api.test";
 

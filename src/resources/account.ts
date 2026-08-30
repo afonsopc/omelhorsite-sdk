@@ -97,14 +97,17 @@ export interface UserSearchResult {
 export interface UpdateAccountInput {
   readonly handle?: string;
   readonly name?: string;
-  readonly bio?: string;
+  /** `null` clears it. */
+  readonly bio?: string | null;
   readonly countryCode?: string;
   readonly emailIsPublic?: boolean;
   readonly genderIsPublic?: boolean;
   readonly gender?: string;
   readonly libraryPublic?: boolean;
-  readonly libraryName?: string;
-  readonly libraryDescription?: string;
+  /** `null` clears it. */
+  readonly libraryName?: string | null;
+  /** `null` clears it. */
+  readonly libraryDescription?: string | null;
   /** Whether friends may see what you are listening to. */
   readonly shareListening?: boolean;
 }
