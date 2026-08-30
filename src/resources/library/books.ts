@@ -16,7 +16,7 @@ import type {
   BookVisibility,
   PublicLibrary,
 } from "./types";
-import { idSegment } from "./types";
+import { idSegment } from "../../internal/helpers";
 
 /**
  * Ceiling `POST /books` enforces on the uploaded file: 100 MiB.

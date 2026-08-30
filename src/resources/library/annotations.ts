@@ -5,7 +5,7 @@ import { listQuery, paginate } from "../../listing";
 import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../../listing";
 import type { Paginated, RequestOptions } from "../../types";
 import type { BookAnnotation, BookAnnotationId, BookAnnotationKind, BookAnnotationLocation, BookId } from "./types";
-import { idSegment } from "./types";
+import { idSegment } from "../../internal/helpers";
 
 /** Longest note accepted. */
 export const BOOK_ANNOTATION_NOTE_MAX_LENGTH = 5000;

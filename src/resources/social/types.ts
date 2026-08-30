@@ -1,4 +1,4 @@
-/** What direct messages and group chats share: the attachment kind, the caps both message families obey, and the helpers behind them. */
+/** What direct messages and group chats share: the attachment kind and the caps both message families obey. */
 
 import type { Timestamp } from "../../types";
 

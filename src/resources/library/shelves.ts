@@ -5,7 +5,7 @@ import { listQuery, paginate } from "../../listing";
 import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../../listing";
 import type { Id, Paginated, QueryParams, RequestOptions, Timestamp } from "../../types";
 import type { Book, BookId, BookVisibility } from "./types";
-import { idSegment } from "./types";
+import { idSegment } from "../../internal/helpers";
 
 /** Primary key of a shelf. A number, like every id in this file. */
 export type BookShelfId = number;

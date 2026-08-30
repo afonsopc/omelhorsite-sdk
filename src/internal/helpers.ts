@@ -27,3 +27,8 @@ export function scopeList(scopes: readonly string[] | string): string[] {
   const parts = Array.isArray(scopes) ? scopes : String(scopes).split(/[\s,]+/);
   return parts.map((scope) => String(scope).trim()).filter((scope) => scope.length > 0);
 }
+
+/** Path-safe form of an integer id. */
+export function idSegment(id: number): string {
+  return encodeURIComponent(String(id));
+}

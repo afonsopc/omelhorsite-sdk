@@ -132,7 +132,3 @@ export interface BookAnnotation {
   readonly selected_text: string | null;
 }
 
-/** Path-safe form of an integer id. Ids here are numbers, but never trust that at a boundary. */
-export function idSegment(id: number): string {
-  return encodeURIComponent(String(id));
-}

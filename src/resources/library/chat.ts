@@ -4,7 +4,7 @@ import { OmsApiError, OmsError } from "../../errors";
 import { Resource, supportsResponseStreaming } from "../../http";
 import type { RequestOptions } from "../../types";
 import type { BookId } from "./types";
-import { idSegment } from "./types";
+import { idSegment } from "../../internal/helpers";
 
 /**
  * Requests per minute allowed against `POST /books/:id/chat`.
