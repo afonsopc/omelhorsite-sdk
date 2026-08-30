@@ -1,6 +1,5 @@
 /** Shared vocabulary of the movies namespace: title types, the Stremio manifest, and the guards every area uses. */
 
-import { OmsError } from "../../errors";
 
 /**
  * What a title is. Stremio's own vocabulary, and the backend stores it as a
@@ -52,31 +51,4 @@ export interface StremioManifest {
   readonly background?: string;
   /** Anything else the manifest carried. `jsonb` keeps it all. */
   readonly [key: string]: unknown;
-}
-
-/**
- * Copies the keys that were actually supplied.
- *
- * `undefined` is skipped so an omitted key never reaches the wire, while an
- * explicit `null` is kept: for these endpoints `null` means "clear this
- * column", and the two are not interchangeable. `finished` deliberately does
- * NOT go through here - see {@link watchProgressBody}.
- */
-export function pickOptional<T extends object>(
-  source: T,
-  keys: readonly (keyof T & string)[],
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of keys) {
-    const value = source[key];
-    if (value !== undefined) out[key] = value;
-  }
-  return out;
-}
-
-/** Fails fast on a value the server would answer for with a validation error. */
-export function assertPresent(field: string, value: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new OmsError(`${field} is required and cannot be blank.`, "invalid_request");
-  }
 }

@@ -1,9 +1,6 @@
 /** What direct messages and group chats share: the attachment kind, the caps both message families obey, and the helpers behind them. */
 
-import { OmsError, OmsNetworkError } from "../../errors";
-import type { ApiClient, TokenProvider } from "../../http";
-import type { FileInput, NativeFile, RequestOptions, Timestamp } from "../../types";
-import { isNativeFile } from "../../types";
+import type { Timestamp } from "../../types";
 
 /* -------------------------------------------------------------------------- */
 /* Limits the server enforces                                                 */
@@ -61,87 +58,3 @@ export function canEditMessage(
   return now - created <= MESSAGE_EDIT_WINDOW_MS;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Internals                                                                  */
-/* -------------------------------------------------------------------------- */
-
-/** Fails fast on a value the server would answer for with a framework error. */
-export function assertPresent(field: string, value: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new OmsError(`${field} is required and cannot be blank.`, "invalid_request");
-  }
-}
-
-/**
- * Byte length of an attachment, when it is knowable without reading anything.
- *
- * Deliberately `undefined` rather than zero for a `ReadableStream` with no
- * declared `size` and for a picker that reported none: buffering a file just to
- * measure it would cost more than the server's 400.
- */
-export function attachmentSize(file: FileInput | NativeFile): number | undefined {
-  if (isNativeFile(file)) return file.size;
-  if (typeof file.size === "number") return file.size;
-  const data = file.data;
-  if (isNativeFile(data)) return data.size;
-  if (typeof Blob === "function" && data instanceof Blob) return data.size;
-  if (data instanceof Uint8Array) return data.byteLength;
-  return undefined;
-}
-
-/**
- * Follows an attachment redirect and turns the browser-in-cookie-mode CORS
- * failure into an error that explains itself.
- *
- * The redirect to object storage arrives with `Origin: null` on a credentialed
- * request and the store answers a wildcard `Access-Control-Allow-Origin`, which
- * CORS forbids. That reaches us as a bare `fetch` rejection, indistinguishable
- * from a real network fault and already retried three times by the transport.
- * Only the client's SHAPE tells the two apart: no bearer token means cookie
- * mode, which means a browser.
- */
-export async function followAttachment(
-  http: ApiClient,
-  path: string,
-  what: string,
-  options: RequestOptions,
-): Promise<Blob> {
-  try {
-    const response = await http.raw("GET", path, options);
-    return await response.blob();
-  } catch (thrown) {
-    if (thrown instanceof OmsNetworkError && (await tokenOf(http)) === null) {
-      throw new OmsError(
-        `The ${what} attachment redirect could not be followed. In a browser, a client built with ` +
-          "`sessionCookie: true` sends credentials, the 302 to object storage arrives there with " +
-          "`Origin: null`, and the store answers a wildcard `Access-Control-Allow-Origin` - which CORS " +
-          "forbids for a credentialed request. Use the matching `attachmentUrl(...)` and put the URL in an " +
-          "<img>, a <video> or an <a download> instead: those follow the redirect with no CORS check.",
-        "unsupported",
-        { method: "GET", url: http.url(path), cause: thrown },
-      );
-    }
-    throw thrown;
-  }
-}
-
-/**
- * The bearer token the transport would send, or `null` when there is none -
- * which for a working client means it is in cookie mode.
- *
- * Read off `ApiClient` through a defensive probe, the same way `tickets.ts`
- * does and for the same reason: the provider is private, `http.ts` is shared,
- * and neither of these two needs is worth growing the transport a new public
- * member for. A probe that finds nothing degrades to `null`, which is the safe
- * answer in both places it is used - a URL with no credential rather than a
- * wrong one, and the CORS explanation rather than a swallowed error.
- */
-export async function tokenOf(http: ApiClient): Promise<string | null> {
-  const provider = (http as unknown as { tokens?: TokenProvider }).tokens;
-  if (provider === undefined || typeof provider.getToken !== "function") return null;
-  try {
-    return (await provider.getToken()) ?? null;
-  } catch {
-    return null;
-  }
-}

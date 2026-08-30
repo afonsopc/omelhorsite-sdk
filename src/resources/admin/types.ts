@@ -244,12 +244,6 @@ export function editWouldRequeue(
   return registeredRedirectUris(next.redirectUris) !== registeredRedirectUris(application.redirect_uri);
 }
 
-/** Normalises {@link CreateOauthApplicationInput.scopes} into the array the API reads. */
-export function scopeList(scopes: readonly string[] | string): string[] {
-  const parts = Array.isArray(scopes) ? scopes : String(scopes).split(/[\s,]+/);
-  return parts.map((scope) => String(scope).trim()).filter((scope) => scope.length > 0);
-}
-
 /**
  * One day of a 30 day series.
  *

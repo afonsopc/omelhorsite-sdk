@@ -4,7 +4,9 @@ import { OmsError } from "../../errors";
 import { Resource } from "../../http";
 import type { BaseRecord, FileInput, Id, NativeFile, RequestOptions, Timestamp } from "../../types";
 import type { AttachmentKind } from "./types";
-import { MESSAGE_ATTACHMENT_MAX_BYTES, assertPresent, attachmentSize, followAttachment, tokenOf } from "./types";
+import { MESSAGE_ATTACHMENT_MAX_BYTES } from "./types";
+import { assertPresent } from "../../internal/helpers";
+import { attachmentSize, followAttachment, tokenOf } from "../../internal/attachments";
 
 /* -------------------------------------------------------------------------- */
 /* Identifiers                                                                */

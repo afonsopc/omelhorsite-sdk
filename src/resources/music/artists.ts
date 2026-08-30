@@ -47,6 +47,7 @@
 import { OmsError } from "../../errors";
 import { ApiClient, Resource } from "../../http";
 import { listQuery, paginate } from "../../listing";
+import { assertPresent } from "../../internal/helpers";
 import type { ListParams } from "../../listing";
 import type {
   FileInput,
@@ -1228,13 +1229,6 @@ export class MusicArtistsNamespace extends Resource {
       { banner },
       { retry: false, ...options },
     );
-  }
-}
-
-/** Fails fast on a value the server would answer for with a framework error. */
-function assertPresent(field: string, value: string): void {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new OmsError(`${field} is required and cannot be blank.`, "invalid_request");
   }
 }
 

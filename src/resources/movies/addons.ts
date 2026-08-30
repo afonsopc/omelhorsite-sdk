@@ -9,7 +9,7 @@ import type { BaseRecord, Id, Paginated, RequestOptions } from "../../types";
 import { DEFAULT_PAGE_SIZE } from "../../types";
 import type { User } from "../account";
 import type { StremioManifest } from "./types";
-import { assertPresent } from "./types";
+import { assertPresent } from "../../internal/helpers";
 
 /**
  * An installed addon: a manifest URL plus the manifest fetched from it.

@@ -7,7 +7,7 @@ import type { ListParams } from "../../listing";
 import type { BaseRecord, Id, Paginated, RequestOptions } from "../../types";
 import { DEFAULT_PAGE_SIZE } from "../../types";
 import type { MovieType } from "./types";
-import { assertPresent, pickOptional } from "./types";
+import { assertPresent, pickOptional } from "../../internal/helpers";
 
 /** The manual kind: a collection the user created and may rename or delete. */
 export const MOVIE_COLLECTION_MANUAL_KIND = "manual";

@@ -3,7 +3,8 @@
 import type { OmsScope } from "../../auth/tokens";
 import { Resource } from "../../http";
 import type { RequestOptions, Timestamp } from "../../types";
-import { type OauthApplicationSummary, scopeList } from "./types";
+import type { OauthApplicationSummary } from "./types";
+import { scopeList } from "../../internal/helpers";
 
 /**
  * A registered client as an ADMINISTRATOR sees it: same eleven keys as

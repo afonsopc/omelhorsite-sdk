@@ -4,7 +4,7 @@ import { Resource } from "../../http";
 import { OmsError } from "../../errors";
 import type { BaseRecord, Id, RequestOptions, Timestamp } from "../../types";
 import type { MovieType } from "./types";
-import { assertPresent, pickOptional } from "./types";
+import { assertPresent, pickOptional } from "../../internal/helpers";
 
 /**
  * Fraction of the runtime that counts as watched when the server derives

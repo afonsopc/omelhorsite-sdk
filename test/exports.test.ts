@@ -164,12 +164,13 @@ describe("public surface", () => {
 
     // `local/wordlist.ts` is deliberately not starred: `local/password.ts`
     // re-exports its single constant by name, and starring it as well would
-    // make that name ambiguous and delete it from the barrel.
+    // make that name ambiguous and delete it from the barrel. `internal/` holds
+    // helpers shared between resources that are not part of the public surface.
     const exempt = new Set(["local/wordlist.ts"]);
 
     const orphans = files
       .map(rel)
-      .filter((file) => !exempt.has(file))
+      .filter((file) => !exempt.has(file) && !file.startsWith("internal/"))
       .filter((file) => !reachable.has(join(SRC, file)));
 
     expect(orphans).toEqual([]);

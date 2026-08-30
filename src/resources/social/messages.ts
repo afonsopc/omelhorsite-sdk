@@ -8,7 +8,9 @@ import type { User } from "../account";
 import type { FileInput, Id, NativeFile, Paginated, RequestOptions, Timestamp } from "../../types";
 import { DEFAULT_PAGE_SIZE, isNativeFile } from "../../types";
 import type { AttachmentKind } from "./types";
-import { MESSAGE_ATTACHMENT_MAX_BYTES, assertPresent, attachmentSize, followAttachment, tokenOf } from "./types";
+import { MESSAGE_ATTACHMENT_MAX_BYTES } from "./types";
+import { assertPresent } from "../../internal/helpers";
+import { attachmentSize, followAttachment, tokenOf } from "../../internal/attachments";
 
 /* -------------------------------------------------------------------------- */
 /* Identifiers                                                                */

@@ -6,7 +6,7 @@ import type { BASE_FILTER_COLUMNS, ListParams, ListQueryBase } from "../../listi
 import type { User } from "../account";
 import type { Id, Paginated, RequestOptions, Timestamp } from "../../types";
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "../../types";
-import { assertPresent } from "./types";
+import { assertPresent } from "../../internal/helpers";
 
 /* -------------------------------------------------------------------------- */
 /* Identifiers                                                                */
