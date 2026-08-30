@@ -267,6 +267,16 @@ export class AccountSessionsNamespace extends Resource {
     const session = await this.current(options);
     await this.http.delete<void>(`/sessions/${encodeURIComponent(session.id)}`, options);
   }
+
+  /**
+   * `DELETE /sessions/:id` - ends one of YOUR sessions, e.g. another device's.
+   * Ending the calling session clears its cookie as well.
+   *
+   * @throws {OmsApiError} 404 for a session that is not yours or no longer exists.
+   */
+  async revoke(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/sessions/${encodeURIComponent(id)}`, options);
+  }
 }
 
 /** The `account` namespace, reachable as `oms.account`. */
