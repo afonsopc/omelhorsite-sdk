@@ -96,8 +96,8 @@ export interface CreateOauthApplicationInput {
    * and a redirect URI pointing at something an attacker controls IS account
    * takeover - PKCE does not help, it binds the code to the client that started
    * the flow, not to where the code is delivered. The server refuses anything
-   * that is not `https`, not loopback `http`, carries userinfo, carries a
-   * wildcard host or has no host at all, and it does so with a `422`
+   * that is not `http` or `https`, carries userinfo, carries a wildcard host
+   * or has no host at all, and it does so with a `422`
    * (`validation_failed`) rather than by quietly rewriting your value.
    */
   readonly redirect_uri?: string;
