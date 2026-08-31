@@ -35,6 +35,7 @@ export * from "./music/index";
 export * from "./notepads";
 export * from "./quotas";
 export * from "./realtime";
+export * from "./search";
 export * from "./shortLinks";
 export * from "./social";
 export * from "./storage";

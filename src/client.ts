@@ -33,6 +33,7 @@ import { MusicNamespace } from "./resources/music/index";
 import { NotepadsNamespace } from "./resources/notepads";
 import { QuotasNamespace } from "./resources/quotas";
 import { RealtimeNamespace } from "./resources/realtime";
+import { SearchNamespace } from "./resources/search";
 import { ShortLinksNamespace } from "./resources/shortLinks";
 import { SocialNamespace } from "./resources/social";
 import { StorageNamespace } from "./resources/storage";
@@ -183,6 +184,8 @@ export class Oms {
   readonly content: ContentNamespace;
   /** OAuth client registration for anyone, plus the `/admin/*` routes. */
   readonly admin: AdminNamespace;
+  /** Web search: web, images, news and videos through the site's own engine. */
+  readonly search: SearchNamespace;
   /**
    * The WebSocket connection: playback handoff, jams, notifications, job
    * progress. Opens nothing until {@link RealtimeNamespace.connect} is called,
@@ -243,6 +246,7 @@ export class Oms {
     this.content = new ContentNamespace(this.http);
     this.admin = new AdminNamespace(this.http);
     this.realtime = new RealtimeNamespace(this.http);
+    this.search = new SearchNamespace(this.http);
   }
 
   /** The API root this client talks to, with no trailing slash. */

@@ -242,6 +242,7 @@ describe("namespace registry", () => {
       "passkeys",
       "quotas",
       "realtime",
+      "search",
       "sessions",
       "shortLinks",
       "social",

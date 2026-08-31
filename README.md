@@ -80,6 +80,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/new/path");
 | `oms.media` | Resolving stored media to URLs. |
 | `oms.music` | Songs, artists, playlists, imports, likes, jams, the social feed. |
 | `oms.movies` | Addons, collections, watch progress. |
+| `oms.search` | Web search: web, images, news and videos, with suggestions and infoboxes. |
 | `oms.library` | Books, shelves, annotations, the study assistant. |
 | `oms.social` | Direct messages, relationships, group chats. |
 | `oms.content` | Blogs, notifications, feedbacks, jokes, site status, intel. |
