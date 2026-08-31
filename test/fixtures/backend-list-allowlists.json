@@ -45,8 +45,7 @@
       "name",
       "enabled",
       "visible_in_chat",
-      "free",
-      "synced"
+      "free"
     ],
     "extra_options": [],
     "custom": []
@@ -56,8 +55,7 @@
       "slug",
       "name",
       "kind",
-      "enabled",
-      "sync_models"
+      "enabled"
     ],
     "extra_options": [],
     "custom": []

@@ -50,10 +50,6 @@ export interface LlmProvider {
   readonly enabled: boolean;
   /** Calls allowed in flight at once on this provider; the next one answers `503`. */
   readonly max_concurrency: number;
-  /** Whether the hourly sync refreshes this provider's models from its `/models`. */
-  readonly sync_models: boolean;
-  readonly last_synced_at: Timestamp | null;
-  readonly last_sync_error: string | null;
   /** Seconds. */
   readonly open_timeout: number;
   /** Seconds, per read: a long generation is fine while tokens keep arriving. */
@@ -74,7 +70,6 @@ export interface CreateLlmProviderInput {
   readonly enabled?: boolean;
   /** 1 to 64. */
   readonly maxConcurrency?: number;
-  readonly syncModels?: boolean;
   /** 1 to 60 seconds. */
   readonly openTimeout?: number;
   /** 5 to 600 seconds. */
@@ -90,19 +85,27 @@ export const ADMIN_LLM_PROVIDER_FILTER_COLUMNS = Object.freeze([
   "name",
   "kind",
   "enabled",
-  "sync_models",
 ] as const);
 
 export interface ListAdminLlmProvidersParams
   extends ListParams<(typeof ADMIN_LLM_PROVIDER_FILTER_COLUMNS)[number]> {}
 
-export interface LlmProviderSyncResult extends LlmProvider {
-  readonly sync: {
-    readonly created: number;
-    readonly updated: number;
-    /** Synced models the provider no longer lists, switched off. */
-    readonly disabled: number;
-  };
+/**
+ * One model the provider offers, shaped like the record it would become.
+ * `free` is `null` when the provider publishes no prices; `added` says whether
+ * it is already in the list.
+ */
+export interface LlmAvailableModel {
+  readonly model_id: string;
+  readonly name: string;
+  readonly context_window: number | null;
+  readonly max_output_tokens: number | null;
+  readonly input_price_per_million: number | null;
+  readonly output_price_per_million: number | null;
+  readonly free: boolean | null;
+  readonly capabilities: LlmCapabilities;
+  readonly description: string | null;
+  readonly added: boolean;
 }
 
 /** Always `200`: a failed probe is `ok: false` with the reason, not an error. */
@@ -139,8 +142,6 @@ export interface LlmModel {
   readonly free: boolean;
   readonly capabilities: LlmCapabilities;
   readonly limits: LlmLimits;
-  /** `true` when it came from the provider's `/models`; the sync keeps it fresh and disables it if it vanishes. */
-  readonly synced: boolean;
   readonly metadata: JsonObject;
   /** Enabled, on an enabled provider. */
   readonly usable: boolean;
@@ -172,7 +173,6 @@ export const ADMIN_LLM_MODEL_FILTER_COLUMNS = Object.freeze([
   "enabled",
   "visible_in_chat",
   "free",
-  "synced",
 ] as const);
 
 export interface ListAdminLlmModelsParams
@@ -183,8 +183,7 @@ export interface ListAdminLlmModelsParams
  * `reasoning` is the request's `reasoning` object (e.g. `{ enabled: false }`:
  * a reasoning model otherwise spends the whole token budget thinking and
  * answers nothing). `num_ctx` goes to the provider verbatim (Ollama's context
- * size). `prefer_free` puts the provider's free `stealth/*` models, as synced,
- * in front of the list.
+ * size). `prefer_free` puts the provider's free models in front of the list.
  */
 export interface LlmAssignmentOptions {
   readonly temperature?: number;
@@ -258,7 +257,6 @@ function providerBody(input: UpdateLlmProviderInput): JsonObject {
   if (input.options !== undefined) body["options"] = { ...input.options } as JsonObject;
   if (input.enabled !== undefined) body["enabled"] = input.enabled;
   if (input.maxConcurrency !== undefined) body["max_concurrency"] = input.maxConcurrency;
-  if (input.syncModels !== undefined) body["sync_models"] = input.syncModels;
   if (input.openTimeout !== undefined) body["open_timeout"] = input.openTimeout;
   if (input.readTimeout !== undefined) body["read_timeout"] = input.readTimeout;
   return body;
@@ -318,12 +316,16 @@ export class AdminLlmProvidersNamespace extends Resource {
     await this.http.delete<void>(`/admin/llm_providers/${encodeURIComponent(id)}`, options);
   }
 
-  /** Refreshes the provider's models from its `/models` now. `502` when the provider does not answer. */
-  async sync(id: Id, options: RequestOptions = {}): Promise<LlmProviderSyncResult> {
-    return this.http.post<LlmProviderSyncResult>(
-      `/admin/llm_providers/${encodeURIComponent(id)}/sync`,
-      undefined,
-      { retry: false, ...options },
+  /**
+   * What the provider lists in its `/models`, without storing any of it: the
+   * model list is curated by hand and this is the menu to pick from. Cached
+   * for ten minutes; `fresh` skips the cache. `502` when the provider does
+   * not answer.
+   */
+  async availableModels(id: Id, input: { fresh?: boolean } = {}, options: RequestOptions = {}): Promise<LlmAvailableModel[]> {
+    return this.http.get<LlmAvailableModel[]>(
+      `/admin/llm_providers/${encodeURIComponent(id)}/available_models`,
+      { ...(input.fresh ? { query: { fresh: 1 } } : {}), ...options },
     );
   }
 

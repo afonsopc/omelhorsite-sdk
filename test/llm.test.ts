@@ -82,7 +82,6 @@ describe("admin.llmProviders", () => {
       headers: { "X-Title": "site" },
       options: { models_param: true },
       maxConcurrency: 8,
-      syncModels: true,
       openTimeout: 5,
       readTimeout: 120,
     });
@@ -96,7 +95,6 @@ describe("admin.llmProviders", () => {
       headers: { "X-Title": "site" },
       options: { models_param: true },
       max_concurrency: 8,
-      sync_models: true,
       open_timeout: 5,
       read_timeout: 120,
     });
@@ -119,15 +117,24 @@ describe("admin.llmProviders", () => {
     expect(calls[0]?.search).toContain("modifiers[order]=name:asc");
   });
 
-  test("sync and test are POSTs on the member", async () => {
+  test("test is a POST on the member", async () => {
     const { admin, calls } = harness({ ok: true, model_id: "a", reply: "ok", latency_ms: 12 });
-    await admin.llmProviders.sync("p1");
     await admin.llmProviders.test("p1", { modelId: "a" });
     await admin.llmProviders.test("p1");
     expect(calls.map((call) => [call.method, call.path, call.body])).toEqual([
-      ["POST", "/admin/llm_providers/p1/sync", undefined],
       ["POST", "/admin/llm_providers/p1/test", { model_id: "a" }],
       ["POST", "/admin/llm_providers/p1/test", {}],
+    ]);
+  });
+
+  test("availableModels is a GET on the member and stores nothing", async () => {
+    const { admin, calls } = harness([{ model_id: "a/one", name: "A", added: true }]);
+    const listed = await admin.llmProviders.availableModels("p1");
+    await admin.llmProviders.availableModels("p1", { fresh: true });
+    expect(listed[0]?.added).toBe(true);
+    expect(calls.map((call) => [call.method, call.path, call.search])).toEqual([
+      ["GET", "/admin/llm_providers/p1/available_models", ""],
+      ["GET", "/admin/llm_providers/p1/available_models", "?fresh=1"],
     ]);
   });
 
