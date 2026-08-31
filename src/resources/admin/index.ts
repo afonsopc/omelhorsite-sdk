@@ -6,6 +6,12 @@ import { AdminChestsNamespace } from "./chests";
 import { AdminEventAlertsNamespace } from "./eventAlerts";
 import { LinkedIdentitiesNamespace } from "./identities";
 import { AdminJobsNamespace } from "./jobs";
+import {
+  AdminLlmAssignmentsNamespace,
+  AdminLlmModelsNamespace,
+  AdminLlmProvidersNamespace,
+  AdminLlmUsageNamespace,
+} from "./llm";
 import { MyOauthApplicationsNamespace } from "./myOauthApplications";
 import { AdminNotepadsNamespace } from "./notepads";
 import { AdminOauthApplicationsNamespace } from "./oauthApplications";
@@ -19,6 +25,7 @@ export * from "./chests";
 export * from "./eventAlerts";
 export * from "./identities";
 export * from "./jobs";
+export * from "./llm";
 export * from "./myOauthApplications";
 export * from "./notepads";
 export * from "./oauthApplications";
@@ -81,6 +88,14 @@ export class AdminNamespace extends Resource {
   readonly eventAlerts: AdminEventAlertsNamespace;
   /** Any account, admin-only fields included. */
   readonly users: AdminUsersNamespace;
+  /** Language-model providers and their keys. **Administrators only.** */
+  readonly llmProviders: AdminLlmProvidersNamespace;
+  /** The models of every provider: prices, ceilings, visibility. **Administrators only.** */
+  readonly llmModels: AdminLlmModelsNamespace;
+  /** Which models answer each feature of the site, in fallback order. **Administrators only.** */
+  readonly llmAssignments: AdminLlmAssignmentsNamespace;
+  /** Everybody's language-model usage and cost. **Administrators only.** */
+  readonly llmUsage: AdminLlmUsageNamespace;
 
   constructor(http: ConstructorParameters<typeof Resource>[0]) {
     super(http);
@@ -96,5 +111,9 @@ export class AdminNamespace extends Resource {
     this.notepads = new AdminNotepadsNamespace(http);
     this.eventAlerts = new AdminEventAlertsNamespace(http);
     this.users = new AdminUsersNamespace(http);
+    this.llmProviders = new AdminLlmProvidersNamespace(http);
+    this.llmModels = new AdminLlmModelsNamespace(http);
+    this.llmAssignments = new AdminLlmAssignmentsNamespace(http);
+    this.llmUsage = new AdminLlmUsageNamespace(http);
   }
 }

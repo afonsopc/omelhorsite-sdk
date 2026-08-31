@@ -31,6 +31,42 @@
     "extra_options": [],
     "custom": []
   },
+  "admin/llm_assignments": {
+    "search": [
+      "feature"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/llm_models": {
+    "search": [
+      "llm_provider_id",
+      "model_id",
+      "name",
+      "enabled",
+      "visible_in_chat",
+      "free",
+      "synced"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/llm_providers": {
+    "search": [
+      "slug",
+      "name",
+      "kind",
+      "enabled",
+      "sync_models"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/llm_usage": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "admin/notepads": {
     "search": [],
     "extra_options": [],
@@ -354,6 +390,16 @@
     "extra_options": [],
     "custom": []
   },
+  "llm_models": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "llm_usage": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "lyrics": {
     "search": [],
     "extra_options": [],
@@ -553,6 +599,11 @@
     "custom": []
   },
   "s_r_machine": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "search": {
     "search": [],
     "extra_options": [],
     "custom": []

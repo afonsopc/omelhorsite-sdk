@@ -27,6 +27,7 @@ import { IpLookupNamespace } from "./resources/ipLookup";
 import { JobsNamespace } from "./resources/jobs";
 import { LibraryNamespace } from "./resources/library";
 import { LinkTreesNamespace } from "./resources/linkTrees";
+import { LlmNamespace } from "./resources/llm";
 import { MediaNamespace } from "./resources/media";
 import { MoviesNamespace } from "./resources/movies";
 import { MusicNamespace } from "./resources/music/index";
@@ -186,6 +187,8 @@ export class Oms {
   readonly admin: AdminNamespace;
   /** Web search: web, images, news and videos through the site's own engine. */
   readonly search: SearchNamespace;
+  /** The language models the signed-in person may pick, and their own usage. */
+  readonly llm: LlmNamespace;
   /**
    * The WebSocket connection: playback handoff, jams, notifications, job
    * progress. Opens nothing until {@link RealtimeNamespace.connect} is called,
@@ -247,6 +250,7 @@ export class Oms {
     this.admin = new AdminNamespace(this.http);
     this.realtime = new RealtimeNamespace(this.http);
     this.search = new SearchNamespace(this.http);
+    this.llm = new LlmNamespace(this.http);
   }
 
   /** The API root this client talks to, with no trailing slash. */

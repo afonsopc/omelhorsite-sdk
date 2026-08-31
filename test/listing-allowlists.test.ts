@@ -18,6 +18,9 @@ import { BASE_FILTER_COLUMNS } from "../src/listing";
 import { ACCOUNT_SESSION_FILTER_COLUMNS } from "../src/resources/account";
 import {
   ADMIN_JOB_FILTER_COLUMNS,
+  ADMIN_LLM_ASSIGNMENT_FILTER_COLUMNS,
+  ADMIN_LLM_MODEL_FILTER_COLUMNS,
+  ADMIN_LLM_PROVIDER_FILTER_COLUMNS,
   ADMIN_VOCAL_SEPARATION_FILTER_COLUMNS,
   LINKED_IDENTITY_FILTER_COLUMNS,
 } from "../src/resources/admin";
@@ -68,6 +71,9 @@ const NONE: readonly string[] = [];
 /** Resource path on the server, and what the SDK declares for it. */
 const RESOURCES: Record<string, { columns: readonly string[]; extra?: readonly string[] }> = {
   "admin/jobs": { columns: ADMIN_JOB_FILTER_COLUMNS },
+  "admin/llm_assignments": { columns: ADMIN_LLM_ASSIGNMENT_FILTER_COLUMNS },
+  "admin/llm_models": { columns: ADMIN_LLM_MODEL_FILTER_COLUMNS },
+  "admin/llm_providers": { columns: ADMIN_LLM_PROVIDER_FILTER_COLUMNS },
   "admin/vocal_separations": { columns: ADMIN_VOCAL_SEPARATION_FILTER_COLUMNS },
   artists: { columns: ARTIST_FILTER_COLUMNS },
   book_annotations: { columns: BOOK_ANNOTATION_FILTER_COLUMNS },
