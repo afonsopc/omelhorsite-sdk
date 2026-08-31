@@ -185,6 +185,14 @@ export interface Song extends Omit<BaseRecord, "id"> {
    * is why two songs by one artist often carry identical lists.
    */
   readonly tags: string[];
+  /**
+   * Tempo in beats per minute, or `null` when it is not known.
+   *
+   * Comes from the recording's own registry entry, matched by ISRC, so a
+   * track with no ISRC never gets one and a remix is never given the
+   * original's tempo. `null` is common and means nothing about the music.
+   */
+  readonly bpm: number | null;
   readonly original_filename: string | null;
   readonly audio_codec: string | null;
   readonly audio_bitrate_kbps: number | null;
