@@ -22,6 +22,7 @@ export interface AdminUpdateUserInput {
   readonly libraryPublic?: boolean;
   readonly libraryName?: string | null;
   readonly libraryDescription?: string | null;
+  readonly language?: string;
   readonly shareListening?: boolean;
   readonly email?: string;
   /** Privilege group, e.g. `"administrator"`. */
@@ -63,6 +64,7 @@ function adminUpdateBody(input: AdminUpdateUserInput): Record<string, string | b
   set("library_public", input.libraryPublic);
   set("library_name", input.libraryName);
   set("library_description", input.libraryDescription);
+  set("language", input.language);
   set("share_listening", input.shareListening);
   set("email", input.email);
   set("group", input.group);

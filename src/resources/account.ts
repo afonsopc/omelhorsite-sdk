@@ -44,6 +44,8 @@ export interface User extends BaseRecord {
   readonly bio?: string | null;
   /** ISO 3166-1 alpha-2, as the user set it. */
   readonly country_code?: string | null;
+  /** `en`, `pt` or `lv`: the language of the emails sent to this account. Own account only. */
+  readonly language?: string | null;
   readonly email_is_public?: boolean;
   readonly gender_is_public?: boolean;
   readonly library_public?: boolean;
@@ -109,6 +111,8 @@ export interface UpdateAccountInput {
   readonly libraryName?: string | null;
   /** `null` clears it. */
   readonly libraryDescription?: string | null;
+  /** `en`, `pt` or `lv`. */
+  readonly language?: string;
   /** Whether friends may see what you are listening to. */
   readonly shareListening?: boolean;
 }
@@ -562,6 +566,7 @@ function updateBody(input: UpdateAccountInput): Record<string, unknown> {
     library_public: input.libraryPublic,
     library_name: input.libraryName,
     library_description: input.libraryDescription,
+    language: input.language,
     share_listening: input.shareListening,
   };
 }
