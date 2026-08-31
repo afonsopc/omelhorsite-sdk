@@ -46,6 +46,13 @@ export interface User extends BaseRecord {
   readonly country_code?: string | null;
   /** `en`, `pt` or `lv`: the language of the emails sent to this account. Own account only. */
   readonly language?: string | null;
+  /**
+   * Whether the address on the account was proven by an emailed code: the same
+   * fact the id token's `email_verified` carries. Own account only. `false`
+   * on accounts older than the emailed sign-up code until they confirm once
+   * with `sessions.verifyEmailStart` / `verifyEmailComplete`.
+   */
+  readonly email_verified?: boolean;
   readonly email_is_public?: boolean;
   readonly gender_is_public?: boolean;
   readonly library_public?: boolean;

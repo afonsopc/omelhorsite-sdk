@@ -314,6 +314,20 @@ describe("the two-step email flows", () => {
     expect(calls[0]!.body).toEqual({ email: "a@b.pt", code: "222222", password: "novo" });
   });
 
+  test("verifyEmailStart sends no body and verifyEmailComplete carries the code", async () => {
+    const { sessions, calls } = harness([
+      { status: 200, body: "Verification code sent to your email." },
+      { status: 200, body: { id: "user-1", email_verified: true } },
+    ]);
+    await sessions.verifyEmailStart();
+    const user = await sessions.verifyEmailComplete("123456");
+    expect(calls[0]!.path).toBe("/users/verify_email_start");
+    expect(calls[0]!.body).toBeUndefined();
+    expect(calls[1]!.path).toBe("/users/verify_email_end");
+    expect(calls[1]!.body).toEqual({ code: "123456" });
+    expect(user.email_verified).toBe(true);
+  });
+
   test("changeEmailStart names the NEW address, and nothing identifies the old one", async () => {
     const { sessions, calls } = harness([{ status: 200, body: "Email update instructions sent." }]);
 

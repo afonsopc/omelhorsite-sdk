@@ -832,6 +832,32 @@ export class AuthSessionsNamespace extends Resource {
    *   rejected at write time - already taken, malformed. Both codes are
    *   consumed by then and the flow restarts at {@link changeEmailStart}.
    */
+  /**
+   * `POST /users/verify_email_start` - emails a code to the address already on
+   * the account, so an account that never proved its mailbox (one older than
+   * the emailed sign-up code) can. Requires a live session; an account that is
+   * already verified answers `200` without sending anything.
+   *
+   * Same shared `*_start` throttle as the other code-issuing calls.
+   *
+   * @throws {OmsAuthError} 401 without a live session.
+   */
+  async verifyEmailStart(options: RequestOptions = {}): Promise<string> {
+    return this.http.post<string>("/users/verify_email_start", undefined, options);
+  }
+
+  /**
+   * `POST /users/verify_email_end` - presents the code; answers `200` with the
+   * updated {@link User}, `email_verified` now `true`.
+   *
+   * @throws {OmsAuthError} 401 without a live session.
+   * @throws {OmsApiError} 404 `"Invalid Verification"` when the code is wrong,
+   *   expired or burned.
+   */
+  async verifyEmailComplete(code: string, options: RequestOptions = {}): Promise<User> {
+    return this.http.post<User>("/users/verify_email_end", { code }, options);
+  }
+
   async changeEmailComplete(input: ChangeEmailInput, options: RequestOptions = {}): Promise<User> {
     return this.http.post<User>(
       "/users/update_email_end",

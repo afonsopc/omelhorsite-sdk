@@ -76,6 +76,7 @@ import {
   type Timestamp,
 } from "../../types";
 import type { VocalSeparation } from "../tools/vocalSeparation";
+import type { SongImport } from "./imports";
 
 /**
  * Primary key of a song. An **integer**, unlike most ids in this API.
@@ -133,7 +134,7 @@ export interface SongArtistCredit extends Omit<BaseRecord, "id"> {
 }
 
 /** Where a track came from. */
-export type SongSourceKind = "upload" | "yt_dlp" | "spotify_sync";
+export type SongSourceKind = "upload" | "yt_dlp" | "spotify_sync" | "rematch";
 
 /**
  * A track in the library.
@@ -273,6 +274,52 @@ export interface SongSeparationStatus {
    * song as storage nodes, not attached to this row.
    */
   readonly job: VocalSeparation | null;
+}
+
+/** Providers a track can be matched against. */
+export type SongMatchSource = "youtube" | "soundcloud" | "bandcamp";
+
+/**
+ * One take the matcher found for a track, scored the way the import scores it.
+ *
+ * A candidate with `score: null` was REJECTED and `reject_reason` says why
+ * ("title says 'cover', query did not"); it is returned anyway, because the
+ * reason is often the whole answer to "why did I get this recording". Rejected
+ * candidates can still be passed to {@link MusicSongsNamespace.rematch}: a
+ * deliberate choice is not second-guessed.
+ */
+export interface SongMatchCandidate {
+  readonly source: SongMatchSource;
+  readonly title: string | null;
+  readonly uploader: string | null;
+  /** The page to import from. Feed it back as `sourceUrl` to take this one. */
+  readonly url: string | null;
+  /** Absent for providers whose search does not carry a runtime. */
+  readonly duration_s: number | null;
+  readonly thumbnail: string | null;
+  readonly source_id: string | null;
+  /** Higher is a better match; `null` means rejected. */
+  readonly score: number | null;
+  readonly reject_reason: string | null;
+  /** Where the provider's own search ranked it, before scoring. */
+  readonly rank: number;
+  /** True for the source the song's audio already came from. */
+  readonly current: boolean;
+}
+
+/** Arguments for {@link MusicSongsNamespace.matchCandidates}. */
+export interface ListSongMatchCandidatesParams {
+  /** Candidates per provider. Clamped to 1..20; defaults to 8. */
+  readonly limit?: number;
+}
+
+/** Arguments for {@link MusicSongsNamespace.rematch}. */
+export interface RematchSongInput {
+  /**
+   * The page to download from, normally a {@link SongMatchCandidate.url}.
+   * Omit to re-run the matcher over the track's original search terms.
+   */
+  readonly sourceUrl?: string;
 }
 
 /** A liked track. The join row, with the whole song inlined. */
@@ -1109,6 +1156,71 @@ export class MusicSongsNamespace extends Resource {
    */
   async deleteSeparation(id: SongId, options: RequestOptions = {}): Promise<void> {
     await this.http.delete<void>(`/songs/${encodeURIComponent(String(id))}/separation`, options);
+  }
+
+  /**
+   * `GET /songs/:id/match_candidates` - every take the matcher can find for
+   * this track, across all three providers, scored and ordered best first.
+   *
+   * This is the answer to "this is the wrong recording". A track imported by
+   * artist and title is matched, not looked up, and the classic wrong result is
+   * a cover: same runtime, the original artist's name in its title, and nothing
+   * about it that a duration check can catch. The pool shows what the matcher
+   * chose between, with the rejects kept and labelled.
+   *
+   * Candidates are searched live on three providers, so this is SLOW - seconds,
+   * not milliseconds - and worth its own timeout. Nothing is cached: two calls
+   * a minute apart can return different pools.
+   *
+   * Scores are comparable within one response and meaningless across two.
+   *
+   * @throws {OmsApiError} 404 for a song that is not yours, 502 when the
+   *   downloader is unreachable.
+   */
+  async matchCandidates(
+    id: SongId,
+    params: ListSongMatchCandidatesParams = {},
+    options: RequestOptions = {},
+  ): Promise<SongMatchCandidate[]> {
+    const body = await this.http.get<{ items?: SongMatchCandidate[] }>(
+      `/songs/${encodeURIComponent(String(id))}/match_candidates`,
+      { ...options, query: { limit: params.limit } },
+    );
+    return body.items ?? [];
+  }
+
+  /**
+   * `POST /songs/:id/rematch` - re-download this track onto the same record.
+   *
+   * The song row survives: its id, its credits, and every playlist entry, like
+   * and play event that points at it. Only the audio is replaced, along with
+   * the fields that describe the file (runtime, codec, source). Any vocal
+   * separation is thrown away, because the stems came out of audio the song no
+   * longer has.
+   *
+   * With a `sourceUrl` the pick is taken as given - no duration or cover check
+   * stands between you and the recording you named. Without one the matcher
+   * re-runs over the track's original search terms, which is the useful move
+   * after a bad match rather than a repeat of it.
+   *
+   * Returns the import to poll through `music.imports`; the swap lands when it
+   * reaches `complete`.
+   *
+   * @throws {OmsAuthError} 401 when the song is not yours.
+   * @throws {OmsApiError} 400 for a `sourceUrl` that is not http(s), or when no
+   *   `sourceUrl` is given and the track has no search terms to re-run (an
+   *   uploaded file, for one - there is nothing to match it against).
+   */
+  async rematch(
+    id: SongId,
+    input: RematchSongInput = {},
+    options: RequestOptions = {},
+  ): Promise<SongImport> {
+    return this.http.post<SongImport>(
+      `/songs/${encodeURIComponent(String(id))}/rematch`,
+      input.sourceUrl === undefined ? {} : { source_url: input.sourceUrl },
+      options,
+    );
   }
 
   /**
