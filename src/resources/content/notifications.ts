@@ -14,28 +14,86 @@ export type ListNotificationsParams = ListParams<(typeof NOTIFICATION_FILTER_COL
 /** Primary key of a notification. An INTEGER. */
 export type NotificationId = number;
 
+/** Every notification category, in presentation order. */
+export const NOTIFICATION_CATEGORIES = [
+  "security",
+  "social",
+  "storage",
+  "tools",
+  "music",
+  "library",
+  "forms",
+  "tickets",
+  "intel",
+  "oauth",
+  "admin",
+] as const;
+
+/** One of {@link NOTIFICATION_CATEGORIES}. */
+export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
+
 /**
- * The `kind` strings the backend emits today.
+ * Every notification kind the server emits, grouped by category and in the
+ * order a preferences screen shows them (the same order
+ * {@link NotificationPreferences.kinds} comes back in).
  *
- * NOT a closed set and not validated anywhere - `Notification` only requires
- * `kind` to be present, so a new feature can add one without a migration. The
- * union is here so the kinds you handle autocomplete; keep a default branch
- * for the ones you do not, and never let an unknown kind break the inbox.
+ * `admin_*` kinds only ever reach administrators. The `_done` / `_failed`
+ * pairs of the media tools only reach the account that started the job.
+ */
+export const NOTIFICATION_KINDS = [
+  "security_new_session",
+  "security_password_changed",
+  "security_email_changed",
+  "security_passkey_added",
+  "security_app_authorized",
+  "friendship_request",
+  "friendship_accepted",
+  "user_followed",
+  "message_received",
+  "group_chat_message",
+  "jam_invite",
+  "fs_grant_received",
+  "chest_expires_soon",
+  "vocal_separation_done",
+  "vocal_separation_failed",
+  "transcription_done",
+  "transcription_failed",
+  "upscale_done",
+  "upscale_failed",
+  "background_removal_done",
+  "background_removal_failed",
+  "caption_job_done",
+  "caption_job_failed",
+  "jumpstyle_job_done",
+  "jumpstyle_job_failed",
+  "song_import_done",
+  "song_import_failed",
+  "spotify_sync_done",
+  "spotify_sync_failed",
+  "artist_import_done",
+  "blog_new_post",
+  "form_submission_received",
+  "ticket_reply",
+  "ticket_status_changed",
+  "intel_report_ready",
+  "intel_source_failing",
+  "oauth_application_approved",
+  "oauth_application_rejected",
+  "admin_oauth_application_submitted",
+  "admin_ticket_created",
+  "admin_feedback_received",
+] as const;
+
+/**
+ * One of {@link NOTIFICATION_KINDS}.
  *
  * Each kind implies a different {@link Notification.context} shape, which is
- * why `context` is typed as an open record rather than a discriminated union:
- * the backend guarantees a JSON object and nothing about its keys.
+ * why `context` is typed as an open record rather than a discriminated union.
+ * A server newer than this package may emit a kind that is not listed here,
+ * so keep a default branch when switching on it and never let an unknown
+ * kind break the inbox.
  */
-export type NotificationKind =
-  | "friendship_request"
-  | "friendship_accepted"
-  | "user_followed"
-  | "message_received"
-  | "fs_grant_received"
-  | "jam_invite"
-  | "vocal_separation_done"
-  | "vocal_separation_failed"
-  | (string & {});
+export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
 /**
  * One notification in a user's inbox.
@@ -50,6 +108,8 @@ export interface Notification {
   readonly id: NotificationId;
   /** What happened. See {@link NotificationKind}. */
   readonly kind: NotificationKind;
+  /** The group `kind` belongs to. */
+  readonly category: NotificationCategory;
   /**
    * Free-form JSON payload, whose keys depend entirely on `kind` - these are
    * the i18n interpolation values the client renders the sentence with.
@@ -70,6 +130,13 @@ export interface Notification {
   readonly user_id: Id;
   readonly created_at: Timestamp;
   readonly updated_at: Timestamp;
+}
+
+/** What {@link NotificationsNamespace.unsubscribe} answers. */
+export interface NotificationUnsubscribeResult {
+  readonly ok: true;
+  /** The address that stops receiving notification emails, masked: `a***@b.pt`. */
+  readonly email: string;
 }
 
 /**
@@ -175,5 +242,23 @@ export class NotificationsNamespace extends Resource {
    */
   async dismiss(id: NotificationId, options: RequestOptions = {}): Promise<void> {
     await this.http.delete<void>(`/notifications/${encodeURIComponent(String(id))}`, options);
+  }
+
+  /**
+   * `POST /notifications/unsubscribe` - turns every notification email off
+   * for the account behind `token`: the one-click unsubscribe at the foot of
+   * each notification email.
+   *
+   * Needs no credential; the token is the proof, and it is good for a year
+   * from the email it came in. The inbox itself is untouched, and the emails
+   * come back by turning `emailsEnabled` on again through
+   * `oms.account.notificationPreferences`.
+   *
+   * Throttled like the other anonymous endpoints.
+   *
+   * @throws {OmsApiError} 404 for a token that is invalid or expired.
+   */
+  async unsubscribe(token: string, options: RequestOptions = {}): Promise<NotificationUnsubscribeResult> {
+    return this.http.post<NotificationUnsubscribeResult>("/notifications/unsubscribe", { token }, options);
   }
 }

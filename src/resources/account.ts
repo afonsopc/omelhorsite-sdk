@@ -1,7 +1,7 @@
 /**
  * The `account` namespace: the signed-in user, other users' public profiles,
- * the usage report behind the quota bars, and the sessions a credential can
- * see.
+ * the usage report behind the quota bars, the sessions a credential can see,
+ * and which notifications reach the app and the mailbox.
  *
  * `GET /account` is the canonical "who am I" call and the cheapest way to check
  * that a stored credential is still alive.
@@ -11,6 +11,7 @@ import { OmsApiError } from "../errors";
 import { type ApiClient, Resource, buildFormData, readJson } from "../http";
 import { listQuery, paginate } from "../listing";
 import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
+import type { NotificationCategory, NotificationKind } from "./content/notifications";
 import { objectStoreFetch } from "./storage/upload";
 import type {
   BaseRecord,
@@ -282,14 +283,86 @@ export class AccountSessionsNamespace extends Resource {
   }
 }
 
+/** How one notification kind reaches the user. */
+export interface NotificationPreferenceEntry {
+  readonly kind: NotificationKind;
+  readonly category: NotificationCategory;
+  /** Whether the kind shows in the inbox and counts as unread. */
+  readonly in_app: boolean;
+  /** Whether the kind is also emailed, subject to the master switch. */
+  readonly email: boolean;
+  /** `true` for the security kinds: `email` cannot be turned off, and asking is a 422. */
+  readonly email_locked: boolean;
+  /**
+   * Minutes the server waits so that several notifications of this kind
+   * become one email. `null` sends each one on its own.
+   */
+  readonly coalesce_minutes: number | null;
+}
+
+/** The whole notification setup of the signed-in user. */
+export interface NotificationPreferences {
+  /**
+   * The master switch. `false` stops every notification email, locked kinds
+   * included; it is what the unsubscribe link in an email flips.
+   */
+  readonly emails_enabled: boolean;
+  /** Every kind the server knows, in presentation order, defaults filled in. */
+  readonly kinds: NotificationPreferenceEntry[];
+}
+
+/**
+ * Changes to {@link NotificationPreferences}. Everything is optional: pass
+ * only what moves, and only the kinds that move.
+ */
+export interface UpdateNotificationPreferencesInput {
+  readonly emailsEnabled?: boolean;
+  readonly kinds?: Partial<Record<NotificationKind, { readonly inApp?: boolean; readonly email?: boolean }>>;
+}
+
+/**
+ * Notification preferences of the signed-in user, reachable as
+ * `oms.account.notificationPreferences`.
+ *
+ * A notification is always recorded; these settings decide where it goes.
+ * `in_app: false` keeps a kind out of the inbox, the unread count and the
+ * live feed. `email: true` sends it by email as well, provided the master
+ * switch is on and the account's address is verified.
+ *
+ * Needs a session.
+ */
+export class NotificationPreferencesNamespace extends Resource {
+  /**
+   * `GET /notification_preferences` - every kind, in presentation order,
+   * with the server's defaults where nothing was set yet.
+   */
+  async get(options: RequestOptions = {}): Promise<NotificationPreferences> {
+    return this.http.get<NotificationPreferences>("/notification_preferences", options);
+  }
+
+  /**
+   * `PATCH /notification_preferences` - flips the master switch and/or the
+   * settings of single kinds, and answers the full set like {@link get}.
+   *
+   * @throws {OmsApiError} 422 for `email: false` on a kind whose
+   *   `email_locked` is `true`, and for a kind the server does not know.
+   */
+  async update(input: UpdateNotificationPreferencesInput, options: RequestOptions = {}): Promise<NotificationPreferences> {
+    return this.http.patch<NotificationPreferences>("/notification_preferences", preferencesBody(input), options);
+  }
+}
+
 /** The `account` namespace, reachable as `oms.account`. */
 export class AccountNamespace extends Resource {
   /** Sessions: listing, relabelling, and ending the current one. */
   readonly sessions: AccountSessionsNamespace;
+  /** Which notification kinds reach the inbox, and which are emailed. */
+  readonly notificationPreferences: NotificationPreferencesNamespace;
 
   constructor(http: ApiClient) {
     super(http);
     this.sessions = new AccountSessionsNamespace(http);
+    this.notificationPreferences = new NotificationPreferencesNamespace(http);
   }
 
   /**
@@ -491,6 +564,17 @@ function updateBody(input: UpdateAccountInput): Record<string, unknown> {
     library_description: input.libraryDescription,
     share_listening: input.shareListening,
   };
+}
+
+/** Maps the camelCase input onto the snake_case names the endpoint reads. */
+function preferencesBody(input: UpdateNotificationPreferencesInput): Record<string, unknown> {
+  const kinds =
+    input.kinds === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(input.kinds).map(([kind, entry]) => [kind, { in_app: entry?.inApp, email: entry?.email }]),
+        );
+  return { emails_enabled: input.emailsEnabled, kinds };
 }
 
 

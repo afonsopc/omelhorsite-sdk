@@ -75,7 +75,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/new/path");
 | --- | --- |
 | `oms.auth` | OAuth: device grant, refresh, revoke, `whoami`, `userinfo`. |
 | `oms.sessions` `oms.passkeys` | Session sign-in, sign-up, OTP, passkeys. |
-| `oms.account` | The signed-in user, their profile, sessions and usage. |
+| `oms.account` | The signed-in user, their profile, sessions and usage. `oms.account.notificationPreferences` decides, per notification kind, whether it shows in the inbox and whether it is emailed; the security kinds always email, unless the master switch is off. |
 | `oms.storage` | The virtual filesystem: nodes, uploads, downloads, grants. |
 | `oms.media` | Resolving stored media to URLs. |
 | `oms.music` | Songs, artists, playlists, imports, likes, jams, the social feed. |
@@ -84,7 +84,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/new/path");
 | `oms.llm` | The language models you may pick, your own usage, and your conversations with the assistant (`oms.llm.chats`, streamed answers; the assistant may search the web and read pages, and each streamed answer reports every tool it used as a `tool` event and stores them as `tool_calls`, with `duration_ms`/`first_token_ms` for the answer); administrators configure providers, models, feature assignments and see everybody's cost under `oms.admin.llm*`. |
 | `oms.library` | Books, shelves, annotations, the study assistant. |
 | `oms.social` | Direct messages, relationships, group chats. |
-| `oms.content` | Blogs, notifications, feedbacks, jokes, site status, intel. |
+| `oms.content` | Blogs, notifications, feedbacks, jokes, site status, intel. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential. |
 | `oms.tools` | The metered media tools, each with its own daily quota. |
 | `oms.jobs` | Background jobs: list, get, wait, watch. |
 | `oms.quotas` | Every ceiling on the account in one call. |
