@@ -58,8 +58,22 @@ export interface IdentityClaims {
   readonly iat?: number;
   /** Present only when the `profile` scope was granted. Mutable, display only. */
   readonly preferred_username?: string;
-  /** Present only when the `email` scope was granted. Mutable, display only. */
+  /**
+   * Present only when the `email` scope was granted. Mutable, display only.
+   *
+   * Never look a user up by this. An account can be created with any address
+   * and used without proving it, so the value may belong to someone else;
+   * matching on it lets whoever registers with a victim's address into the
+   * victim's account on your side. Key on `iss` + `sub`.
+   */
   readonly email?: string;
+  /**
+   * Whether the server holds proof that `email` belongs to the user. Present
+   * whenever `email` is, and often `false`. `true` still only means the
+   * server checked it once; confirm it yourself before attaching the address
+   * to an account that already existed.
+   */
+  readonly email_verified?: boolean;
   readonly [claim: string]: unknown;
 }
 

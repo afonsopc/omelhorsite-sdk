@@ -100,7 +100,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 
 ## Namespaces
 
-- `oms.auth` - OAuth: device grant, refresh, revoke, `whoami`.
+- `oms.auth` - OAuth: device grant, refresh, revoke, `whoami`. `decodeIdToken(idToken).sub` is the stable identifier; `email` is a contact and `email_verified` is often `false`, so never find or merge users by email.
 - `oms.sessions`, `oms.passkeys` - sign-in, sign-up, OTP, passkeys.
 - `oms.account` - the signed-in user, profile, sessions, usage. `oms.account.notificationPreferences` decides, per notification kind, whether it shows in the inbox and whether it is emailed; the security kinds always email, unless the master switch is off.
 - `oms.storage` - files and folders: upload, download, share.
