@@ -37,6 +37,7 @@ import {
   SPACE_INVADERS_GAME_FILTER_COLUMNS,
 } from "../src/resources/content";
 import { JOB_FILTER_COLUMNS } from "../src/resources/jobs";
+import { LLM_CHAT_FILTER_COLUMNS } from "../src/resources/llm";
 import {
   BOOK_ANNOTATION_FILTER_COLUMNS,
   BOOK_EXTRA_OPTION_KEYS,
@@ -90,6 +91,7 @@ const RESOURCES: Record<string, { columns: readonly string[]; extra?: readonly s
   intel_sources: { columns: INTEL_SOURCE_FILTER_COLUMNS },
   jobs: { columns: JOB_FILTER_COLUMNS },
   jokes: { columns: JOKE_FILTER_COLUMNS },
+  llm_chats: { columns: LLM_CHAT_FILTER_COLUMNS },
   messages: { columns: MESSAGE_FILTER_COLUMNS, extra: MESSAGE_EXTRA_OPTION_KEYS },
   movie_addon_grants: { columns: MOVIE_ADDON_GRANT_FILTER_COLUMNS },
   movie_addon_groups: { columns: MOVIE_ADDON_GROUP_FILTER_COLUMNS },

@@ -390,6 +390,21 @@
     "extra_options": [],
     "custom": []
   },
+  "llm_chat_messages": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "llm_chats": {
+    "search": [
+      "title",
+      "pinned",
+      "archived",
+      "llm_model_id"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
   "llm_models": {
     "search": [],
     "extra_options": [],

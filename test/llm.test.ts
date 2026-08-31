@@ -205,3 +205,71 @@ describe("filter column tuples", () => {
     expect(ADMIN_LLM_ASSIGNMENT_FILTER_COLUMNS).toEqual(["feature"]);
   });
 });
+
+describe("llm.chats", () => {
+  test("list, create and update speak the listing DSL and the wire names", async () => {
+    const { llm, calls } = harness([]);
+    await llm.chats.list({ exactSearch: { archived: false }, page: 2, pageSize: 20 });
+    expect(calls[0]?.method).toBe("GET");
+    expect(calls[0]?.path).toBe("/llm_chats");
+    expect(calls[0]?.search).toContain("exact_search[archived]=false");
+    expect(calls[0]?.search).toContain("modifiers[page]=2:20");
+
+    await llm.chats.create({ title: "Olá", llmModelId: "m1" });
+    expect(calls[1]?.method).toBe("POST");
+    expect(calls[1]?.body).toEqual({ title: "Olá", llm_model_id: "m1" });
+
+    await llm.chats.update("c1", { pinned: true, llmModelId: null });
+    expect(calls[2]?.method).toBe("PATCH");
+    expect(calls[2]?.path).toBe("/llm_chats/c1");
+    expect(calls[2]?.body).toEqual({ pinned: true, llm_model_id: null });
+
+    await llm.chats.messages.delete("c1", "m9");
+    expect(calls[3]?.method).toBe("DELETE");
+    expect(calls[3]?.path).toBe("/llm_chats/c1/messages/m9");
+  });
+
+  test("send streams deltas then done, parsed out of the event stream", async () => {
+    const frames = [
+      'data: {"delta":"Olá"}\n\n',
+      'data: {"delta":" mundo"}\n\ndata: {"done":true,"message_id":"a1","model_id":"qwen","input_tokens":10,"output_tokens":5,"cost":0.00002}\n\n',
+    ];
+    const calls: string[] = [];
+    const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+      calls.push(`${init?.method} ${new URL(input).pathname} ${init?.body}`);
+      return new Response(frames.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const http = new ApiClient({ baseUrl: BASE_URL, fetch: fetchImpl, tokens: { getToken: () => "t" }, retry: { maxAttempts: 1 } });
+    const llm = new LlmNamespace(http);
+
+    const events = [];
+    for await (const event of llm.chats.messages.send("c1", { content: "Diz olá", llmModelId: "m1" })) events.push(event);
+
+    expect(calls).toEqual(['POST /llm_chats/c1/messages {"content":"Diz olá","llm_model_id":"m1"}']);
+    expect(events).toEqual([
+      { type: "delta", delta: "Olá" },
+      { type: "delta", delta: " mundo" },
+      { type: "done", messageId: "a1", modelId: "qwen", inputTokens: 10, outputTokens: 5, cost: 0.00002 },
+    ]);
+  });
+
+  test("an error frame ends the stream and a cut stream reports interrupted", async () => {
+    let body = 'data: {"delta":"x"}\n\ndata: {"error":"unavailable","message":"no model","message_id":"a2"}\n\n';
+    const fetchImpl = async (): Promise<Response> => new Response(body, { status: 200 });
+    const http = new ApiClient({ baseUrl: BASE_URL, fetch: fetchImpl, tokens: { getToken: () => "t" }, retry: { maxAttempts: 1 } });
+    const llm = new LlmNamespace(http);
+
+    const errored = [];
+    for await (const event of llm.chats.messages.regenerate("c1", "a1")) errored.push(event);
+    expect(errored).toEqual([
+      { type: "delta", delta: "x" },
+      { type: "error", error: "unavailable", message: "no model", messageId: "a2" },
+    ]);
+
+    body = 'data: {"delta":"meio"}\n\n';
+    const cut = [];
+    for await (const event of llm.chats.messages.send("c1", { content: "?" })) cut.push(event);
+    expect(cut.map((event) => event.type)).toEqual(["delta", "error"]);
+    expect(cut[1]).toMatchObject({ type: "error", error: "interrupted" });
+  });
+});
