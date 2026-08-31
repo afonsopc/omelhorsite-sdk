@@ -98,27 +98,25 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 
 ## Namespaces
 
-| | |
-| --- | --- |
-| `oms.auth` | OAuth: device grant, refresh, revoke, `whoami`. |
-| `oms.sessions` `oms.passkeys` | Sign-in, sign-up, OTP, passkeys. |
-| `oms.account` | The signed-in user, profile, sessions, usage. |
-| `oms.storage` | Files and folders: upload, download, share. |
-| `oms.music` | Songs, artists, playlists, jams. |
-| `oms.movies` | Addons, collections, watch progress. |
-| `oms.library` | Books, shelves, annotations. |
-| `oms.llm` | Models and assistant chats. |
-| `oms.search` | Web, image, news and video search. |
-| `oms.social` | Direct messages, friends, group chats. |
-| `oms.content` | Blogs, notifications, feedback, site status. |
-| `oms.tools` | Media tools, each with its own daily quota. |
-| `oms.jobs` `oms.quotas` | Background jobs and account limits. |
-| `oms.tickets` | Support tickets. |
-| `oms.shortLinks` `oms.notepads` `oms.dynamicQrs` `oms.chests` `oms.forms` `oms.linkTrees` | Things that end in a shareable URL. |
-| `oms.ipLookup` | Geolocation for an IP. |
-| `oms.realtime` | WebSocket: notifications, jobs, jams. |
-| `oms.admin` | Administrator-only. |
-| `oms.local` | Client-side helpers (passwords, QR codes). No network. |
+- `oms.auth` — OAuth: device grant, refresh, revoke, `whoami`.
+- `oms.sessions`, `oms.passkeys` — sign-in, sign-up, OTP, passkeys.
+- `oms.account` — the signed-in user, profile, sessions, usage.
+- `oms.storage` — files and folders: upload, download, share.
+- `oms.music` — songs, artists, playlists, jams.
+- `oms.movies` — addons, collections, watch progress.
+- `oms.library` — books, shelves, annotations.
+- `oms.llm` — models and assistant chats.
+- `oms.search` — web, image, news and video search.
+- `oms.social` — direct messages, friends, group chats.
+- `oms.content` — blogs, notifications, feedback, site status.
+- `oms.tools` — media tools, each with its own daily quota.
+- `oms.jobs`, `oms.quotas` — background jobs and account limits.
+- `oms.tickets` — support tickets.
+- `oms.shortLinks`, `oms.notepads`, `oms.dynamicQrs`, `oms.chests`, `oms.forms`, `oms.linkTrees` — things that end in a shareable URL.
+- `oms.ipLookup` — geolocation for an IP.
+- `oms.realtime` — WebSocket: notifications, jobs, jams.
+- `oms.admin` — administrator-only.
+- `oms.local` — client-side helpers (passwords, QR codes). No network.
 
 ## Errors
 
