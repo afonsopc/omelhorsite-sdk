@@ -511,78 +511,104 @@ export interface SendMusicAssistantMessageInput {
  * ========================================================================== */
 
 /**
- * Generations per user per hour, shared by `/music_dj` and `/music_dj/batch`.
+ * Turns per user per hour on `POST /music_dj/next`.
  *
- * The counter is incremented by EVERY request - including the ones it then
- * refuses with `429`. A retry loop therefore drives the count further past the
- * cap and can never recover inside the hour, which is why
- * {@link MusicDjNamespace} passes `retry: false` unless you override it.
+ * A turn is one song, so an hour of listening spends about 17 of them and the
+ * rest of the budget absorbs skipping. The counter is incremented by EVERY
+ * request - including the ones it then refuses with `429` - so a retry loop
+ * drives the count further past the cap and can never recover inside the hour,
+ * which is why {@link MusicDjNamespace} passes `retry: false` unless you
+ * override it.
  */
-export const MUSIC_DJ_HOURLY_CAP = 40;
+export const MUSIC_DJ_HOURLY_CAP = 90;
 
 /**
- * Default deadline for one DJ generation, in milliseconds. Writing the script
- * and speaking it takes well past the client's 60 s default.
+ * Default deadline for one DJ turn, in milliseconds. Choosing the song and
+ * speaking it takes well past the client's 60 s default.
  */
 export const MUSIC_DJ_TIMEOUT_MS = 120_000;
 
-/** Songs one `/music_dj/batch` set plans at most. */
-export const MUSIC_DJ_BATCH_SIZE = 4;
-
-/** `POST /music_dj`: one spoken link between two tracks. */
-export interface MusicDjInterstitial {
-  /** The script as text, at most 320 characters. Worth showing while audio loads. */
-  readonly text: string;
+/** One entry in a DJ session's transcript. */
+export interface MusicDjTurn {
+  /** `"dj"` when he played or spoke, `"listener"` when they asked for something. */
+  readonly role: "dj" | "listener";
   /**
-   * The same script spoken, base64, NOT a data URL. Decode with
-   * {@link musicDjAudioBytes} or wrap with {@link musicDjAudioDataUrl}.
+   * What was said. `null` on a DJ turn where he stayed quiet - he speaks on
+   * the first song, whenever the listener asks for something, and every third
+   * song after that, so most turns carry a song and no words.
    */
-  readonly audio_base64: string;
-  /** Container of the decoded bytes. `"wav"` today, and typed wide on purpose. */
-  readonly format: string;
+  readonly text: string | null;
+  /** The song that turn played, when it played one. */
+  readonly song_id: number | null;
+  readonly created_at: Timestamp;
 }
 
-/** `POST /music_dj/batch`: a whole set - what to play next, and the words for it. */
-export interface MusicDjBatch extends MusicDjInterstitial {
+/** `GET /music_dj/session`: the session still on air, if there is one. */
+export interface MusicDjSession {
+  readonly id: number;
+  /** The listener's standing request. It holds until they ask for something else. */
+  readonly request: string | null;
+  readonly turns: MusicDjTurn[];
   /**
-   * The planned tracks, in play order, in the full `GET /songs` shape and
-   * already scoped to what the caller may play. Between 1 and
-   * {@link MUSIC_DJ_BATCH_SIZE}: the server fails rather than answer with an
-   * empty set, so this is never `[]`.
+   * Every song the transcript refers to, in the full `GET /songs` shape, so a
+   * client can rebuild the session without a lookup per turn. Unordered: match
+   * them to {@link MusicDjTurn.song_id}.
    */
   readonly songs: Song[];
-  /**
-   * Two to five words naming what this set is ("Late-night Portuguese
-   * soul"), for a screen to show while the set plays. `null` when the model
-   * gave none - a set is still a set without a caption, so treat it as
-   * decoration and never as the reason to skip a batch.
-   */
-  readonly theme: string | null;
 }
 
-/** Everything `POST /music_dj/batch` accepts. All of it optional. */
-export interface MusicDjBatchInput {
-  /** A free-text steer ("something calmer"). Truncated to 300 characters. */
-  readonly request?: string;
+/** `POST /music_dj/next`: the next song, and the words for it when there are any. */
+export interface MusicDjNext {
+  readonly session_id: number;
+  /** What to play now. Never one the session already played. */
+  readonly song: Song;
+  /** Two to five words naming this stretch of the show, for a screen. */
+  readonly theme: string | null;
   /**
-   * Recently played ids. Only the last 60 are read, and the planner SUBTRACTS
-   * them from its own picks - so a list that covers the whole library leaves
-   * nothing playable and the call fails with a `502`.
+   * The spoken link, present ONLY on the turns where he speaks. Its absence is
+   * the normal case, not an error: play the song straight away.
    */
-  readonly recentSongIds?: SongId[];
-  /** Ids the listener skipped, as negative signal. Only the last 20 are read. */
-  readonly skippedSongIds?: SongId[];
-  /** Which set of the session this is, so the script can vary its opening. */
-  readonly batchIndex?: number;
+  readonly text?: string;
   /**
-   * Scripts the DJ already spoke this session, oldest first. Only the last 3
-   * are read, each truncated to 320 characters.
+   * The same words spoken, base64, NOT a data URL. Decode with
+   * {@link musicDjAudioBytes} or wrap with {@link musicDjAudioDataUrl}.
    *
-   * The server keeps no session state, so without this every set is planned
-   * by a model that has never heard itself and the show opens with the same
-   * welcome all night. Feed it what {@link MusicDjBatch.text} gave you.
+   * Absent when he stayed quiet AND when the voice service failed while he had
+   * something to say - in that second case `text` is there without it, and the
+   * song still plays. Never block playback on this field.
    */
-  readonly spokenBefore?: string[];
+  readonly audio_base64?: string;
+  /** Container of the decoded bytes. `"wav"` today, and typed wide on purpose. */
+  readonly format?: string;
+}
+
+/** Everything `POST /music_dj/next` accepts. All of it optional. */
+export interface MusicDjNextInput {
+  /**
+   * Continue this session. Omit to continue the caller's own session, which
+   * the server finds by itself - a session goes stale after two hours of
+   * silence and the next turn starts a fresh one.
+   */
+  readonly sessionId?: number;
+  /**
+   * A steer ("something calmer", "fados"), truncated to 300 characters.
+   *
+   * STANDING ORDERS, not a one-off: it holds for every following turn until
+   * another request replaces it, and it makes him speak on this turn even if
+   * it was not his turn to.
+   */
+  readonly request?: string;
+  /** The song the listener just skipped, as a direction to leave. */
+  readonly skippedSongId?: SongId;
+  /**
+   * Make him speak on this turn even if it was not his turn to.
+   *
+   * This is the DJ button: the listener wants to hear him now. It changes
+   * nothing about which song comes next.
+   */
+  readonly speak?: boolean;
+  /** Start a new session even though one is still on air. */
+  readonly restart?: boolean;
 }
 
 /* ========================================================================== *
@@ -997,12 +1023,16 @@ export class MusicAssistantNamespace extends Resource {
 }
 
 /**
- * "O Melhor DJ": a written-and-spoken link between tracks, and a whole planned
- * set.
+ * "O Melhor DJ": a radio session for one listener, one song at a time.
  *
- * Both methods pass `retry: false` by default. That is not caution about
+ * The server holds the session - what played, what was skipped, what he said,
+ * what the listener asked for - so a client only ever says what just happened
+ * and gets the next song back. Ask for one when the current song ends, when
+ * the listener skips, or when they want something else.
+ *
+ * {@link next} passes `retry: false` by default. That is not caution about
  * duplicates - the transport does not replay a `POST` anyway - it is about the
- * one thing it DOES replay: a `429`. The hourly cap here counts every request
+ * one thing it DOES replay: a `429`. The hourly cap counts every request
  * including the refused ones, so waiting out a `Retry-After` and asking again
  * pushes the count further past the cap and cannot succeed inside the hour.
  * Pass `retry: {}` to opt back in if you are sure the `429` came from the
@@ -1010,41 +1040,36 @@ export class MusicAssistantNamespace extends Resource {
  */
 export class MusicDjNamespace extends Resource {
   /**
-   * `POST /music_dj` - the DJ introduces the next track.
+   * `POST /music_dj/next` - the next song, chosen with the whole session in
+   * view.
    *
-   * Returns the script AND the spoken audio in one answer, base64 in the JSON
-   * body rather than as a URL, because the clip is small and ephemeral and
-   * nothing stores it. Decode with {@link musicDjAudioBytes}, or hand
-   * {@link musicDjAudioDataUrl} to a player that takes a URI.
+   * `next({})` is a valid cold start: with no session on air the server opens
+   * one. The answer always carries a `song`; `text` and `audio_base64` come
+   * only on the turns where he speaks (the first song, after a request, and
+   * every third song), so treat their absence as normal and play the song.
    *
-   * Both ids are resolved against what the caller may play, so a followed
-   * playlist's track works and a stranger's does not. `previousSongId` is genuinely optional and
-   * is what lets the script say goodbye to the outgoing track.
+   * A song the session already played is never returned, which is what lets a
+   * client keep the whole session in its queue and walk back through it.
    *
-   * Generation takes seconds; the deadline defaults to
-   * {@link MUSIC_DJ_TIMEOUT_MS}. The
-   * intended pattern is to ask for the clip while the current track is still
-   * playing and drop it on the boundary, ideally over the outgoing
-   * instrumental.
+   * Choosing takes seconds and speaking takes more; the deadline defaults to
+   * {@link MUSIC_DJ_TIMEOUT_MS}. Ask for the next song while the current one
+   * is still playing, or the listener hears the gap.
    *
    * @throws {OmsError} `401 "Session required"` when unauthenticated.
-   * @throws {OmsError} `404 "Song not found"` for either id.
    * @throws {OmsError} `429 "DJ limit reached, try again later"` past
    *   {@link MUSIC_DJ_HOURLY_CAP}.
-   * @throws {OmsError} `502 "DJ is unavailable right now"` when the script
-   *   failed, `503 "DJ voice is unavailable right now"` when the voice did.
-   *   The split is deliberate: a `503` means the words exist but nothing can
-   *   say them.
+   * @throws {OmsError} `502 "DJ is unavailable right now"` when no song could
+   *   be chosen - including the honest case where the library has nothing left
+   *   that the session has not already played.
    */
-  interstitial(
-    input: { readonly nextSongId: SongId; readonly previousSongId?: SongId | null },
-    options: RequestOptions = {},
-  ): Promise<MusicDjInterstitial> {
-    const body: Record<string, unknown> = { next_song_id: input.nextSongId };
-    if (input.previousSongId !== undefined && input.previousSongId !== null) {
-      body["previous_song_id"] = input.previousSongId;
-    }
-    return this.http.post<MusicDjInterstitial>("/music_dj", body, {
+  next(input: MusicDjNextInput = {}, options: RequestOptions = {}): Promise<MusicDjNext> {
+    const body: Record<string, unknown> = {};
+    if (input.sessionId !== undefined) body["session_id"] = input.sessionId;
+    if (input.request !== undefined) body["request"] = input.request;
+    if (input.skippedSongId !== undefined) body["skipped_song_id"] = input.skippedSongId;
+    if (input.speak !== undefined) body["speak"] = input.speak;
+    if (input.restart !== undefined) body["restart"] = input.restart;
+    return this.http.post<MusicDjNext>("/music_dj/next", body, {
       ...options,
       timeoutMs: options.timeoutMs ?? MUSIC_DJ_TIMEOUT_MS,
       retry: options.retry ?? false,
@@ -1052,37 +1077,27 @@ export class MusicDjNamespace extends Resource {
   }
 
   /**
-   * `POST /music_dj/batch` - a whole set: what to play next AND the words
-   * introducing it, from one model call.
+   * `GET /music_dj/session` - the session still on air, or `null`.
    *
-   * The intended cadence is a real station's: take the set, play it, and come
-   * back when about two tracks remain. Every field is optional, so
-   * `batch({})` is a valid cold start.
-   *
-   * `recentSongIds` is a filter, not just a hint - the planner subtracts those
-   * ids from its own picks. Send a list covering the whole library and the
-   * planner has nothing left, which surfaces as `502 "DJ is unavailable right
-   * now"` rather than as an empty set. Keep it to a genuine recent window; only
-   * the last 60 are read anyway.
-   *
-   * `songs` comes back in play order, in the full `GET /songs` shape, already
-   * scoped to what the caller may play. It is never empty.
-   *
-   * Shares {@link MUSIC_DJ_HOURLY_CAP} with {@link interstitial}. Same
-   * timeouts, same error shapes.
+   * `null` is the ordinary answer for someone who has not listened today: a
+   * session goes stale after two hours of silence and stops being served here.
+   * Use it to rebuild the transcript when a screen opens, not to decide
+   * whether {@link next} may be called - it always may.
    */
-  batch(input: MusicDjBatchInput = {}, options: RequestOptions = {}): Promise<MusicDjBatch> {
-    const body: Record<string, unknown> = {};
-    if (input.request !== undefined) body["request"] = input.request;
-    if (input.recentSongIds !== undefined) body["recent_song_ids"] = input.recentSongIds;
-    if (input.skippedSongIds !== undefined) body["skipped_song_ids"] = input.skippedSongIds;
-    if (input.batchIndex !== undefined) body["batch_index"] = input.batchIndex;
-    if (input.spokenBefore !== undefined) body["spoken_before"] = input.spokenBefore;
-    return this.http.post<MusicDjBatch>("/music_dj/batch", body, {
-      ...options,
-      timeoutMs: options.timeoutMs ?? MUSIC_DJ_TIMEOUT_MS,
-      retry: options.retry ?? false,
-    });
+  async session(options: RequestOptions = {}): Promise<MusicDjSession | null> {
+    const body = await this.http.get<{ session: MusicDjSession | null }>("/music_dj/session", options);
+    return body.session ?? null;
+  }
+
+  /**
+   * `DELETE /music_dj/session` - end the session on air.
+   *
+   * Idempotent: with nothing on air it still answers `204`. The next
+   * {@link next} starts a session with no memory of this one, which is the
+   * point - it is how a listener says "forget what I asked for".
+   */
+  async end(options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>("/music_dj/session", options);
   }
 }
 
@@ -1233,7 +1248,7 @@ const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
  * slightly short audio is a better failure than one that throws inside a
  * playback callback.
  */
-export function musicDjAudioBytes(clip: Pick<MusicDjInterstitial, "audio_base64">): Uint8Array {
+export function musicDjAudioBytes(clip: { readonly audio_base64: string }): Uint8Array {
   const source = clip.audio_base64 ?? "";
   const platformDecode = (globalThis as { atob?: (encoded: string) => string }).atob;
   if (typeof platformDecode === "function") {
@@ -1269,7 +1284,7 @@ export function musicDjAudioBytes(clip: Pick<MusicDjInterstitial, "audio_base64"
  * in memory, so this is cheap in every sense that matters at this size. It is
  * not a URL anything can fetch twice - it is the bytes, spelled differently.
  */
-export function musicDjAudioDataUrl(clip: MusicDjInterstitial): string {
+export function musicDjAudioDataUrl(clip: { readonly audio_base64: string; readonly format?: string }): string {
   const format = (clip.format || "wav").toLowerCase();
   const mime = format === "wav" ? "audio/wav" : format === "mp3" ? "audio/mpeg" : `audio/${format}`;
   return `data:${mime};base64,${clip.audio_base64}`;

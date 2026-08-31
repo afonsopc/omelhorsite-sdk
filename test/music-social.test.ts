@@ -570,72 +570,85 @@ describe("assistant.chats", () => {
  * DJ
  * -------------------------------------------------------------------------- */
 
-describe("dj.interstitial", () => {
-  test("omits previous_song_id when it is absent or explicitly null", async () => {
-    const { dj, calls } = harness([{ body: { text: "a seguir...", audio_base64: "SGVsbG8=", format: "wav" } }]);
+describe("dj.next", () => {
+  const turn = { session_id: 7, song: { id: 991 }, theme: "Late night" };
 
-    await dj.interstitial({ nextSongId: 991 });
-    await dj.interstitial({ nextSongId: 991, previousSongId: null });
-    await dj.interstitial({ nextSongId: 991, previousSongId: 42 });
+  test("an empty input sends an empty body, which is a valid cold start", async () => {
+    const { dj, calls } = harness([{ body: turn }]);
 
-    expect(calls[0]?.body).toEqual({ next_song_id: 991 });
-    expect(calls[1]?.body).toEqual({ next_song_id: 991 });
-    expect(calls[2]?.body).toEqual({ next_song_id: 991, previous_song_id: 42 });
+    await dj.next();
+
+    expect(calls[0]).toMatchObject({ method: "POST", path: "/music_dj/next" });
+    expect(calls[0]?.body).toEqual({});
   });
 
-  test("a 429 is NOT retried, because every attempt burns one of the forty", async () => {
+  test("maps the camelCase input onto the server's snake_case names", async () => {
+    const { dj, calls } = harness([{ body: turn }]);
+
+    await dj.next({ sessionId: 7, request: "algo calmo", skippedSongId: 3, restart: true, speak: true });
+
+    expect(calls[0]?.body).toEqual({
+      session_id: 7,
+      request: "algo calmo",
+      skipped_song_id: 3,
+      restart: true,
+      speak: true,
+    });
+  });
+
+  test("a quiet turn carries no words and is not an error", async () => {
+    const { dj } = harness([{ body: turn }]);
+
+    const answer = await dj.next();
+
+    expect(answer.song.id).toBe(991);
+    expect(answer.text).toBeUndefined();
+    expect(answer.audio_base64).toBeUndefined();
+  });
+
+  test("a 429 is NOT retried, because every attempt burns one of the ninety", async () => {
     // The client is told to retry twice; the call site must still win. The
-    // controller increments its cache counter before it decides to refuse, so a
-    // second attempt pushes the count further past the cap and can never pass.
+    // server increments its counter before it decides to refuse, so a second
+    // attempt pushes the count further past the cap and can never pass.
     const { dj, calls } = harness([{ body: "DJ limit reached, try again later", status: 429 }], { maxAttempts: 3 });
 
-    const thrown = await dj.interstitial({ nextSongId: 991 }).catch((error: unknown) => error);
+    const thrown = await dj.next().catch((error: unknown) => error);
 
     expect(calls).toHaveLength(1);
     expect((thrown as OmsApiError).status).toBe(429);
-    expect(MUSIC_DJ_HOURLY_CAP).toBe(40);
+    expect(MUSIC_DJ_HOURLY_CAP).toBe(90);
   });
 
   test("a caller who insists can opt retrying back in", async () => {
     const { dj, calls } = harness([{ body: "DJ limit reached, try again later", status: 429 }], { maxAttempts: 2 });
 
-    await dj.interstitial({ nextSongId: 991 }, { retry: { maxAttempts: 2, baseDelayMs: 1, jitter: false } }).catch(
-      () => undefined,
-    );
+    await dj.next({}, { retry: { maxAttempts: 2, baseDelayMs: 1, jitter: false } }).catch(() => undefined);
 
     expect(calls.length).toBeGreaterThan(1);
   });
 });
 
-describe("dj.batch", () => {
-  test("an empty input sends an empty body, which is a valid cold start", async () => {
-    const { dj, calls } = harness([{ body: { text: "vamos", audio_base64: "", format: "wav", songs: [] } }]);
+describe("dj.session", () => {
+  test("unwraps the envelope and hands back the session itself", async () => {
+    const session = { id: 7, request: "fados", turns: [], songs: [] };
+    const { dj, calls } = harness([{ body: { session } }]);
 
-    await dj.batch();
-
-    expect(calls[0]).toMatchObject({ method: "POST", path: "/music_dj/batch" });
-    expect(calls[0]?.body).toEqual({});
+    expect(await dj.session()).toEqual(session);
+    expect(calls[0]).toMatchObject({ method: "GET", path: "/music_dj/session" });
   });
 
-  test("maps the camelCase input onto the server's snake_case names", async () => {
-    const { dj, calls } = harness([{ body: { text: "vamos", audio_base64: "", format: "wav", songs: [] } }]);
+  test("nothing on air is null, not an error", async () => {
+    const { dj } = harness([{ body: { session: null } }]);
 
-    await dj.batch({ request: "algo calmo", recentSongIds: [1, 2], skippedSongIds: [3], batchIndex: 2 });
-
-    expect(calls[0]?.body).toEqual({
-      request: "algo calmo",
-      recent_song_ids: [1, 2],
-      skipped_song_ids: [3],
-      batch_index: 2,
-    });
+    expect(await dj.session()).toBeNull();
   });
 
-  test("batch_index: 0 survives, because zero is a real first set", async () => {
-    const { dj, calls } = harness([{ body: { text: "vamos", audio_base64: "", format: "wav", songs: [] } }]);
+  test("end() closes the session", async () => {
+    const { dj, calls } = harness([{ body: "", status: 204 }]);
 
-    await dj.batch({ batchIndex: 0 });
+    await dj.end();
 
-    expect(calls[0]?.body).toEqual({ batch_index: 0 });
+    expect(calls[0]).toMatchObject({ method: "DELETE", path: "/music_dj/session" });
   });
 });
 
@@ -672,9 +685,9 @@ describe("the DJ audio decoder", () => {
   });
 
   test("the data URL names the container the server reported", () => {
-    expect(musicDjAudioDataUrl({ text: "", audio_base64: "AAA=", format: "wav" })).toBe("data:audio/wav;base64,AAA=");
-    expect(musicDjAudioDataUrl({ text: "", audio_base64: "AAA=", format: "mp3" })).toBe("data:audio/mpeg;base64,AAA=");
-    expect(musicDjAudioDataUrl({ text: "", audio_base64: "AAA=", format: "" })).toBe("data:audio/wav;base64,AAA=");
+    expect(musicDjAudioDataUrl({ audio_base64: "AAA=", format: "wav" })).toBe("data:audio/wav;base64,AAA=");
+    expect(musicDjAudioDataUrl({ audio_base64: "AAA=", format: "mp3" })).toBe("data:audio/mpeg;base64,AAA=");
+    expect(musicDjAudioDataUrl({ audio_base64: "AAA=", format: "" })).toBe("data:audio/wav;base64,AAA=");
   });
 });
 
