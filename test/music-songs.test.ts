@@ -123,6 +123,8 @@ function song(overrides: Partial<Song> = {}): Song {
     source_url: null,
     source_id: null,
     isrc: null,
+    language: null,
+    tags: [],
     original_filename: "construcao.flac",
     audio_codec: "flac",
     audio_bitrate_kbps: 1411,

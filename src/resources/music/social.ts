@@ -551,6 +551,13 @@ export interface MusicDjBatch extends MusicDjInterstitial {
    * empty set, so this is never `[]`.
    */
   readonly songs: Song[];
+  /**
+   * Two to five words naming what this set is ("Late-night Portuguese
+   * soul"), for a screen to show while the set plays. `null` when the model
+   * gave none - a set is still a set without a caption, so treat it as
+   * decoration and never as the reason to skip a batch.
+   */
+  readonly theme: string | null;
 }
 
 /** Everything `POST /music_dj/batch` accepts. All of it optional. */
@@ -567,6 +574,15 @@ export interface MusicDjBatchInput {
   readonly skippedSongIds?: SongId[];
   /** Which set of the session this is, so the script can vary its opening. */
   readonly batchIndex?: number;
+  /**
+   * Scripts the DJ already spoke this session, oldest first. Only the last 3
+   * are read, each truncated to 320 characters.
+   *
+   * The server keeps no session state, so without this every set is planned
+   * by a model that has never heard itself and the show opens with the same
+   * welcome all night. Feed it what {@link MusicDjBatch.text} gave you.
+   */
+  readonly spokenBefore?: string[];
 }
 
 /* ========================================================================== *
@@ -1061,6 +1077,7 @@ export class MusicDjNamespace extends Resource {
     if (input.recentSongIds !== undefined) body["recent_song_ids"] = input.recentSongIds;
     if (input.skippedSongIds !== undefined) body["skipped_song_ids"] = input.skippedSongIds;
     if (input.batchIndex !== undefined) body["batch_index"] = input.batchIndex;
+    if (input.spokenBefore !== undefined) body["spoken_before"] = input.spokenBefore;
     return this.http.post<MusicDjBatch>("/music_dj/batch", body, {
       ...options,
       timeoutMs: options.timeoutMs ?? MUSIC_DJ_TIMEOUT_MS,

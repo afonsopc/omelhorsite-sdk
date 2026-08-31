@@ -517,6 +517,11 @@
     "extra_options": [],
     "custom": []
   },
+  "notification_preferences": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "notifications": {
     "search": [
       "user_id"
@@ -662,7 +667,8 @@
       "title",
       "album",
       "position",
-      "year"
+      "year",
+      "language"
     ],
     "extra_options": [],
     "custom": [

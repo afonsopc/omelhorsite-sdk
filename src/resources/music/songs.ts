@@ -164,6 +164,27 @@ export interface Song extends Omit<BaseRecord, "id"> {
   readonly source_id: string | null;
   /** Recording identifier, when the importer resolved one. */
   readonly isrc: string | null;
+  /**
+   * ISO 639-1 code of the language SUNG on the track (`"es"`, `"pt"`, `"ja"`),
+   * or `null`.
+   *
+   * Derived, not declared: the server runs a detector over the stored lyrics,
+   * and falls back to unambiguous Last.fm tags (`"j-pop"`, `"fado"`) when
+   * there are none. So `null` means "not known yet" - a song whose lyrics were
+   * never fetched, or an instrumental - and NEVER "no language". Treat it as
+   * unknown rather than quietly dropping it from a language view.
+   */
+  readonly language: string | null;
+  /**
+   * Lowercased Last.fm tags for the track, most-voted first, at most six.
+   *
+   * Crowd tags, not a controlled vocabulary: expect `"rock"` and
+   * `"female vocalists"` in the same list, and expect `[]` for anything
+   * obscure. The server drops the junk ones ("seen live", "albums i own") and
+   * falls back to the artist's tags when the track has none of its own, which
+   * is why two songs by one artist often carry identical lists.
+   */
+  readonly tags: string[];
   readonly original_filename: string | null;
   readonly audio_codec: string | null;
   readonly audio_bitrate_kbps: number | null;
@@ -501,6 +522,7 @@ export const SONG_FILTER_COLUMNS = Object.freeze([
   "position",
   "year",
   "artist",
+  "language",
 ] as const);
 
 /** Columns the backend will accept in `modifiers[order]`. */
@@ -570,6 +592,15 @@ export interface SongFilters {
    * excluded even if they also appear as a feature.
    */
   readonly artistRole?: SongArtistRole;
+  /**
+   * Exact language code, or a list of them, sent as `exact_search[language]`.
+   *
+   * Matches {@link Song.language}, with the same caveat: rows the server could
+   * not classify hold `null` and are NOT returned by any code you ask for.
+   * Pass `null` to get exactly those - the unclassified pile - which is a
+   * different question from "songs with no words".
+   */
+  readonly language?: string | string[] | null;
 }
 
 /** Arguments for {@link MusicSongsNamespace.list}. */
@@ -1491,7 +1522,10 @@ export class MusicSongsNamespace extends Resource {
     return listQuery(params, at, {
       order: at === undefined ? undefined : "created_at:asc",
       search: { title: params.title },
-      exactSearch: { album: params.album, year: params.year, id: params.ids, artist: params.artist },
+      exactSearch: {
+        album: params.album, year: params.year, id: params.ids,
+        artist: params.artist, language: params.language,
+      },
       top: params.artistRole === undefined ? {} : { artist_role: params.artistRole },
     });
   }
