@@ -296,6 +296,31 @@ export class AdminOauthApplicationsNamespace extends Resource {
   }
 
   /**
+   * `POST /admin/oauth_applications/:id/verify` - the team vouches for the
+   * client. Only an approved one; idempotent. From then on its owner's edits
+   * keep the approval instead of re-entering review.
+   *
+   * @throws {OmsApiError} 422 `not_approved`; 404 `not_found`.
+   * @throws {OmsAuthError} 403 for a non-admin.
+   */
+  async verify(id: number | string, options: RequestOptions = {}): Promise<OauthApplicationReview> {
+    return this.http.post<OauthApplicationReview>(
+      `/admin/oauth_applications/${encodeURIComponent(String(id))}/verify`,
+      undefined,
+      options,
+    );
+  }
+
+  /** `POST /admin/oauth_applications/:id/unverify` - back under the normal review rule. */
+  async unverify(id: number | string, options: RequestOptions = {}): Promise<OauthApplicationReview> {
+    return this.http.post<OauthApplicationReview>(
+      `/admin/oauth_applications/${encodeURIComponent(String(id))}/unverify`,
+      undefined,
+      options,
+    );
+  }
+
+  /**
    * `POST /admin/oauth_applications/:id/reject` - refuses a registration, or
    * pulls an approved client off the air.
    *

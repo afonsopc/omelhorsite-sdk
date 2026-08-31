@@ -86,6 +86,13 @@ export interface OauthApplicationSummary {
   readonly approval_status: OauthApprovalStatus;
   /** When it was approved, `null` while pending or rejected. */
   readonly approved_at: Timestamp | null;
+  /**
+   * Vouched for by the site's own team. A verified client keeps its approval
+   * through renames and wider scopes, which would otherwise send it back to
+   * review; the consent screen carries the badge.
+   */
+  readonly verified: boolean;
+  readonly verified_at: Timestamp | null;
   /** The reason shown to the owner. `null` unless rejected. At most 500 characters. */
   readonly rejection_reason: string | null;
   /**
@@ -104,6 +111,8 @@ export interface OauthApplicationSummary {
    * truth. Populated on {@link AdminOauthApplicationsNamespace}.
    */
   readonly approved_by: OauthApplicationParty | null;
+  /** Who verified it. `null` while unverified, or when that admin's account is gone. */
+  readonly verified_by?: OauthApplicationParty | null;
   readonly created_at: Timestamp;
 }
 

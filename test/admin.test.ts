@@ -89,6 +89,8 @@ function application(overrides: Partial<OauthApplicationSummary> = {}): OauthApp
     redirect_uri: NATIVE_LOOPBACK_REDIRECT_VALUE,
     approval_status: "approved",
     approved_at: "2026-08-01T10:00:00.000Z",
+    verified: false,
+    verified_at: null,
     rejection_reason: null,
     owner: { id: "u_1", handle: "afonso", name: "Afonso" },
     approved_by: null,
@@ -382,6 +384,17 @@ describe("oauthApplications review", () => {
     await admin.oauthApplications.get("oms-cli");
 
     expect(calls[0]?.path).toBe("/admin/oauth_applications/oms-cli");
+  });
+
+  test("verify and unverify are bare POSTs on the member", async () => {
+    const { admin, calls } = harness({ application: application({ verified: true }) });
+    const result = await admin.oauthApplications.verify(12);
+    await admin.oauthApplications.unverify(12);
+    expect(result.application.verified).toBe(true);
+    expect(calls.map((call) => [call.method, call.path, call.body])).toEqual([
+      ["POST", "/admin/oauth_applications/12/verify", undefined],
+      ["POST", "/admin/oauth_applications/12/unverify", undefined],
+    ]);
   });
 
   test("reject requires the reason on the body and passes the opt-in flag through", async () => {
