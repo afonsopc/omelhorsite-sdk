@@ -1,5 +1,7 @@
 # @omelhorsite/sdk
 
+[![npm](https://img.shields.io/npm/v/@omelhorsite/sdk)](https://www.npmjs.com/package/@omelhorsite/sdk)
+
 TypeScript client for the [omelhorsite](https://omelhorsite.pt) API. Works in
 browsers, Bun, Node 18+, React Native and Cloudflare Workers.
 
