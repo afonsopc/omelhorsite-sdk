@@ -133,7 +133,7 @@ export interface LlmUsageQuery {
 }
 
 /** Filter columns of `GET /llm_chats`, on top of the base ones. */
-export const LLM_CHAT_FILTER_COLUMNS = Object.freeze(["title", "pinned", "archived", "llm_model_id"] as const);
+export const LLM_CHAT_FILTER_COLUMNS = Object.freeze(["title", "pinned", "archived", "llm_model_id", "tools_enabled"] as const);
 
 export interface ListLlmChatsParams extends ListParams<(typeof LLM_CHAT_FILTER_COLUMNS)[number]> {}
 
@@ -143,6 +143,24 @@ export type LlmChatRole = (typeof LLM_CHAT_ROLES)[number];
 /** `streaming` while the answer is still being written, then `done` or `error`. */
 export const LLM_CHAT_MESSAGE_STATUSES = Object.freeze(["streaming", "done", "error"] as const);
 export type LlmChatMessageStatus = (typeof LLM_CHAT_MESSAGE_STATUSES)[number];
+
+/** The tools the assistant can use in a chat. */
+export const LLM_TOOL_NAMES = Object.freeze(["web_search", "read_url"] as const);
+export type LlmToolName = (typeof LLM_TOOL_NAMES)[number] | (string & {});
+
+/** `running` only ever appears in the stream; a stored call is `done` or `error`. */
+export const LLM_TOOL_CALL_STATUSES = Object.freeze(["running", "done", "error"] as const);
+export type LlmToolCallStatus = (typeof LLM_TOOL_CALL_STATUSES)[number];
+
+/** One use of a tool: what was asked (`args`), a one-line `summary` for people, how long it took. */
+export interface LlmToolCall {
+  readonly name: LlmToolName;
+  readonly args: Readonly<Record<string, unknown>>;
+  readonly status: LlmToolCallStatus;
+  readonly summary?: string;
+  readonly ms?: number;
+  readonly error?: string;
+}
 
 /** One conversation with the assistant. Pinned chats list first, then by `last_message_at`. */
 export interface LlmChat {
@@ -158,6 +176,8 @@ export interface LlmChat {
   readonly pinned: boolean;
   /** An archived chat can be read but not written to. */
   readonly archived: boolean;
+  /** Whether the assistant may search the web and read pages in this chat. On by default. */
+  readonly tools_enabled: boolean;
   readonly last_message_at: Timestamp;
   readonly message_count: number;
 }
@@ -176,7 +196,12 @@ export interface LlmChatMessage {
   readonly cost: number | null;
   /** Why an answer ended in `error`, or `"interrupted"` on a `done` answer cut short by the reader. */
   readonly error: string | null;
-  readonly tool_calls: readonly unknown[];
+  /** What the assistant did with its tools while writing this answer, in order. */
+  readonly tool_calls: readonly LlmToolCall[];
+  /** From the request to the model until the answer ended, in milliseconds; `null` on questions. */
+  readonly duration_ms: number | null;
+  /** From the request until the first token; `null` when nothing was generated. Tokens per second is `output_tokens / ((duration_ms - first_token_ms) / 1000)`. */
+  readonly first_token_ms: number | null;
   /** The question this answer belongs to. */
   readonly parent_id: Id | null;
 }
@@ -190,6 +215,8 @@ export interface CreateLlmChatInput {
   readonly title?: string;
   /** Must be a model the caller may choose (see {@link LlmNamespace.models}); the server answers `400` otherwise. */
   readonly llmModelId?: Id;
+  /** Defaults to `true`. */
+  readonly toolsEnabled?: boolean;
 }
 
 export interface UpdateLlmChatInput {
@@ -197,6 +224,7 @@ export interface UpdateLlmChatInput {
   readonly llmModelId?: Id | null;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  readonly toolsEnabled?: boolean;
 }
 
 export interface SendLlmChatMessageInput {
@@ -207,7 +235,8 @@ export interface SendLlmChatMessageInput {
 }
 
 /**
- * What a streamed answer yields, in order: any number of `delta` events, then
+ * What a streamed answer yields, in order: any number of `delta` and `tool`
+ * events (a tool yields `running` first, then `done` or `error`), then
  * exactly one `done` or `error`. A refusal before the first token (the
  * provider is busy, the daily ceiling is reached, no model is available) is
  * not an event but a thrown `OmsApiError` with status `503`, `429` or `502`,
@@ -216,6 +245,7 @@ export interface SendLlmChatMessageInput {
  */
 export type LlmChatStreamEvent =
   | { readonly type: "delta"; readonly delta: string }
+  | ({ readonly type: "tool" } & LlmToolCall)
   | {
       readonly type: "done";
       readonly messageId: Id;
@@ -223,6 +253,8 @@ export type LlmChatStreamEvent =
       readonly inputTokens: number | null;
       readonly outputTokens: number | null;
       readonly cost: number | null;
+      readonly durationMs: number | null;
+      readonly firstTokenMs: number | null;
     }
   | {
       readonly type: "error";
@@ -234,12 +266,15 @@ export type LlmChatStreamEvent =
 
 interface WireStreamFrame {
   readonly delta?: string;
+  readonly tool?: LlmToolCall;
   readonly done?: boolean;
   readonly message_id?: Id | null;
   readonly model_id?: string | null;
   readonly input_tokens?: number | null;
   readonly output_tokens?: number | null;
   readonly cost?: number | null;
+  readonly duration_ms?: number | null;
+  readonly first_token_ms?: number | null;
   readonly error?: string;
   readonly message?: string;
 }
@@ -256,9 +291,12 @@ function toEvent(frame: WireStreamFrame): LlmChatStreamEvent | undefined {
       inputTokens: frame.input_tokens ?? null,
       outputTokens: frame.output_tokens ?? null,
       cost: frame.cost ?? null,
+      durationMs: frame.duration_ms ?? null,
+      firstTokenMs: frame.first_token_ms ?? null,
     };
   }
   if (typeof frame.delta === "string" && frame.delta.length > 0) return { type: "delta", delta: frame.delta };
+  if (frame.tool && typeof frame.tool.name === "string") return { type: "tool", ...frame.tool };
   return undefined;
 }
 
@@ -324,7 +362,7 @@ export class LlmChatMessagesNamespace extends Resource {
         const event = toEvent(frame);
         if (event === undefined) continue;
         yield event;
-        if (event.type !== "delta") return;
+        if (event.type === "done" || event.type === "error") return;
       }
     }
     // The connection ended before the frame that says the answer finished.
@@ -355,6 +393,7 @@ export class LlmChatsNamespace extends Resource {
     const body: Record<string, unknown> = {};
     if (input.title !== undefined) body["title"] = input.title;
     if (input.llmModelId !== undefined) body["llm_model_id"] = input.llmModelId;
+    if (input.toolsEnabled !== undefined) body["tools_enabled"] = input.toolsEnabled;
     return this.http.post<LlmChatDetail>("/llm_chats", body, options);
   }
 
@@ -364,6 +403,7 @@ export class LlmChatsNamespace extends Resource {
     if (input.llmModelId !== undefined) body["llm_model_id"] = input.llmModelId;
     if (input.pinned !== undefined) body["pinned"] = input.pinned;
     if (input.archived !== undefined) body["archived"] = input.archived;
+    if (input.toolsEnabled !== undefined) body["tools_enabled"] = input.toolsEnabled;
     return this.http.patch<LlmChatDetail>(`/llm_chats/${encodeURIComponent(id)}`, body, options);
   }
 

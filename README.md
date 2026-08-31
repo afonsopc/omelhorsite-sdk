@@ -81,7 +81,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/new/path");
 | `oms.music` | Songs, artists, playlists, imports, likes, jams, the social feed. |
 | `oms.movies` | Addons, collections, watch progress. |
 | `oms.search` | Web search: web, images, news and videos, with suggestions and infoboxes. |
-| `oms.llm` | The language models you may pick, your own usage, and your conversations with the assistant (`oms.llm.chats`, streamed answers); administrators configure providers, models, feature assignments and see everybody's cost under `oms.admin.llm*`. |
+| `oms.llm` | The language models you may pick, your own usage, and your conversations with the assistant (`oms.llm.chats`, streamed answers; the assistant may search the web and read pages, and each streamed answer reports every tool it used as a `tool` event and stores them as `tool_calls`, with `duration_ms`/`first_token_ms` for the answer); administrators configure providers, models, feature assignments and see everybody's cost under `oms.admin.llm*`. |
 | `oms.library` | Books, shelves, annotations, the study assistant. |
 | `oms.social` | Direct messages, relationships, group chats. |
 | `oms.content` | Blogs, notifications, feedbacks, jokes, site status, intel. |

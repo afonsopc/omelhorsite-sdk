@@ -232,7 +232,7 @@ describe("llm.chats", () => {
   test("send streams deltas then done, parsed out of the event stream", async () => {
     const frames = [
       'data: {"delta":"Olá"}\n\n',
-      'data: {"delta":" mundo"}\n\ndata: {"done":true,"message_id":"a1","model_id":"qwen","input_tokens":10,"output_tokens":5,"cost":0.00002}\n\n',
+      'data: {"delta":" mundo"}\n\ndata: {"done":true,"message_id":"a1","model_id":"qwen","input_tokens":10,"output_tokens":5,"cost":0.00002,"duration_ms":1840,"first_token_ms":310}\n\n',
     ];
     const calls: string[] = [];
     const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
@@ -249,8 +249,35 @@ describe("llm.chats", () => {
     expect(events).toEqual([
       { type: "delta", delta: "Olá" },
       { type: "delta", delta: " mundo" },
-      { type: "done", messageId: "a1", modelId: "qwen", inputTokens: 10, outputTokens: 5, cost: 0.00002 },
+      { type: "done", messageId: "a1", modelId: "qwen", inputTokens: 10, outputTokens: 5, cost: 0.00002, durationMs: 1840, firstTokenMs: 310 },
     ]);
+  });
+
+  test("tool frames come through as tool events, running first and then done", async () => {
+    const frames = [
+      'data: {"tool":{"name":"web_search","args":{"query":"cil"},"status":"running"}}\n\n',
+      'data: {"tool":{"name":"web_search","args":{"query":"cil"},"status":"done","summary":"6 resultados","ms":812}}\n\n',
+      'data: {"delta":"A CIL"}\n\ndata: {"done":true,"message_id":"a3","model_id":"qwen","input_tokens":1,"output_tokens":1,"cost":0}\n\n',
+    ];
+    const fetchImpl = async (): Promise<Response> =>
+      new Response(frames.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+    const http = new ApiClient({ baseUrl: BASE_URL, fetch: fetchImpl, tokens: { getToken: () => "t" }, retry: { maxAttempts: 1 } });
+    const llm = new LlmNamespace(http);
+
+    const events = [];
+    for await (const event of llm.chats.messages.send("c1", { content: "Qual é o site da CIL?" })) events.push(event);
+
+    expect(events.map((event) => event.type)).toEqual(["tool", "tool", "delta", "done"]);
+    expect(events[0]).toEqual({ type: "tool", name: "web_search", args: { query: "cil" }, status: "running" });
+    expect(events[1]).toEqual({ type: "tool", name: "web_search", args: { query: "cil" }, status: "done", summary: "6 resultados", ms: 812 });
+  });
+
+  test("toolsEnabled travels as tools_enabled on create and update", async () => {
+    const { llm, calls } = harness([]);
+    await llm.chats.create({ toolsEnabled: false });
+    expect(calls[0]?.body).toEqual({ tools_enabled: false });
+    await llm.chats.update("c1", { toolsEnabled: true });
+    expect(calls[1]?.body).toEqual({ tools_enabled: true });
   });
 
   test("an error frame ends the stream and a cut stream reports interrupted", async () => {

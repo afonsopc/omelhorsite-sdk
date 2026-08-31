@@ -141,11 +141,6 @@
     "extra_options": [],
     "custom": []
   },
-  "assistant/auth": {
-    "search": [],
-    "extra_options": [],
-    "custom": []
-  },
   "authorized_applications": {
     "search": [],
     "extra_options": [],
@@ -400,7 +395,8 @@
       "title",
       "pinned",
       "archived",
-      "llm_model_id"
+      "llm_model_id",
+      "tools_enabled"
     ],
     "extra_options": [],
     "custom": []
