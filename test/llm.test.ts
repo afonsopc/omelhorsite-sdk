@@ -278,6 +278,10 @@ describe("llm.chats", () => {
     expect(calls[0]?.body).toEqual({ tools_enabled: false });
     await llm.chats.update("c1", { toolsEnabled: true });
     expect(calls[1]?.body).toEqual({ tools_enabled: true });
+    await llm.chats.update("c1", { accountToolsEnabled: true });
+    expect(calls[2]?.body).toEqual({ account_tools_enabled: true });
+    await llm.chats.create({ accountToolsEnabled: true, toolsEnabled: false });
+    expect(calls[3]?.body).toEqual({ tools_enabled: false, account_tools_enabled: true });
   });
 
   test("an error frame ends the stream and a cut stream reports interrupted", async () => {

@@ -396,7 +396,8 @@
       "pinned",
       "archived",
       "llm_model_id",
-      "tools_enabled"
+      "tools_enabled",
+      "account_tools_enabled"
     ],
     "extra_options": [],
     "custom": []

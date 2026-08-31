@@ -133,7 +133,7 @@ export interface LlmUsageQuery {
 }
 
 /** Filter columns of `GET /llm_chats`, on top of the base ones. */
-export const LLM_CHAT_FILTER_COLUMNS = Object.freeze(["title", "pinned", "archived", "llm_model_id", "tools_enabled"] as const);
+export const LLM_CHAT_FILTER_COLUMNS = Object.freeze(["title", "pinned", "archived", "llm_model_id", "tools_enabled", "account_tools_enabled"] as const);
 
 export interface ListLlmChatsParams extends ListParams<(typeof LLM_CHAT_FILTER_COLUMNS)[number]> {}
 
@@ -144,15 +144,25 @@ export type LlmChatRole = (typeof LLM_CHAT_ROLES)[number];
 export const LLM_CHAT_MESSAGE_STATUSES = Object.freeze(["streaming", "done", "error"] as const);
 export type LlmChatMessageStatus = (typeof LLM_CHAT_MESSAGE_STATUSES)[number];
 
-/** The tools the assistant can use in a chat. */
-export const LLM_TOOL_NAMES = Object.freeze(["web_search", "read_url"] as const);
+/**
+ * The tools the assistant can use in a chat. `web_search` and `read_url` are
+ * the web tools (`tools_enabled`); `search` and `execute` are the account
+ * tools (`account_tools_enabled`): the assistant looks up the SDK's type
+ * declarations and runs TypeScript against the API as the user.
+ */
+export const LLM_TOOL_NAMES = Object.freeze(["web_search", "read_url", "search", "execute"] as const);
 export type LlmToolName = (typeof LLM_TOOL_NAMES)[number] | (string & {});
 
 /** `running` only ever appears in the stream; a stored call is `done` or `error`. */
 export const LLM_TOOL_CALL_STATUSES = Object.freeze(["running", "done", "error"] as const);
 export type LlmToolCallStatus = (typeof LLM_TOOL_CALL_STATUSES)[number];
 
-/** One use of a tool: what was asked (`args`), a one-line `summary` for people, how long it took. */
+/**
+ * One use of a tool: what was asked (`args`), a one-line `summary` for people, how long it took.
+ * `args` is the tool's input: `{ query }` for `web_search` and `search`, `{ url }` for `read_url`,
+ * and for `execute` `{ code, code_chars }` - the head of the program (2,000 characters at most)
+ * and the full length it had.
+ */
 export interface LlmToolCall {
   readonly name: LlmToolName;
   readonly args: Readonly<Record<string, unknown>>;
@@ -178,6 +188,14 @@ export interface LlmChat {
   readonly archived: boolean;
   /** Whether the assistant may search the web and read pages in this chat. On by default. */
   readonly tools_enabled: boolean;
+  /**
+   * Whether the assistant may act on the user's account in this chat (the
+   * `search` and `execute` tools: it reads the SDK's declarations and runs
+   * TypeScript against the API as the user, with a short-lived token that
+   * dies with each answer). Off by default; every write it wants to make
+   * it is told to confirm first.
+   */
+  readonly account_tools_enabled: boolean;
   readonly last_message_at: Timestamp;
   readonly message_count: number;
 }
@@ -217,6 +235,8 @@ export interface CreateLlmChatInput {
   readonly llmModelId?: Id;
   /** Defaults to `true`. */
   readonly toolsEnabled?: boolean;
+  /** Defaults to `false`. See {@link LlmChat.account_tools_enabled}. */
+  readonly accountToolsEnabled?: boolean;
 }
 
 export interface UpdateLlmChatInput {
@@ -225,6 +245,7 @@ export interface UpdateLlmChatInput {
   readonly pinned?: boolean;
   readonly archived?: boolean;
   readonly toolsEnabled?: boolean;
+  readonly accountToolsEnabled?: boolean;
 }
 
 export interface SendLlmChatMessageInput {
@@ -394,6 +415,7 @@ export class LlmChatsNamespace extends Resource {
     if (input.title !== undefined) body["title"] = input.title;
     if (input.llmModelId !== undefined) body["llm_model_id"] = input.llmModelId;
     if (input.toolsEnabled !== undefined) body["tools_enabled"] = input.toolsEnabled;
+    if (input.accountToolsEnabled !== undefined) body["account_tools_enabled"] = input.accountToolsEnabled;
     return this.http.post<LlmChatDetail>("/llm_chats", body, options);
   }
 
@@ -404,6 +426,7 @@ export class LlmChatsNamespace extends Resource {
     if (input.pinned !== undefined) body["pinned"] = input.pinned;
     if (input.archived !== undefined) body["archived"] = input.archived;
     if (input.toolsEnabled !== undefined) body["tools_enabled"] = input.toolsEnabled;
+    if (input.accountToolsEnabled !== undefined) body["account_tools_enabled"] = input.accountToolsEnabled;
     return this.http.patch<LlmChatDetail>(`/llm_chats/${encodeURIComponent(id)}`, body, options);
   }
 
