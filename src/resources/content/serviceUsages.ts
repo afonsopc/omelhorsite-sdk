@@ -20,6 +20,7 @@ export const SERVICE_USAGE_IDS = [
   "blogs",
   "status",
   "administration",
+  "search",
 ] as const;
 
 /** One of {@link SERVICE_USAGE_IDS}. */
