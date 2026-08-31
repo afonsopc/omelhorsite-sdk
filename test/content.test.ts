@@ -255,6 +255,7 @@ function notification(overrides: Partial<Notification> = {}): Notification {
   return {
     id: 901,
     kind: "friendship_request",
+    category: "social",
     context: { handle: "biraj" },
     read: false,
     user_id: "usr_1",

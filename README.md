@@ -100,25 +100,25 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 
 ## Namespaces
 
-- `oms.auth` — OAuth: device grant, refresh, revoke, `whoami`.
-- `oms.sessions`, `oms.passkeys` — sign-in, sign-up, OTP, passkeys.
-- `oms.account` — the signed-in user, profile, sessions, usage.
-- `oms.storage` — files and folders: upload, download, share.
-- `oms.music` — songs, artists, playlists, jams.
-- `oms.movies` — addons, collections, watch progress.
-- `oms.library` — books, shelves, annotations.
-- `oms.llm` — models and assistant chats.
-- `oms.search` — web, image, news and video search.
-- `oms.social` — direct messages, friends, group chats.
-- `oms.content` — blogs, notifications, feedback, site status.
-- `oms.tools` — media tools, each with its own daily quota.
-- `oms.jobs`, `oms.quotas` — background jobs and account limits.
-- `oms.tickets` — support tickets.
-- `oms.shortLinks`, `oms.notepads`, `oms.dynamicQrs`, `oms.chests`, `oms.forms`, `oms.linkTrees` — things that end in a shareable URL.
-- `oms.ipLookup` — geolocation for an IP.
-- `oms.realtime` — WebSocket: notifications, jobs, jams.
-- `oms.admin` — administrator-only.
-- `oms.local` — client-side helpers (passwords, QR codes). No network.
+- `oms.auth` - OAuth: device grant, refresh, revoke, `whoami`.
+- `oms.sessions`, `oms.passkeys` - sign-in, sign-up, OTP, passkeys.
+- `oms.account` - the signed-in user, profile, sessions, usage. `oms.account.notificationPreferences` decides, per notification kind, whether it shows in the inbox and whether it is emailed; the security kinds always email, unless the master switch is off.
+- `oms.storage` - files and folders: upload, download, share.
+- `oms.music` - songs, artists, playlists, jams.
+- `oms.movies` - addons, collections, watch progress.
+- `oms.library` - books, shelves, annotations.
+- `oms.llm` - models and assistant chats.
+- `oms.search` - web, image, news and video search.
+- `oms.social` - direct messages, friends, group chats.
+- `oms.content` - blogs, notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
+- `oms.tools` - media tools, each with its own daily quota.
+- `oms.jobs`, `oms.quotas` - background jobs and account limits.
+- `oms.tickets` - support tickets.
+- `oms.shortLinks`, `oms.notepads`, `oms.dynamicQrs`, `oms.chests`, `oms.forms`, `oms.linkTrees` - things that end in a shareable URL.
+- `oms.ipLookup` - geolocation for an IP.
+- `oms.realtime` - WebSocket: notifications, jobs, jams.
+- `oms.admin` - administrator-only.
+- `oms.local` - client-side helpers (passwords, QR codes). No network.
 
 ## Errors
 
