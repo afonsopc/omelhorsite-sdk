@@ -11,7 +11,7 @@ import type { Id, RequestOptions, Timestamp } from "../../../types";
  * empty is not the same as an absent one: absent means "use the platform
  * default", present-and-empty means the pipeline gets an empty prompt.
  */
-export const INTEL_PROMPT_KEYS = ["build", "enrich_plan", "enrich_actors", "enrich_synth", "report"] as const;
+export const INTEL_PROMPT_KEYS = ["build", "media", "enrich_plan", "enrich_actors", "enrich_synth", "report"] as const;
 
 /** One overridable prompt in the analysis pipeline. */
 export type IntelPromptKey = (typeof INTEL_PROMPT_KEYS)[number];

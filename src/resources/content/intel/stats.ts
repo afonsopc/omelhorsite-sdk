@@ -60,6 +60,8 @@ export interface IntelStatsTotals {
    * returns immediately and silently.
    */
   readonly pending_items: number;
+  /** Video items still to transcribe or split (`media_status` pending/processing/transcribed). */
+  readonly pending_media: number;
 }
 
 /**

@@ -33,10 +33,33 @@ export interface IntelItem {
   readonly published_at: Timestamp | null;
   /** When the poll that produced this item ran. Never null. */
   readonly fetched_at: Timestamp;
+  /**
+   * Set when the item is a VIDEO the script discovered (YouTube, RTP Play):
+   * the backend downloads the audio, transcribes it and splits it into news
+   * items. The video row itself never reaches the analysis; the news it
+   * yields do, as child items pointing back via {@link parent_id}.
+   */
+  readonly media_url: string | null;
+  /**
+   * Transcription state of a video row: `pending` → `processing` →
+   * `transcribed` (the `content` now holds the `[m:ss] text` transcript) →
+   * `done`, or `failed` with {@link media_error}. `null` on non-video items.
+   */
+  readonly media_status: IntelMediaStatus | null;
+  readonly media_error: string | null;
+  /** On a news item cut from a video: the video (parent) item's id. */
+  readonly parent_id: Id | null;
+  /** On a news item cut from a video: where in the video it starts, in seconds. */
+  readonly media_offset_s: number | null;
 }
 
+/** Lifecycle of a video item's transcription. */
+export type IntelMediaStatus = "pending" | "processing" | "transcribed" | "done" | "failed";
+
 /** Filter columns of `GET /intel_items`, on top of {@link BASE_FILTER_COLUMNS}. */
-export const INTEL_ITEM_FILTER_COLUMNS = Object.freeze(["intel_source_id", "external_id", "title", "content", "url"] as const);
+export const INTEL_ITEM_FILTER_COLUMNS = Object.freeze([
+  "intel_source_id", "external_id", "title", "content", "url", "media_status", "parent_id",
+] as const);
 
 /** Filters for {@link IntelItemsNamespace.list}. */
 export interface ListIntelItemsParams extends ListParams<(typeof INTEL_ITEM_FILTER_COLUMNS)[number]> {

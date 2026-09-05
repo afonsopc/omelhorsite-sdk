@@ -497,6 +497,11 @@ describe("intel.items", () => {
       author: null,
       published_at: "2026-08-28T23:00:00Z",
       fetched_at: "2026-08-29T00:00:00Z",
+      media_url: null,
+      media_status: null,
+      media_error: null,
+      parent_id: null,
+      media_offset_s: null,
     };
     const { intel, calls } = harness([[item]]);
 
@@ -587,7 +592,7 @@ describe("intel.config", () => {
 describe("intel.stats", () => {
   test("one request to a singular path, despite the plural spelling", async () => {
     const stats: IntelStats = {
-      totals: { articles: 120, sources: 400, reports: 9, items: 900, pending_items: 12 },
+      totals: { articles: 120, sources: 400, reports: 9, items: 900, pending_items: 12, pending_media: 3 },
       by_category: [{ category: "incidente", c: 40 }],
       by_day: [{ day: "2026-08-29", c: 5 }],
       by_importance: { critico: 2, alta: 10, media: 30, baixa: 50, ruido: 28 },
@@ -662,7 +667,7 @@ describe("the vocabulary constants match the Ruby ones", () => {
     ]);
     expect([...INTEL_REPORT_KINDS]).toEqual(["6h", "day", "week", "month"]);
     expect([...INTEL_SOURCE_HEALTHS]).toEqual(["unknown", "ok", "error"]);
-    expect([...INTEL_PROMPT_KEYS]).toEqual(["build", "enrich_plan", "enrich_actors", "enrich_synth", "report"]);
+    expect([...INTEL_PROMPT_KEYS]).toEqual(["build", "media", "enrich_plan", "enrich_actors", "enrich_synth", "report"]);
     expect(INTEL_SOURCE_DISABLE_AFTER_FAILURES).toBe(20);
   });
 });

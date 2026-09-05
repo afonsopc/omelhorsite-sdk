@@ -75,8 +75,13 @@ export interface IntelArticleSourceRef {
   /** Name of the {@link IntelSource} the item came from, or `null` if it was deleted. */
   readonly source_name: string | null;
   readonly title: string | null;
+  /** For news cut from a video this already points at the right instant (`&t=754s` on YouTube). */
   readonly url: string | null;
   readonly published_at: Timestamp | null;
+  /** When the item was cut from a video: the video's title (e.g. "Telejornal · 04 set. 2026"). */
+  readonly media_title: string | null;
+  /** When the item was cut from a video: where it starts, in seconds. */
+  readonly media_offset_s: number | null;
 }
 
 /**

@@ -305,7 +305,9 @@
       "external_id",
       "title",
       "content",
-      "url"
+      "url",
+      "media_status",
+      "parent_id"
     ],
     "extra_options": [],
     "custom": []
