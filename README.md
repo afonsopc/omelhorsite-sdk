@@ -132,7 +132,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 - `oms.cron` - your TypeScript scripts run on a schedule by the server, with this SDK in scope; runs, logs and templates.
 - `oms.search` - web, image, news and video search, and reading a page's text.
 - `oms.social` - direct messages, friends, group chats.
-- `oms.content.news` - news feeds: sources driven by scripts (RSS, Telegram, YouTube, a page with a selector), the items they produce, full-text search over them.
+- `oms.content.news` - news feeds: sources driven by scripts (RSS, Telegram, YouTube, a page with a selector), the items they produce, full-text and similarity search over them.
 - `oms.content` - blogs (several per account, public, unlisted or private with invited members; `oms.content.blogs.own` manages them), notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
 - `oms.tools` - media tools, each with its own daily quota.
 - `oms.jobs`, `oms.quotas` - background jobs and account limits.

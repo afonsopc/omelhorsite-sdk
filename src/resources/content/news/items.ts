@@ -3,7 +3,7 @@
 import { Resource } from "../../../http";
 import { listQuery, paginate } from "../../../listing";
 import type { BASE_FILTER_COLUMNS, ListParams } from "../../../listing";
-import type { Id, Paginated, RequestOptions, Timestamp } from "../../../types";
+import type { Id, Paginated, QueryParams, RequestOptions, Timestamp } from "../../../types";
 
 /**
  * A raw item, exactly as a script returned it.
@@ -82,6 +82,35 @@ export interface ListNewsItemsParams extends ListParams<(typeof NEWS_ITEM_FILTER
   readonly until?: string;
 }
 
+/** Parameters of {@link NewsItemsNamespace.similar}: an anchor plus optional narrowing. */
+export type SimilarNewsItemsParams = (
+  | {
+      /** Free text to compare against. */
+      readonly text: string;
+      readonly itemId?: undefined;
+    }
+  | {
+      /** One of your items to compare against. It never comes back in the results. */
+      readonly itemId: Id;
+      readonly text?: undefined;
+    }
+) & {
+  /** Only items of one feed. */
+  readonly feedId?: Id;
+  /** 1..50, default 10. */
+  readonly limit?: number;
+  /** Only items written at or after this instant (ISO 8601). */
+  readonly since?: string | Date;
+  /** Cosine distance ceiling, 0..1, default 0.35. Lower is stricter. */
+  readonly maxDistance?: number;
+};
+
+/** A hit of {@link NewsItemsNamespace.similar}: the item plus how far it sits from the anchor. */
+export type SimilarNewsItem = NewsItem & {
+  /** Cosine distance to the anchor: `0` is the same text, `1` unrelated. */
+  readonly distance: number;
+};
+
 /**
  * `/news_items` - the raw material.
  *
@@ -126,6 +155,33 @@ export class NewsItemsNamespace extends Resource {
    */
   async get(id: Id, options: RequestOptions = {}): Promise<NewsItem> {
     return this.http.get<NewsItem>(`/news_items/${encodeURIComponent(id)}`, options);
+  }
+
+  /**
+   * `GET /news_items/similar` - your items closest in meaning to a text or to
+   * one of your items, nearest first, no paging.
+   *
+   * Meaning, not words: "mesquita de Lisboa" finds an item about the mosque
+   * that never uses the word. Every item gets its vector shortly after it is
+   * written, so a fresh one may still be missing from the results; videos
+   * have none (the news cut from them do).
+   *
+   * @throws {OmsApiError} 400 when neither `text` nor `itemId` is given, `limit`
+   *   is outside 1..50, `maxDistance` outside 0..1, or `since` is not ISO 8601.
+   * @throws {OmsApiError} 404 when `itemId` is not yours.
+   * @throws {OmsApiError} 422 when that item has no vector yet.
+   * @throws {OmsApiError} 502 when `text` cannot be embedded right now.
+   */
+  async similar(params: SimilarNewsItemsParams, options: RequestOptions = {}): Promise<SimilarNewsItem[]> {
+    const query: QueryParams = {
+      text: params.text,
+      item_id: params.itemId,
+      news_feed_id: params.feedId,
+      limit: params.limit,
+      since: params.since,
+      max_distance: params.maxDistance,
+    };
+    return this.http.get<SimilarNewsItem[]>("/news_items/similar", { ...options, query });
   }
 
   /**

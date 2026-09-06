@@ -355,3 +355,61 @@ describe("news.items", () => {
   });
 });
 
+describe("news.items.similar", () => {
+  const hit: NewsItem & { distance: number } = {
+    id: "itm_2",
+    created_at: "2026-09-06T00:00:00Z",
+    updated_at: "2026-09-06T00:00:00Z",
+    news_feed_id: "feed_1",
+    news_source_id: "src_1",
+    external_id: "guid-2",
+    title: "Mesquita",
+    content: "Sobre a mesquita.",
+    url: null,
+    author: null,
+    published_at: null,
+    fetched_at: "2026-09-06T00:00:00Z",
+    media_url: null,
+    media_status: null,
+    media_error: null,
+    parent_id: null,
+    media_offset_s: null,
+    distance: 0.12,
+  };
+
+  test("by text: every parameter has its wire name, absent ones stay off the query", async () => {
+    const { news, calls } = harness([[hit]]);
+
+    const hits = await news.items.similar({
+      text: "mesquita de Lisboa",
+      feedId: "feed_1",
+      limit: 5,
+      since: "2026-09-01T00:00:00Z",
+      maxDistance: 0.5,
+    });
+
+    expect(calls[0]?.method).toBe("GET");
+    expect(calls[0]?.path).toBe("/news_items/similar");
+    expect(calls[0]?.search.get("text")).toBe("mesquita de Lisboa");
+    expect(calls[0]?.search.get("news_feed_id")).toBe("feed_1");
+    expect(calls[0]?.search.get("limit")).toBe("5");
+    expect(calls[0]?.search.get("since")).toBe("2026-09-01T00:00:00Z");
+    expect(calls[0]?.search.get("max_distance")).toBe("0.5");
+    expect(calls[0]?.search.has("item_id")).toBe(false);
+    expect(hits[0]?.distance).toBe(0.12);
+    expect(hits[0]?.title).toBe("Mesquita");
+  });
+
+  test("by itemId: only item_id goes on the wire", async () => {
+    const { news, calls } = harness([[]]);
+    await news.items.similar({ itemId: "itm_1" });
+    expect(calls[0]?.search.get("item_id")).toBe("itm_1");
+    expect([...(calls[0]?.search.keys() ?? [])]).toEqual(["item_id"]);
+  });
+
+  test("a 422 for an item without a vector yet surfaces as OmsApiError", async () => {
+    const { news } = harness(["Item has no embedding yet"], 422);
+    await expect(news.items.similar({ itemId: "itm_1" })).rejects.toBeInstanceOf(OmsApiError);
+  });
+});
+
