@@ -114,8 +114,52 @@ export interface SearchResponse {
   readonly has_more: boolean;
 }
 
+/** Longer values answer `400`. */
+export const SEARCH_PAGE_MAX_URL_LENGTH = 2000;
+/** `maxChars` outside this range answers `400`. */
+export const SEARCH_PAGE_MIN_CHARS = 200;
+export const SEARCH_PAGE_MAX_CHARS = 20_000;
+
+export interface SearchPageInput {
+  /** A public `http(s)` URL. Private, loopback and link-local addresses answer `422`. */
+  readonly url: string;
+  /** How much text to return, {@link SEARCH_PAGE_MIN_CHARS} to {@link SEARCH_PAGE_MAX_CHARS}; defaults to 8000. */
+  readonly maxChars?: number;
+}
+
+/** The readable part of one page: scripts, navigation, footers and forms stripped. */
+export interface SearchPage {
+  /** Where the page was actually read from, after redirects. */
+  readonly url: string;
+  readonly host: string;
+  /** Plain text, at most 200 characters; empty when the page has no title. */
+  readonly title: string;
+  /** Plain text, whitespace collapsed, cut at `maxChars`. Never empty: a page with nothing readable is a `422`. */
+  readonly text: string;
+}
+
 /** The `search` namespace, reachable as `oms.search`. */
 export class SearchNamespace extends Resource {
+  /**
+   * `GET /search/page` - reads one public web page and returns its main text.
+   * The natural follow-up to {@link query}: search first, then read the hits
+   * worth reading in full.
+   *
+   * Only `http` and `https`, only public addresses, at most three redirects,
+   * and pages that are not HTML or text are refused. The server keeps the
+   * answer for ten minutes, so reading the same page twice is cheap.
+   *
+   * @throws {OmsApiError} 400 for a missing or overlong URL or a `maxChars`
+   *   out of range; 401 without a credential; 422 with `error: "unreadable"`
+   *   and a `message` saying why (private address, not HTML, unreachable,
+   *   HTTP error, nothing readable); 429 above 60 reads a minute.
+   */
+  async readPage(input: SearchPageInput, options: RequestOptions = {}): Promise<SearchPage> {
+    const query: QueryParams = { url: input.url };
+    if (input.maxChars !== undefined) query["max_chars"] = input.maxChars;
+    return this.http.get<SearchPage>("/search/page", { ...options, query });
+  }
+
   /**
    * `GET /search` - runs one search and returns one page of merged results.
    *

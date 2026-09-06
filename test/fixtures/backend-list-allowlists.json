@@ -45,6 +45,7 @@
       "name",
       "enabled",
       "visible_in_chat",
+      "tier",
       "free"
     ],
     "extra_options": [],
@@ -402,6 +403,11 @@
     "extra_options": [],
     "custom": []
   },
+  "llm_completions": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "llm_models": {
     "search": [],
     "extra_options": [],
@@ -621,6 +627,11 @@
     "custom": []
   },
   "search": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "search_pages": {
     "search": [],
     "extra_options": [],
     "custom": []

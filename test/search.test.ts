@@ -134,3 +134,31 @@ describe("search.query", () => {
     expect(SEARCH_MAX_QUERY_LENGTH).toBe(200);
   });
 });
+
+describe("search.readPage", () => {
+  test("asks for the page and renames maxChars on the way to the wire", async () => {
+    const page = { url: "https://exemplo.pt/a", host: "exemplo.pt", title: "Título", text: "corpo" };
+    const { search, calls } = harness(page);
+
+    const read = await search.readPage({ url: "https://exemplo.pt/a", maxChars: 500 });
+
+    expect(read).toEqual(page);
+    expect(calls[0]?.method).toBe("GET");
+    expect(calls[0]?.path).toBe("/search/page");
+    expect(calls[0]?.search.get("url")).toBe("https://exemplo.pt/a");
+    expect(calls[0]?.search.get("max_chars")).toBe("500");
+  });
+
+  test("leaves max_chars out when not given", async () => {
+    const { search, calls } = harness({ url: "https://exemplo.pt/a", host: "exemplo.pt", title: "", text: "corpo" });
+    await search.readPage({ url: "https://exemplo.pt/a" });
+    expect(calls[0]?.search.has("max_chars")).toBe(false);
+  });
+
+  test("an unreadable page is an API error with status 422", async () => {
+    const { search } = harness({ error: "unreadable", message: "private addresses are not allowed" }, 422);
+    const error = await search.readPage({ url: "http://10.0.0.1/" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OmsApiError);
+    expect((error as OmsApiError).status).toBe(422);
+  });
+});

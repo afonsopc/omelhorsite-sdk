@@ -311,3 +311,65 @@ describe("llm.chats", () => {
     expect(cut[1]).toMatchObject({ type: "error", error: "interrupted" });
   });
 });
+
+describe("llm.complete", () => {
+  test("posts the messages and renames every option on the way to the wire", async () => {
+    const answer = {
+      text: "Olá!",
+      model_id: "free/one",
+      input_tokens: 10,
+      output_tokens: 5,
+      cost: 0.00002,
+      tool_calls: [],
+      duration_ms: 420,
+    };
+    const { llm, calls } = harness(answer);
+
+    const completion = await llm.complete({
+      messages: [
+        { role: "system", content: "Responde curto." },
+        { role: "user", content: "olá" },
+      ],
+      model: "free/one",
+      json: true,
+      temperature: 0.2,
+      maxTokens: 300,
+      tools: ["web_search", "read_url"],
+      language: "pt-PT",
+    });
+
+    expect(completion).toEqual(answer);
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/llm/completions",
+        search: "",
+        body: {
+          messages: [
+            { role: "system", content: "Responde curto." },
+            { role: "user", content: "olá" },
+          ],
+          model: "free/one",
+          json: true,
+          temperature: 0.2,
+          max_tokens: 300,
+          tools: ["web_search", "read_url"],
+          language: "pt-PT",
+        },
+      },
+    ]);
+  });
+
+  test("sends only the messages when nothing else is given", async () => {
+    const { llm, calls } = harness({ text: "x", model_id: null, input_tokens: null, output_tokens: null, cost: null, tool_calls: [], duration_ms: 1 });
+    await llm.complete({ messages: [{ role: "user", content: "?" }] });
+    expect(calls[0]?.body).toEqual({ messages: [{ role: "user", content: "?" }] });
+  });
+
+  test("the admin can set an account's model tier without touching its overrides", async () => {
+    const { admin, calls } = harness({ user_id: "u1", handle: "ana", llm_tier: 2, quotas: [], music_storage_limit_bytes: null });
+    const quotas = await admin.quotas.setLlmTier("ana", 2);
+    expect(quotas.llm_tier).toBe(2);
+    expect(calls).toEqual([{ method: "PUT", path: "/admin/users/ana/quotas", search: "", body: { overrides: [], llm_tier: 2 } }]);
+  });
+});

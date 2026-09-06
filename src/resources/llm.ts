@@ -54,6 +54,8 @@ export interface LlmModelChoice {
   readonly name: string;
   readonly provider_slug: string;
   readonly free: boolean;
+  /** `0` everyone, `1` trusted accounts, `2` administrators. Only models at or below the account's tier are listed. */
+  readonly tier: number;
   readonly context_window: number | null;
   readonly max_output_tokens: number | null;
   readonly input_price_per_million: number | null;
@@ -436,6 +438,64 @@ export class LlmChatsNamespace extends Resource {
   }
 }
 
+/** The tools a completion may hand the model. Each call the model makes counts as one search or one page read. */
+export const LLM_COMPLETION_TOOLS = Object.freeze(["web_search", "read_url"] as const);
+export type LlmCompletionTool = (typeof LLM_COMPLETION_TOOLS)[number];
+
+/** At most this many messages in one completion. */
+export const LLM_COMPLETION_MAX_MESSAGES = 200;
+/** Longer contents answer `400`. */
+export const LLM_COMPLETION_MAX_MESSAGE_CHARS = 100_000;
+/** All contents together. */
+export const LLM_COMPLETION_MAX_TOTAL_CHARS = 400_000;
+/** `maxTokens` above this answers `400`. */
+export const LLM_COMPLETION_MAX_OUTPUT_TOKENS = 16_000;
+/** How many tool calls one completion may make before the model is told to answer with what it has. */
+export const LLM_COMPLETION_MAX_TOOL_CALLS = 6;
+
+export type LlmCompletionRole = "system" | "user" | "assistant";
+
+export interface LlmCompletionMessage {
+  readonly role: LlmCompletionRole;
+  /** Plain text. Images and audio are not accepted here. */
+  readonly content: string;
+}
+
+export interface LlmCompletionInput {
+  /** In order. At least one `user` or `assistant` turn; `system` turns alone are a `400`. */
+  readonly messages: readonly LlmCompletionMessage[];
+  /**
+   * A model the caller may choose (an `id` or a `model_id` from {@link LlmNamespace.models}).
+   * Omitted, the server's own choice for API completions answers, with its fallbacks.
+   */
+  readonly model?: string;
+  /** Ask for a JSON object. A request, not a guarantee: parse defensively. */
+  readonly json?: boolean;
+  /** `0` to `2`. */
+  readonly temperature?: number;
+  /** `1` to {@link LLM_COMPLETION_MAX_OUTPUT_TOKENS}. */
+  readonly maxTokens?: number;
+  /** Tools the model may use while answering. Their calls come back in {@link LlmCompletion.tool_calls}. */
+  readonly tools?: readonly LlmCompletionTool[];
+  /** Language of the web searches the model runs (`"pt-PT"`, `"en"`); defaults to Portuguese. */
+  readonly language?: string;
+}
+
+/** One finished completion. Tokens and cost are `null` when the provider did not report them. */
+export interface LlmCompletion {
+  readonly text: string;
+  /** The provider's identifier of the model that answered (a fallback may differ from the one asked for). */
+  readonly model_id: string | null;
+  readonly input_tokens: number | null;
+  readonly output_tokens: number | null;
+  /** In the provider's currency (USD for the hosted ones). */
+  readonly cost: number | null;
+  /** What the model did with its tools, in order. Empty without `tools`. */
+  readonly tool_calls: readonly LlmToolCall[];
+  /** From the request to the answer, in milliseconds. */
+  readonly duration_ms: number;
+}
+
 export class LlmNamespace extends Resource {
   /** Conversations with the assistant. */
   readonly chats: LlmChatsNamespace;
@@ -448,6 +508,35 @@ export class LlmNamespace extends Resource {
   /** The models the caller may choose, with today's remaining allowance on each. */
   async models(options: RequestOptions = {}): Promise<LlmModelChoice[]> {
     return this.http.get<LlmModelChoice[]>("/llm/models", options);
+  }
+
+  /**
+   * `POST /llm/completions` - one answer to a list of messages, with nothing
+   * remembered between calls. For programs; people talk to the assistant
+   * through {@link chats}.
+   *
+   * Every completion counts on the account's daily ceilings (`llm_requests`
+   * and `llm_cost_microusd` in `oms.quotas.list()`) and on the chosen model's
+   * own daily limits. Needs the `llm` scope on an OAuth token.
+   *
+   * @throws {OmsApiError} 400 for malformed messages, an unknown model
+   *   (`error: "unknown_model"`) or an unknown tool; 403 `error: "model_not_allowed"`
+   *   for a model above the account's tier; 429 `error: "limit"` when a
+   *   daily ceiling is reached, or above 30 completions a minute; 502
+   *   `error: "unavailable"` when no model answered; 503 `error: "busy"`
+   *   when the provider has no free slot, worth a retry in a moment.
+   */
+  async complete(input: LlmCompletionInput, options: RequestOptions = {}): Promise<LlmCompletion> {
+    const body: Record<string, unknown> = {
+      messages: input.messages.map((message) => ({ role: message.role, content: message.content })),
+    };
+    if (input.model !== undefined) body["model"] = input.model;
+    if (input.json !== undefined) body["json"] = input.json;
+    if (input.temperature !== undefined) body["temperature"] = input.temperature;
+    if (input.maxTokens !== undefined) body["max_tokens"] = input.maxTokens;
+    if (input.tools !== undefined) body["tools"] = [...input.tools];
+    if (input.language !== undefined) body["language"] = input.language;
+    return this.http.post<LlmCompletion>("/llm/completions", body, options);
   }
 
   /** The caller's own usage. */

@@ -135,6 +135,12 @@ export interface LlmModel {
   readonly enabled: boolean;
   /** Whether signed-in people may pick it (see `oms.llm.models`). */
   readonly visible_in_chat: boolean;
+  /**
+   * Who may pick it by name: `0` everyone, `1` trusted accounts, `2`
+   * administrators. An account reaches the models at or below its own tier
+   * (`oms.admin.quotas.setLlmTier`).
+   */
+  readonly tier: number;
   readonly context_window: number | null;
   readonly max_output_tokens: number | null;
   readonly input_price_per_million: number | null;
@@ -153,6 +159,8 @@ export interface CreateLlmModelInput {
   readonly name: string;
   readonly enabled?: boolean;
   readonly visibleInChat?: boolean;
+  /** `0` to `2`; see {@link LlmModel.tier}. */
+  readonly tier?: number;
   readonly contextWindow?: number | null;
   readonly maxOutputTokens?: number | null;
   readonly inputPricePerMillion?: number | null;
@@ -172,6 +180,7 @@ export const ADMIN_LLM_MODEL_FILTER_COLUMNS = Object.freeze([
   "name",
   "enabled",
   "visible_in_chat",
+  "tier",
   "free",
 ] as const);
 
@@ -269,6 +278,7 @@ function modelBody(input: Partial<CreateLlmModelInput>): JsonObject {
   if (input.name !== undefined) body["name"] = input.name;
   if (input.enabled !== undefined) body["enabled"] = input.enabled;
   if (input.visibleInChat !== undefined) body["visible_in_chat"] = input.visibleInChat;
+  if (input.tier !== undefined) body["tier"] = input.tier;
   if (input.contextWindow !== undefined) body["context_window"] = input.contextWindow;
   if (input.maxOutputTokens !== undefined) body["max_output_tokens"] = input.maxOutputTokens;
   if (input.inputPricePerMillion !== undefined) body["input_price_per_million"] = input.inputPricePerMillion;

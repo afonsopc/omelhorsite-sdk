@@ -19,8 +19,9 @@
  *   what is stored RIGHT NOW and only falls when something is deleted; waiting
  *   does not give it back.
  * - **Anonymous callers get a shorter list.** Without a credential the server
- *   answers with the daily resources only, counted per IP, because an
- *   anonymous caller has no file tree and no music library. Never index the
+ *   answers with the daily tool resources only, counted per IP, because an
+ *   anonymous caller has no file tree, no music library and no way to reach
+ *   a model or the search engines. Never index the
  *   array by position - look the resource up by name, or use
  *   {@link quotaFor}, which returns `undefined` rather than lying.
  *
@@ -53,6 +54,9 @@ export const QUOTA_RESOURCES = [
   "jumpstyle_edits",
   "storage_nodes",
   "music_storage_bytes",
+  "llm_requests",
+  "llm_cost_microusd",
+  "search_requests",
 ] as const;
 
 /** One of {@link QUOTA_RESOURCES}. */
@@ -60,9 +64,11 @@ export type QuotaResource = (typeof QUOTA_RESOURCES)[number];
 
 /**
  * What the numbers count. `"seconds"` of media, `"count"` of whole things
- * (edits, files and folders), `"bytes"` of stored media.
+ * (edits, files and folders, model calls, searches), `"bytes"` of stored
+ * media, `"microusd"` of model spend (millionths of a US dollar, so
+ * `200_000` is 0.20 USD).
  */
-export type QuotaUnit = "seconds" | "count" | "bytes";
+export type QuotaUnit = "seconds" | "count" | "bytes" | "microusd";
 
 /**
  * `"daily"` spends and resets at midnight, server time. `"total"` is what is

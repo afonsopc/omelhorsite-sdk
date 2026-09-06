@@ -80,6 +80,9 @@ function fullReport(): Record<string, unknown> {
         limit: 107_374_182_400,
         remaining: 106_300_440_576,
       }),
+      entry({ resource: "llm_requests", unit: "count", used: 12, limit: 300, remaining: 288 }),
+      entry({ resource: "llm_cost_microusd", unit: "microusd", used: 1_500, limit: 200_000, remaining: 198_500 }),
+      entry({ resource: "search_requests", unit: "count", used: 3, limit: 500, remaining: 497 }),
     ],
   };
 }
@@ -112,7 +115,9 @@ describe("quotas.list", () => {
     });
     const anonymous = harness({
       authenticated: false,
-      quotas: (fullReport().quotas as QuotaEntry[]).filter((row) => row.period === "daily"),
+      quotas: (fullReport().quotas as QuotaEntry[]).filter(
+        (row) => row.period === "daily" && !row.resource.startsWith("llm_") && row.resource !== "search_requests",
+      ),
     });
 
     const report = await anonymous.quotas.list();
@@ -146,7 +151,9 @@ describe("quotas.get", () => {
   test("returns null for a resource the caller cannot spend", async () => {
     const { quotas } = harness({
       authenticated: false,
-      quotas: (fullReport().quotas as QuotaEntry[]).filter((row) => row.period === "daily"),
+      quotas: (fullReport().quotas as QuotaEntry[]).filter(
+        (row) => row.period === "daily" && !row.resource.startsWith("llm_") && row.resource !== "search_requests",
+      ),
     });
 
     expect(await quotas.get("storage_nodes")).toBeNull();

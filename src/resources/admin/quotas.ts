@@ -61,6 +61,11 @@ export interface AdminUserQuotas {
   readonly user_id: Id;
   readonly handle: string;
   /**
+   * Which language models the person may pick by name: every model whose
+   * `tier` is at or below this. `0` for a new account. See {@link AdminQuotasNamespace.setLlmTier}.
+   */
+  readonly llm_tier: number;
+  /**
    * **Every** resource in the catalogue, including the storage and music
    * ceilings. Unlike the anonymous answer from `oms.quotas.list()`, nothing is
    * left out here. Look entries up by `resource`, never by position.
@@ -137,6 +142,22 @@ export class AdminQuotasNamespace extends Resource {
           ...(override.value === undefined ? {} : { value: override.value }),
         })),
       },
+      options,
+    );
+  }
+
+  /**
+   * `PUT /admin/users/:user/quotas` with `llm_tier` only - which language
+   * models the person may pick by name (`0` everyone's, `1` adds the trusted
+   * ones, `2` adds the administrators' ones). Quota overrides are untouched.
+   *
+   * @throws {OmsApiError} 400 for a tier outside `0..2`; 404 `"User not found"`.
+   * @throws {OmsAuthError} 403 for a non-admin.
+   */
+  async setLlmTier(user: Id | string, tier: number, options: RequestOptions = {}): Promise<AdminUserQuotas> {
+    return this.http.put<AdminUserQuotas>(
+      `/admin/users/${encodeURIComponent(user)}/quotas`,
+      { overrides: [], llm_tier: tier },
       options,
     );
   }

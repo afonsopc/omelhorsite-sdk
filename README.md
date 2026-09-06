@@ -92,6 +92,27 @@ for await (const event of oms.llm.chats.send(chat.id, { content: "Olá!" })) {
 }
 ```
 
+One answer from a model, for a program rather than a person:
+
+```ts
+const answer = await oms.llm.complete({
+  messages: [
+    { role: "system", content: "Answer in one sentence." },
+    { role: "user", content: "What changed in Lisbon this week?" },
+  ],
+  tools: ["web_search", "read_url"],
+});
+answer.text;        // the answer
+answer.tool_calls;  // the searches and pages the model used, in order
+```
+
+Reading a web page the search returned:
+
+```ts
+const hits = await oms.search.query({ q: "mesquita central lisboa", category: "news" });
+const page = await oms.search.readPage({ url: hits.results[0]!.url });
+```
+
 An endpoint the SDK does not wrap yet:
 
 ```ts
@@ -107,8 +128,8 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 - `oms.music` - songs, artists, playlists, jams.
 - `oms.movies` - addons, collections, watch progress.
 - `oms.library` - books, shelves, annotations.
-- `oms.llm` - models and assistant chats.
-- `oms.search` - web, image, news and video search.
+- `oms.llm` - models, one-shot completions and assistant chats.
+- `oms.search` - web, image, news and video search, and reading a page's text.
 - `oms.social` - direct messages, friends, group chats.
 - `oms.content` - blogs, notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
 - `oms.tools` - media tools, each with its own daily quota.
