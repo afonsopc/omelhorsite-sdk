@@ -1,6 +1,7 @@
 /** The `news` namespace and everything under it. */
 
-import { type ApiClient, type RequestOptions, Resource } from "../../../http";
+import { type ApiClient, Resource } from "../../../http";
+import type { RequestOptions } from "../../../types";
 import { NewsFeedsNamespace } from "./feeds";
 import { NewsItemsNamespace } from "./items";
 import { NewsScriptsNamespace } from "./scripts";
