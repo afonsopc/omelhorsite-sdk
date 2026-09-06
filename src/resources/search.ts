@@ -136,6 +136,11 @@ export interface SearchPage {
   readonly title: string;
   /** Plain text, whitespace collapsed, cut at `maxChars`. Never empty: a page with nothing readable is a `422`. */
   readonly text: string;
+  /**
+   * When the page says it was published (`article:published_time`, JSON-LD
+   * `datePublished`, a `<time datetime>`), as ISO 8601; `null` when it does not.
+   */
+  readonly published_at: string | null;
 }
 
 /** The `search` namespace, reachable as `oms.search`. */
