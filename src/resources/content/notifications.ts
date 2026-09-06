@@ -78,6 +78,7 @@ export const NOTIFICATION_KINDS = [
   "news_source_failing",
   "cron_run_failed",
   "cron_run_done",
+  "bot_message_received",
   "oauth_application_approved",
   "oauth_application_rejected",
   "admin_oauth_application_submitted",
