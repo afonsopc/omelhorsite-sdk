@@ -18,7 +18,20 @@ export interface BlogAuthor {
 }
 
 /**
- * A blog: one per user, created lazily.
+ * Who can read a blog.
+ *
+ * - `"public"`: listed on the discovery feed and open to everyone;
+ * - `"unlisted"`: open to anyone who has the link, never listed;
+ * - `"private"`: the owner, administrators and the invited members only.
+ *   Anonymous readers get `401`, signed-in strangers `403` with
+ *   `error: "private"`.
+ */
+export const BLOG_VISIBILITIES = Object.freeze(["public", "unlisted", "private"] as const);
+export type BlogVisibility = (typeof BLOG_VISIBILITIES)[number];
+
+/**
+ * A blog. A person may own several; the oldest is their default one (the one
+ * `mine` answers and posts land in when no blog is named).
  *
  * Deliberately NOT a `BaseRecord`: the payload has `created_at` and NO
  * `updated_at`. Do not reach for one.
@@ -28,15 +41,23 @@ export interface Blog {
   /**
    * URL-safe handle of the blog, and the ONLY way to address it on the read
    * routes. Matches `/\A[a-z0-9][a-z0-9_-]*\z/`, 1-64 characters, unique
-   * across the whole table. Defaults to the owner's handle, lowercased.
+   * across the whole table. Defaults to the owner's handle, lowercased, with
+   * a numeric suffix for each further blog created without a slug.
    */
   readonly slug: string;
   /** Display name. Defaults to `"<name>'s blog"`. Up to 80 characters. */
   readonly name: string;
   /** Up to 240 characters, or `null`. */
   readonly description: string | null;
-  /** Who owns it. One blog per user, enforced by a unique index on `user_id`. */
+  /** Who owns it. */
   readonly user: BlogAuthor;
+  readonly visibility: BlogVisibility | string;
+  /** Invited members (private blogs). Counted live. */
+  readonly members_count: number;
+  /** Whether the CALLING user owns it. Per-viewer, like `is_following`. */
+  readonly is_owner: boolean;
+  /** Whether the CALLING user is an invited member. Per-viewer. */
+  readonly is_member: boolean;
   /**
    * Subscribers with a `confirmed_at`, counted live on every render.
    *
@@ -85,8 +106,10 @@ export interface BlogPostSummary {
   readonly reading_minutes: number;
   /** Lowercased, de-duplicated, at most 10. Never `null` in the payload. */
   readonly tags: string[];
-  /** The blog it belongs to, trimmed to three fields. */
-  readonly blog: { readonly id: BlogId; readonly slug: string; readonly name: string };
+  /** `"user"` when written in the editor, `"api"` when a program posted it with an access token. */
+  readonly source: "user" | "api" | string;
+  /** The blog it belongs to, trimmed to four fields. */
+  readonly blog: { readonly id: BlogId; readonly slug: string; readonly name: string; readonly visibility: BlogVisibility | string };
 }
 
 /** A post with its body: the `:extended` view, returned by every single-post route. */
@@ -135,6 +158,103 @@ export interface UpdateBlogInput {
   readonly name?: string;
   /** Up to 240 characters. */
   readonly description?: string | null;
+  readonly visibility?: BlogVisibility;
+}
+
+/** Arguments for {@link OwnBlogsNamespace.create}. Everything is optional: the defaults are the same as the first blog's. */
+export interface CreateBlogInput {
+  readonly slug?: string;
+  readonly name?: string;
+  readonly description?: string | null;
+  /** Defaults to `"public"`. */
+  readonly visibility?: BlogVisibility;
+}
+
+/** An invited member of one of the caller's blogs. Being a member also subscribes the person to the blog's news. */
+export interface BlogMember {
+  readonly id: number;
+  readonly blog_id: BlogId;
+  readonly user: BlogAuthor;
+  readonly created_at: Timestamp;
+}
+
+/** At most this many blogs per account; creating one more answers `400`. */
+export const BLOGS_PER_ACCOUNT = 20;
+
+/**
+ * The caller's own blogs, reachable as `oms.content.blogs.own`. Needs the
+ * `blogs:read` scope to read and `blogs:write` to change anything.
+ *
+ * A blog is addressed by its numeric id or its slug on every route here.
+ */
+export class OwnBlogsNamespace extends Resource {
+  /** `GET /my_blogs` - every blog the caller owns, oldest first. The first one is the default. */
+  async list(options: RequestOptions = {}): Promise<Blog[]> {
+    return this.http.get<Blog[]>("/my_blogs", options);
+  }
+
+  /**
+   * `GET /my_blogs/:id` - one of the caller's blogs with ALL of its posts,
+   * drafts included, newest first.
+   *
+   * @throws {OmsApiError} 404 `"Blog not found"` for a blog the caller does not own.
+   */
+  async get(idOrSlug: BlogId | string, options: RequestOptions = {}): Promise<BlogWithPosts> {
+    return this.http.get<BlogWithPosts>(`/my_blogs/${encodeURIComponent(String(idOrSlug))}`, options);
+  }
+
+  /**
+   * `POST /my_blogs` - a further blog. Without a slug the server takes the
+   * handle with a numeric suffix.
+   *
+   * @throws {OmsApiError} 400 with the validation sentence (taken or
+   *   malformed slug, unknown visibility) or `"blog limit reached (20)"`.
+   */
+  async create(input: CreateBlogInput = {}, options: RequestOptions = {}): Promise<Blog> {
+    return this.http.post<Blog>("/my_blogs", blogBody(input), options);
+  }
+
+  /** `PATCH /my_blogs/:id` - name, slug, description or visibility. Re-slugging breaks published links. */
+  async update(idOrSlug: BlogId | string, input: UpdateBlogInput, options: RequestOptions = {}): Promise<Blog> {
+    return this.http.patch<Blog>(`/my_blogs/${encodeURIComponent(String(idOrSlug))}`, blogBody(input), options);
+  }
+
+  /** `DELETE /my_blogs/:id` - the blog and every post, subscriber and member in it. */
+  async delete(idOrSlug: BlogId | string, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/my_blogs/${encodeURIComponent(String(idOrSlug))}`, options);
+  }
+
+  /** `GET /my_blogs/:id/members` - the invited members, oldest first. */
+  async members(idOrSlug: BlogId | string, options: RequestOptions = {}): Promise<BlogMember[]> {
+    return this.http.get<BlogMember[]>(`/my_blogs/${encodeURIComponent(String(idOrSlug))}/members`, options);
+  }
+
+  /**
+   * `POST /my_blogs/:id/members` - invites a person of the site by handle (a
+   * leading `@` is fine). Idempotent: inviting twice answers the same member.
+   *
+   * @throws {OmsApiError} 404 `"User not found"`; 400 when the handle is the owner's own.
+   */
+  async addMember(idOrSlug: BlogId | string, handle: string, options: RequestOptions = {}): Promise<BlogMember> {
+    return this.http.post<BlogMember>(`/my_blogs/${encodeURIComponent(String(idOrSlug))}/members`, { handle }, options);
+  }
+
+  /** `DELETE /my_blogs/:id/members/:member` - by member id or by the member's user id. Their subscription goes too. */
+  async removeMember(idOrSlug: BlogId | string, memberOrUserId: number | Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(
+      `/my_blogs/${encodeURIComponent(String(idOrSlug))}/members/${encodeURIComponent(String(memberOrUserId))}`,
+      options,
+    );
+  }
+}
+
+function blogBody(input: CreateBlogInput | UpdateBlogInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input.slug !== undefined) body["slug"] = input.slug;
+  if (input.name !== undefined) body["name"] = input.name;
+  if (input.description !== undefined) body["description"] = input.description;
+  if (input.visibility !== undefined) body["visibility"] = input.visibility;
+  return body;
 }
 
 /** Result of a subscribe call. */
@@ -173,10 +293,13 @@ export interface BlogSubscribeResult {
 export class BlogsNamespace extends Resource {
   /** Posts, blog metadata and publishing. Also mounted as `oms.blogPosts`. */
   readonly posts: BlogPostsNamespace;
+  /** The caller's own blogs: create more, change visibility, invite members. */
+  readonly own: OwnBlogsNamespace;
 
   constructor(http: ApiClient) {
     super(http);
     this.posts = new BlogPostsNamespace(http);
+    this.own = new OwnBlogsNamespace(http);
   }
 
   /**
@@ -326,6 +449,11 @@ export class BlogsNamespace extends Resource {
 
 /** Arguments for {@link BlogPostsNamespace.create}. */
 export interface CreateBlogPostInput {
+  /** Which of the caller's blogs gets the post. Omit both for the default (oldest) blog. */
+  readonly blogId?: BlogId;
+  readonly blogSlug?: string;
+  /** Publish at once instead of saving a draft. */
+  readonly publish?: boolean;
   /** Required, up to 200 characters. */
   readonly title: string;
   /**
@@ -424,24 +552,16 @@ export class BlogPostsNamespace extends Resource {
 
   /**
    * `GET /blogs/:blogSlug/posts/:slug` - one post by the pair of slugs, which
-   * is the shape a public permalink has.
+   * is the shape a public permalink has. Open to anonymous readers for a
+   * published post of a public or unlisted blog.
    *
-   * **This route needs a session, and the id route does not.** That is almost
-   * certainly a mistake in the backend and it is worth knowing before you
-   * build a public permalink on it: an anonymous reader following a shared
-   * link gets `401 "Session required to access this resource."` here, while
-   * {@link get} hands them the very same published post. Until that is fixed,
-   * render public permalinks through {@link get} with the numeric id, or
-   * expect signed-in readers only.
-   *
-   * Both slugs are lowercased server-side before the lookup. The route is
-   * declared with `constraints: { blog_slug: /[^\/]+/, slug: /[^\/]+/ }`, so a
-   * slug containing a slash cannot reach it at all - not a concern for
+   * Both slugs are lowercased server-side before the lookup. A slug
+   * containing a slash cannot reach the route at all - not a concern for
    * server-minted slugs, which are `[a-z0-9_-]` only.
    *
-   * @throws {OmsApiError} 401 without a session, before anything else is
-   *   checked; 404 `"Blog not found"` or `"Post not found"`; 401
-   *   `"Draft only visible to author"`.
+   * @throws {OmsApiError} 404 `"Blog not found"` or `"Post not found"`; 401
+   *   `"Draft only visible to author"`; for a private blog, 401 without a
+   *   session and 403 `error: "private"` with one.
    */
   async getBySlugs(blogSlug: string, slug: string, options: RequestOptions = {}): Promise<BlogPost> {
     return this.http.get<BlogPost>(
@@ -451,27 +571,32 @@ export class BlogPostsNamespace extends Resource {
   }
 
   /**
-   * `POST /blog_posts` - writes a new post to the caller's own blog. `201`.
+   * `POST /blog_posts` - writes a new post. `201`.
    *
-   * There is no blog argument because there is no choice: the controller calls
-   * `Blog.find_or_create_for(Current.user)`, so this CREATES the caller's blog
-   * as a side effect on their very first post, exactly like
-   * {@link BlogsNamespace.mine}.
+   * `blogId` or `blogSlug` picks one of the caller's own blogs; with neither
+   * the post lands in the default (oldest) blog, which is created on the spot
+   * if the caller has none yet, exactly like {@link BlogsNamespace.mine}.
    *
-   * The post starts as a DRAFT - `published_at` is not settable here and no
-   * amount of arguments will publish it. Publishing is a second call, and it
-   * is {@link setPublished}, not {@link update}.
+   * The post starts as a DRAFT unless `publish: true` is sent, which stamps
+   * `published_at` at once. Later changes to the flag go through
+   * {@link setPublished}, not {@link update}. A post written with an access
+   * token carries `source: "api"`.
    *
    * Rides the general ceiling: there is no per-user cap on how many posts may
    * be created, and no length cap beyond the model's 200 000 characters of
-   * markdown.
+   * markdown. Needs the `blogs:write` scope on an OAuth token.
    *
    * @throws {OmsApiError} 401 `"Session required to access this resource."`;
-   *   400 with the validation sentence, most often the slug already existing
-   *   in this blog.
+   *   404 `"Blog not found"` for a blog the caller does not own; 400 with the
+   *   validation sentence, most often the slug already existing in this blog.
    */
   async create(input: CreateBlogPostInput, options: RequestOptions = {}): Promise<BlogPost> {
-    return this.http.post<BlogPost>("/blog_posts", input, options);
+    const { blogId, blogSlug, publish, ...fields } = input;
+    const body: Record<string, unknown> = { ...fields };
+    if (blogId !== undefined) body["blog_id"] = blogId;
+    if (blogSlug !== undefined) body["blog_slug"] = blogSlug;
+    if (publish !== undefined) body["publish"] = publish;
+    return this.http.post<BlogPost>("/blog_posts", body, options);
   }
 
   /**

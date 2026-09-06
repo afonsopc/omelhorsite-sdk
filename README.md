@@ -131,7 +131,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 - `oms.llm` - models, one-shot completions and assistant chats.
 - `oms.search` - web, image, news and video search, and reading a page's text.
 - `oms.social` - direct messages, friends, group chats.
-- `oms.content` - blogs, notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
+- `oms.content` - blogs (several per account, public, unlisted or private with invited members; `oms.content.blogs.own` manages them), notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
 - `oms.tools` - media tools, each with its own daily quota.
 - `oms.jobs`, `oms.quotas` - background jobs and account limits.
 - `oms.tickets` - support tickets.

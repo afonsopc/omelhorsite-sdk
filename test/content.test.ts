@@ -117,8 +117,9 @@ function postSummary(overrides: Partial<BlogPostSummary> = {}): BlogPostSummary 
     excerpt: "Um resumo.",
     published_at: "2026-08-01T10:00:00Z",
     reading_minutes: 3,
+    source: "user",
     tags: ["oms"],
-    blog: { id: 4, slug: "afonso", name: "Blog do Afonso" },
+    blog: { id: 4, slug: "afonso", name: "Blog do Afonso", visibility: "public" },
     ...overrides,
   };
 }
@@ -130,10 +131,14 @@ function blog(overrides: Partial<Blog> = {}): Blog {
     name: "Blog do Afonso",
     description: null,
     user: { id: "usr_1", handle: "afonso_coutinho", name: "Afonso" },
+    visibility: "public",
     followers_count: 2,
     published_posts_count: 1,
+    members_count: 0,
     created_at: "2026-01-01T00:00:00Z",
     is_following: false,
+    is_owner: false,
+    is_member: false,
     ...overrides,
   };
 }
@@ -551,3 +556,38 @@ describe("space invaders", () => {
   });
 });
 
+
+describe("blogs.own", () => {
+  test("lists, creates, updates and deletes the caller's blogs on /my_blogs", async () => {
+    const { content, calls } = harness({ body: blog({ visibility: "private", is_owner: true }) });
+    await content.blogs.own.list();
+    await content.blogs.own.create({ name: "Relatórios", slug: "relatorios", visibility: "private" });
+    await content.blogs.own.update("relatorios", { visibility: "unlisted" });
+    await content.blogs.own.get(7);
+    expect(calls.map((call) => [call.method, call.path])).toEqual([
+      ["GET", "/my_blogs"],
+      ["POST", "/my_blogs"],
+      ["PATCH", "/my_blogs/relatorios"],
+      ["GET", "/my_blogs/7"],
+    ]);
+    expect(calls[1]?.body).toEqual({ name: "Relatórios", slug: "relatorios", visibility: "private" });
+    expect(calls[2]?.body).toEqual({ visibility: "unlisted" });
+  });
+
+  test("members are invited by handle and removed by id", async () => {
+    const member = { id: 3, blog_id: 7, user: { id: "usr_2", handle: "ana", name: "Ana" }, created_at: "2026-09-06T00:00:00Z" };
+    const { content, calls } = harness({ body: member });
+    await content.blogs.own.members(7);
+    const added = await content.blogs.own.addMember(7, "@ana");
+    expect(added.user.handle).toBe("ana");
+    expect(calls[1]).toMatchObject({ method: "POST", path: "/my_blogs/7/members", body: { handle: "@ana" } });
+  });
+
+  test("a post can name its blog and publish at once", async () => {
+    const { content, calls } = harness({ body: { ...postSummary({ source: "api" }), content_md: "# x", created_at: "", updated_at: "", is_owner: true } });
+    await content.blogs.posts.create({ blogSlug: "relatorios", title: "Relatório", content_md: "# x", publish: true, tags: ["intel"] });
+    expect(calls[0]?.body).toEqual({ blog_slug: "relatorios", title: "Relatório", content_md: "# x", publish: true, tags: ["intel"] });
+    await content.blogs.posts.create({ blogId: 7, title: "Rascunho" });
+    expect(calls[1]?.body).toEqual({ blog_id: 7, title: "Rascunho" });
+  });
+});
