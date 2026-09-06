@@ -27,6 +27,8 @@ import {
 import { USER_FILTER_COLUMNS } from "../src/resources/auth/sessions";
 import {
   FEEDBACK_FILTER_COLUMNS,
+  CRON_JOB_FILTER_COLUMNS,
+  CRON_RUN_FILTER_COLUMNS,
   INTEL_ARTICLE_FILTER_COLUMNS,
   NEWS_FEED_FILTER_COLUMNS,
   NEWS_ITEM_FILTER_COLUMNS,
@@ -85,6 +87,8 @@ const RESOURCES: Record<string, { columns: readonly string[]; extra?: readonly s
   fs_grants: { columns: NONE },
   fs_nodes: { columns: FS_NODE_FILTER_COLUMNS, extra: FS_NODE_EXTRA_OPTION_KEYS },
   identities: { columns: LINKED_IDENTITY_FILTER_COLUMNS },
+  cron_jobs: { columns: CRON_JOB_FILTER_COLUMNS },
+  cron_runs: { columns: CRON_RUN_FILTER_COLUMNS },
   intel_articles: { columns: INTEL_ARTICLE_FILTER_COLUMNS },
   intel_reports: { columns: INTEL_REPORT_FILTER_COLUMNS },
   news_feeds: { columns: NEWS_FEED_FILTER_COLUMNS },

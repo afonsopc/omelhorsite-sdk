@@ -129,6 +129,7 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 - `oms.movies` - addons, collections, watch progress.
 - `oms.library` - books, shelves, annotations.
 - `oms.llm` - models, one-shot completions and assistant chats.
+- `oms.cron` - your TypeScript scripts run on a schedule by the server, with this SDK in scope; runs, logs and templates.
 - `oms.search` - web, image, news and video search, and reading a page's text.
 - `oms.social` - direct messages, friends, group chats.
 - `oms.content.news` - news feeds: sources driven by scripts (RSS, Telegram, YouTube, a page with a selector), the items they produce, full-text search over them.

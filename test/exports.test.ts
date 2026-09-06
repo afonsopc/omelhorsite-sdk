@@ -229,6 +229,7 @@ describe("namespace registry", () => {
       "auth",
       "chests",
       "content",
+      "cron",
       "dynamicQrs",
       "forms",
       "ipLookup",

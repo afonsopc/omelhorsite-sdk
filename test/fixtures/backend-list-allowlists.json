@@ -220,6 +220,30 @@
     "extra_options": [],
     "custom": []
   },
+  "cron_jobs": {
+    "search": [
+      "name",
+      "enabled",
+      "health",
+      "template_slug"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "cron_runs": {
+    "search": [
+      "cron_job_id",
+      "status",
+      "trigger"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "cron_templates": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "dynamic_qrs": {
     "search": [],
     "extra_options": [],
