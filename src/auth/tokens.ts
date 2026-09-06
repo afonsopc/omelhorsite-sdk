@@ -114,6 +114,8 @@ export const OMS_SCOPES = [
   "news:write",
   "cron:read",
   "cron:write",
+  "bots:read",
+  "bots:write",
 ] as const;
 
 /** One of {@link OMS_SCOPES}. */

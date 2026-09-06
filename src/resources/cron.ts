@@ -21,7 +21,7 @@ import type { Id, Json, Paginated, RequestOptions, Timestamp } from "../types";
 
 /** Scopes a job may ask for its token. Anything else answers `400`. */
 export const CRON_JOB_SCOPES = Object.freeze([
-  "profile", "news:read", "news:write", "storage:read", "storage:write", "llm", "tools:read", "tools:write", "blogs:read", "blogs:write",
+  "profile", "news:read", "news:write", "storage:read", "storage:write", "llm", "tools:read", "tools:write", "blogs:read", "blogs:write", "bots:read", "bots:write",
 ] as const);
 export type CronJobScope = (typeof CRON_JOB_SCOPES)[number];
 

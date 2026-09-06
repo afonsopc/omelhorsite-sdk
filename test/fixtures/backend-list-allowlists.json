@@ -195,6 +195,36 @@
     ],
     "custom": []
   },
+  "bot_channels": {
+    "search": [
+      "name",
+      "kind",
+      "enabled"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "bot_contacts": {
+    "search": [
+      "bot_channel_id",
+      "external_id",
+      "username",
+      "kind",
+      "blocked"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "bot_messages": {
+    "search": [
+      "bot_channel_id",
+      "bot_contact_id",
+      "direction",
+      "source"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
   "caption_jobs": {
     "search": [],
     "extra_options": [],
@@ -755,6 +785,11 @@
     "custom": []
   },
   "webauthn_credentials": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "webhooks/telegram": {
     "search": [],
     "extra_options": [],
     "custom": []
