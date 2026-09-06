@@ -227,6 +227,7 @@ describe("namespace registry", () => {
       "account",
       "admin",
       "auth",
+      "bots",
       "chests",
       "content",
       "cron",
