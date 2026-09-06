@@ -5,6 +5,7 @@ import { AnalysisNamespace } from "./analysis";
 import { BlogsNamespace } from "./blogs";
 import { FeedbacksNamespace } from "./feedbacks";
 import { IntelNamespace } from "./intel/index";
+import { NewsNamespace } from "./news/index";
 import { JokesNamespace } from "./jokes";
 import { NotificationsNamespace } from "./notifications";
 import { ServiceUsagesNamespace } from "./serviceUsages";
@@ -16,6 +17,7 @@ export * from "./analysis";
 export * from "./blogs";
 export * from "./feedbacks";
 export * from "./intel/index";
+export * from "./news/index";
 export * from "./jokes";
 export * from "./notifications";
 export * from "./serviceUsages";
@@ -49,7 +51,9 @@ export class ContentNamespace extends Resource {
   readonly analysis: AnalysisNamespace;
   /** The Space Invaders leaderboard. */
   readonly spaceInvaders: SpaceInvadersNamespace;
-  /** Intel: articles, reports, sources, scripts, items, config and stats. See {@link IntelNamespace}. */
+  /** News: feeds, sources, scripts and the items they produce. See {@link NewsNamespace}. */
+  readonly news: NewsNamespace;
+  /** Intel: the stories, reports, config and stats built on top of news. See {@link IntelNamespace}. */
   readonly intel: IntelNamespace;
 
   constructor(http: ApiClient) {
@@ -64,5 +68,6 @@ export class ContentNamespace extends Resource {
     this.analysis = new AnalysisNamespace(http);
     this.spaceInvaders = new SpaceInvadersNamespace(http);
     this.intel = new IntelNamespace(http);
+    this.news = new NewsNamespace(http);
   }
 }

@@ -28,16 +28,11 @@ import {
   INTEL_ARTICLE_CATEGORIES,
   INTEL_PROMPT_KEYS,
   INTEL_REPORT_KINDS,
-  INTEL_SOURCE_DISABLE_AFTER_FAILURES,
-  INTEL_SOURCE_HEALTHS,
   IntelNamespace,
   intelArticleImageUrl,
   type IntelArticle,
   type IntelConfig,
-  type IntelItem,
   type IntelReport,
-  type IntelScript,
-  type IntelSource,
   type IntelStats,
 } from "../src/resources/content";
 
@@ -111,26 +106,6 @@ function article(overrides: Partial<IntelArticle> = {}): IntelArticle {
     first_seen_at: "2026-08-29T08:00:00Z",
     last_seen_at: "2026-08-29T09:30:00Z",
     n_sources: 3,
-    ...overrides,
-  };
-}
-
-function source(overrides: Partial<IntelSource> = {}): IntelSource {
-  return {
-    id: "src_1",
-    created_at: "2026-08-01T00:00:00Z",
-    updated_at: "2026-08-29T00:00:00Z",
-    name: "Publico RSS",
-    config: { url: "https://publico.pt/rss" },
-    intel_script_id: "scr_rss",
-    poll_interval_minutes: 15,
-    enabled: true,
-    cursor: "2026-08-29T00:00:00Z",
-    health: "ok",
-    last_error: null,
-    last_run_at: "2026-08-29T00:00:00Z",
-    last_success_at: "2026-08-29T00:00:00Z",
-    consecutive_failures: 0,
     ...overrides,
   };
 }
@@ -282,243 +257,6 @@ describe("intel.reports", () => {
 // Sources
 // ---------------------------------------------------------------------------
 
-describe("intel.sources.list", () => {
-  test("sends a deterministic order because the controller sets none", async () => {
-    const { intel, calls } = harness([[source()]]);
-
-    await intel.sources.list();
-
-    expect(calls[0]?.path).toBe("/intel_sources");
-    // Without this, page 2 can repeat or skip rows from page 1.
-    expect(calls[0]?.search.get("modifiers[order]")).toBe("created_at:desc");
-  });
-
-  test("health, enabled and scriptId become exact_search keys", async () => {
-    const { intel, calls } = harness([[]]);
-
-    await intel.sources.list({ health: "error", enabled: false, scriptId: "scr_rss" });
-
-    const search = calls[0]?.search;
-    expect(search?.get("exact_search[health]")).toBe("error");
-    expect(search?.get("exact_search[enabled]")).toBe("false");
-    expect(search?.get("exact_search[intel_script_id]")).toBe("scr_rss");
-  });
-
-  test("a caller-supplied order wins over the SDK default", async () => {
-    const { intel, calls } = harness([[]]);
-    await intel.sources.list({ order: "name:asc" });
-    expect(calls[0]?.search.get("modifiers[order]")).toBe("name:asc");
-  });
-});
-
-describe("intel.sources writes", () => {
-  test("create() renames every camelCase key onto the wire", async () => {
-    const { intel, calls } = harness([source()]);
-
-    await intel.sources.create({
-      name: "Publico RSS",
-      intelScriptId: "scr_rss",
-      config: { url: "https://publico.pt/rss" },
-      pollIntervalMinutes: 30,
-      enabled: false,
-    });
-
-    expect(calls[0]?.method).toBe("POST");
-    expect(calls[0]?.body).toEqual({
-      name: "Publico RSS",
-      intel_script_id: "scr_rss",
-      config: { url: "https://publico.pt/rss" },
-      poll_interval_minutes: 30,
-      enabled: false,
-    });
-  });
-
-  test("create() omits absent optionals so server defaults apply", async () => {
-    const { intel, calls } = harness([source()]);
-
-    await intel.sources.create({ name: "Feed", intelScriptId: "scr_rss" });
-
-    // `enabled: undefined` on the wire would be dropped by JSON anyway, but a
-    // literal `null` would NOT: Rails would try to write NULL into a NOT NULL
-    // column and answer 400.
-    expect(calls[0]?.body).toEqual({ name: "Feed", intel_script_id: "scr_rss" });
-  });
-
-  test("update() sends cursor: null as a JSON null, not the \\b sentinel", async () => {
-    const { intel, calls } = harness([source({ cursor: null })]);
-
-    await intel.sources.update("src_1", { cursor: null });
-
-    expect(calls[0]?.method).toBe("PATCH");
-    expect(calls[0]?.path).toBe("/intel_sources/src_1");
-    expect(calls[0]?.body).toEqual({ cursor: null });
-    // The sentinel is a QUERY-STRING convention. In a body it would be stored
-    // verbatim as a one-character cursor and the next poll would resume from
-    // a backspace.
-    expect(calls[0]?.raw).not.toContain("\b");
-  });
-
-  test("update() sends only the keys given", async () => {
-    const { intel, calls } = harness([source({ enabled: true })]);
-
-    await intel.sources.update("src_1", { enabled: true });
-
-    expect(calls[0]?.body).toEqual({ enabled: true });
-  });
-
-  test("run() posts, does not retry, and answers the queued stub", async () => {
-    const { intel, calls } = harness([{ queued: true }], 202);
-
-    const answer = await intel.sources.run("src_1");
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.method).toBe("POST");
-    expect(calls[0]?.path).toBe("/intel_sources/src_1/run");
-    expect(answer.queued).toBe(true);
-  });
-
-  test("run() does not replay a 500: a second fetch job is not free", async () => {
-    // The client here WOULD retry three times. `run()` passes `retry: false`,
-    // and that is the only thing standing between one user gesture and three
-    // FetchSourceJobs on an unthrottled queue.
-    const { intel, calls } = harness(['"boom"'], 500, true);
-
-    await expect(intel.sources.run("src_1")).rejects.toBeInstanceOf(OmsApiError);
-    expect(calls).toHaveLength(1);
-  });
-
-  test("create() does not replay a 500 either", async () => {
-    const { intel, calls } = harness(['"boom"'], 500, true);
-
-    await expect(
-      intel.sources.create({ name: "Feed", intelScriptId: "scr_rss" }),
-    ).rejects.toBeInstanceOf(OmsApiError);
-    expect(calls).toHaveLength(1);
-  });
-
-  test("a caller who explicitly opts in CAN retry run()", async () => {
-    const { intel, calls } = harness(['"boom"'], 500, true);
-
-    await expect(
-      intel.sources.run("src_1", { retry: { maxAttempts: 2, baseDelayMs: 1, jitter: false } }),
-    ).rejects.toBeInstanceOf(OmsApiError);
-    // The default is a default, not a lock: `options` is spread after it.
-    expect(calls).toHaveLength(2);
-  });
-
-  test("delete() targets the source, not its items", async () => {
-    const { intel, calls } = harness([undefined], 204);
-    await intel.sources.delete("src_1");
-    expect(calls[0]?.method).toBe("DELETE");
-    expect(calls[0]?.path).toBe("/intel_sources/src_1");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Scripts
-// ---------------------------------------------------------------------------
-
-describe("intel.scripts", () => {
-  test("list() carries no code, get() does", async () => {
-    const row: IntelScript = {
-      id: "scr_rss",
-      created_at: "2026-08-01T00:00:00Z",
-      updated_at: "2026-08-01T00:00:00Z",
-      name: "RSS",
-      slug: "rss",
-      description: "Generic RSS reader",
-      builtin: true,
-      user_id: null,
-    };
-    const { intel, calls } = harness([[row], { ...row, code: "export default () => []" }]);
-
-    const page = await intel.scripts.list();
-    // `code` lives on the :extended view only, so an index row genuinely has
-    // none - the optional key on IntelScript is the API's, not caution.
-    expect(page.items[0]?.code).toBeUndefined();
-
-    const one = await intel.scripts.get("scr_rss");
-    expect(one.code).toBe("export default () => []");
-    expect(calls[1]?.path).toBe("/intel_scripts/scr_rss");
-  });
-
-  test("builtin narrows through exact_search", async () => {
-    const { intel, calls } = harness([[]]);
-    await intel.scripts.list({ builtin: false });
-    expect(calls[0]?.search.get("exact_search[builtin]")).toBe("false");
-  });
-
-  test("create() is not replayed after a 500", async () => {
-    const { intel, calls } = harness(['"boom"'], 500, true);
-
-    await expect(intel.scripts.create({ name: "Mine", code: "x" })).rejects.toBeInstanceOf(OmsApiError);
-    expect(calls).toHaveLength(1);
-  });
-
-  test("create() sends name/code/description and nothing else", async () => {
-    const { intel, calls } = harness([{}]);
-
-    await intel.scripts.create({ name: "Mine", code: "x" });
-
-    expect(calls[0]?.body).toEqual({ name: "Mine", code: "x" });
-    // `builtin` is not on create_params; a client cannot mint a platform script.
-    expect(calls[0]?.raw).not.toContain("builtin");
-  });
-
-  test("editing a built-in surfaces the API's 401-for-authorisation quirk", async () => {
-    const { intel } = harness(['"You are not authorized to update this resource"'], 401);
-
-    const thrown = await intel.scripts.update("scr_rss", { code: "x" }).catch((e: unknown) => e);
-
-    // A 401 here does NOT mean the session is dead. A generic handler that
-    // logs the user out on any 401 would sign them out for clicking edit on a
-    // read-only platform script.
-    expect(thrown).toBeInstanceOf(OmsAuthError);
-    expect((thrown as OmsAuthError).status).toBe(401);
-    expect((thrown as OmsAuthError).message).toBe("You are not authorized to update this resource");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Items
-// ---------------------------------------------------------------------------
-
-describe("intel.items", () => {
-  test("defaults to a small page because every row carries a full body", async () => {
-    const item: IntelItem = {
-      id: "itm_1",
-      created_at: "2026-08-29T00:00:00Z",
-      updated_at: "2026-08-29T00:00:00Z",
-      intel_source_id: "src_1",
-      external_id: "guid-1",
-      title: "A headline",
-      content: "The whole article text.",
-      url: "https://news.example/1",
-      author: null,
-      published_at: "2026-08-28T23:00:00Z",
-      fetched_at: "2026-08-29T00:00:00Z",
-      media_url: null,
-      media_status: null,
-      media_error: null,
-      parent_id: null,
-      media_offset_s: null,
-    };
-    const { intel, calls } = harness([[item]]);
-
-    const page = await intel.items.list();
-
-    expect(calls[0]?.path).toBe("/intel_items");
-    expect(calls[0]?.search.get("modifiers[page]")).toBe("1:25");
-    expect(page.items[0]?.content).toBe("The whole article text.");
-  });
-
-  test("sourceId narrows to one feed", async () => {
-    const { intel, calls } = harness([[]]);
-    await intel.items.list({ sourceId: "src_1" });
-    expect(calls[0]?.search.get("exact_search[intel_source_id]")).toBe("src_1");
-  });
-});
-
 // ---------------------------------------------------------------------------
 // Config and stats
 // ---------------------------------------------------------------------------
@@ -666,8 +404,6 @@ describe("the vocabulary constants match the Ruby ones", () => {
       "outro",
     ]);
     expect([...INTEL_REPORT_KINDS]).toEqual(["6h", "day", "week", "month"]);
-    expect([...INTEL_SOURCE_HEALTHS]).toEqual(["unknown", "ok", "error"]);
     expect([...INTEL_PROMPT_KEYS]).toEqual(["build", "media", "enrich_plan", "enrich_actors", "enrich_synth", "report"]);
-    expect(INTEL_SOURCE_DISABLE_AFTER_FAILURES).toBe(20);
   });
 });
