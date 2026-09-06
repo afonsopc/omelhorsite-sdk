@@ -87,3 +87,40 @@ describe("bots.messages", () => {
     expect(BOT_MESSAGE_MAX_TEXT).toBe(4096);
   });
 });
+
+describe("bots responder plugin", () => {
+  test("create carries the plugin; the responder lives under the channel and run is a POST", async () => {
+    const { bots, calls } = harness({ id: "c1", plugin: "responder" }, 201);
+    await bots.channels.create({ name: "Loja", token: "123:abc", plugin: "responder" });
+    await bots.responders.get("c1");
+    await bots.responders.update("c1", { enabled: true, slots_per_day: 4, model: null });
+    await bots.responders.run("c1");
+    expect(calls[0]?.body).toMatchObject({ plugin: "responder" });
+    expect(calls[1]).toMatchObject({ method: "GET", path: "/bot_channels/c1/responder" });
+    expect(calls[2]).toMatchObject({ method: "PATCH", path: "/bot_channels/c1/responder", body: { enabled: true, slots_per_day: 4, model: null } });
+    expect(calls[3]).toMatchObject({ method: "POST", path: "/bot_channels/c1/responder/run" });
+  });
+
+  test("facts and sources are created with the channel id in snake_case and listed through exact_search", async () => {
+    const { bots, calls } = harness([]);
+    await bots.facts.create({ channelId: "c1", text: "O livro custa 20 euros.", valid_until: "2026-12-31" });
+    await bots.facts.list({ channelId: "c1" });
+    await bots.sources.create({ channelId: "c1", name: "Eventos", url: "https://exemplo.pt/eventos" });
+    await bots.runs.list({ channelId: "c1" });
+    expect(calls[0]).toMatchObject({ method: "POST", path: "/bot_facts", body: { bot_channel_id: "c1", text: "O livro custa 20 euros.", valid_until: "2026-12-31" } });
+    expect(calls[1]?.search).toContain("exact_search[bot_channel_id]=c1");
+    expect(calls[2]).toMatchObject({ method: "POST", path: "/bot_sources", body: { bot_channel_id: "c1", name: "Eventos", url: "https://exemplo.pt/eventos" } });
+    expect(calls[3]?.path).toBe("/bot_responder_runs");
+    expect(calls[3]?.search).toContain("modifiers[order]=scheduled_at:desc");
+  });
+
+  test("teach posts the hint; botReply is a bare POST; the contact update carries needs_human", async () => {
+    const { bots, calls } = harness({ result: "replied", contact: { id: "k1" } });
+    await bots.contacts.teach("k1", "os portes custam 3 euros");
+    await bots.contacts.botReply("k1");
+    await bots.contacts.update("k1", { needs_human: false, note: null });
+    expect(calls[0]).toMatchObject({ method: "POST", path: "/bot_contacts/k1/teach", body: { hint: "os portes custam 3 euros" } });
+    expect(calls[1]).toMatchObject({ method: "POST", path: "/bot_contacts/k1/bot_reply" });
+    expect(calls[2]).toMatchObject({ method: "PATCH", path: "/bot_contacts/k1", body: { needs_human: false, note: null } });
+  });
+});

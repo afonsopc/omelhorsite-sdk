@@ -23,6 +23,10 @@ export type BotChannelKind = (typeof BOT_CHANNEL_KINDS)[number];
 export const BOT_CHANNEL_HEALTHS = Object.freeze(["unknown", "ok", "error"] as const);
 export type BotChannelHealth = (typeof BOT_CHANNEL_HEALTHS)[number];
 
+/** What the bot does: `inbox` keeps the conversations and lets the API send; `responder` answers on the owner's behalf. */
+export const BOT_PLUGINS = Object.freeze(["inbox", "responder"] as const);
+export type BotPlugin = (typeof BOT_PLUGINS)[number];
+
 /** Telegram's own cap on a message's text. Longer is a `400`. */
 export const BOT_MESSAGE_MAX_TEXT = 4096;
 
@@ -33,6 +37,7 @@ export interface BotChannel {
   readonly updated_at: Timestamp;
   readonly name: string;
   readonly kind: BotChannelKind;
+  readonly plugin: BotPlugin;
   /** The bot's own handle on the platform, filled from the token. */
   readonly username: string | null;
   /** The bot's own id on the platform. */
@@ -57,6 +62,8 @@ export interface CreateBotChannelInput {
   /** The token the platform's bot factory gave you (Telegram: @BotFather). */
   readonly token: string;
   readonly kind?: BotChannelKind;
+  /** Defaults to `inbox`. */
+  readonly plugin?: BotPlugin;
   readonly enabled?: boolean;
 }
 
@@ -100,6 +107,10 @@ export interface BotContact {
   readonly last_text: string | null;
   readonly messages_count: number;
   readonly unread_count: number;
+  /** The responder could not answer; `note` says what was missing. */
+  readonly needs_human: boolean;
+  readonly note: string | null;
+  readonly handled_until: Timestamp | null;
   /** The name, or `@username`, or the chat id. */
   readonly display_name: string;
 }
@@ -107,6 +118,8 @@ export interface BotContact {
 export interface UpdateBotContactInput {
   readonly name?: string | null;
   readonly tags?: readonly string[];
+  readonly needs_human?: boolean;
+  readonly note?: string | null;
 }
 
 export const BOT_CONTACT_FILTER_COLUMNS = Object.freeze(["bot_channel_id", "external_id", "username", "kind", "blocked"] as const);
@@ -116,8 +129,8 @@ export interface ListBotContactsParams extends ListParams<(typeof BOT_CONTACT_FI
 }
 
 export type BotMessageDirection = "in" | "out";
-/** `contact` came in; `human` was sent from the inbox; `api` by a token (a script, the CLI). */
-export type BotMessageSource = "contact" | "human" | "api";
+/** `contact` came in; `human` was sent from the inbox; `api` by a token (a script, the CLI); `bot` by the responder. */
+export type BotMessageSource = "contact" | "human" | "api" | "bot";
 
 export interface BotMessage {
   readonly id: Id;
@@ -156,11 +169,131 @@ export type SendBotMessageInput = (
   readonly format?: BotMessageFormat;
 };
 
+/** The responder of a channel whose plugin is `responder`. `id` is null until it is first saved. */
+export interface BotResponder {
+  readonly id: Id | null;
+  readonly created_at: Timestamp | null;
+  readonly updated_at: Timestamp | null;
+  readonly bot_channel_id: Id;
+  readonly enabled: boolean;
+  readonly system_prompt: string;
+  readonly knowledge: string;
+  readonly signature: string;
+  /** An LLM model id or model_id; null for the account's default. */
+  readonly model: string | null;
+  /** Runs per day, at hours drawn inside the window. */
+  readonly slots_per_day: number;
+  readonly window_start: string;
+  readonly window_end: string;
+  readonly timezone: string;
+  readonly history_limit: number;
+  readonly language: string;
+  readonly facts_count: number;
+  readonly sources_count: number;
+  readonly waiting_count: number;
+}
+
+export type UpdateBotResponderInput = Partial<
+  Pick<BotResponder, "enabled" | "system_prompt" | "knowledge" | "signature" | "model" | "slots_per_day" | "window_start" | "window_end" | "timezone" | "history_limit" | "language">
+>;
+
+export type BotFactSource = "manual" | "chat" | "learned";
+
+export interface BotFact {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  readonly bot_channel_id: Id;
+  readonly text: string;
+  readonly valid_from: string | null;
+  readonly valid_until: string | null;
+  readonly source: BotFactSource;
+  readonly bot_contact_id: Id | null;
+  readonly active: boolean;
+}
+
+export interface CreateBotFactInput {
+  readonly channelId: Id;
+  readonly text: string;
+  readonly valid_from?: string | null;
+  readonly valid_until?: string | null;
+}
+export type UpdateBotFactInput = Partial<Omit<CreateBotFactInput, "channelId">>;
+
+export const BOT_FACT_FILTER_COLUMNS = Object.freeze(["bot_channel_id", "source", "bot_contact_id"] as const);
+export interface ListBotFactsParams extends ListParams<(typeof BOT_FACT_FILTER_COLUMNS)[number]> {
+  readonly channelId?: Id;
+}
+
+export interface BotSource {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  readonly bot_channel_id: Id;
+  readonly name: string;
+  readonly url: string;
+  readonly description: string | null;
+}
+
+export interface CreateBotSourceInput {
+  readonly channelId: Id;
+  readonly name: string;
+  readonly url: string;
+  readonly description?: string | null;
+}
+export type UpdateBotSourceInput = Partial<Omit<CreateBotSourceInput, "channelId">>;
+
+export const BOT_SOURCE_FILTER_COLUMNS = Object.freeze(["bot_channel_id"] as const);
+export interface ListBotSourcesParams extends ListParams<(typeof BOT_SOURCE_FILTER_COLUMNS)[number]> {
+  readonly channelId?: Id;
+}
+
+export type BotResponderRunStatus = "pending" | "running" | "done" | "failed" | "skipped";
+
+export interface BotResponderRun {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  readonly bot_channel_id: Id;
+  readonly status: BotResponderRunStatus;
+  readonly trigger: "schedule" | "manual";
+  readonly scheduled_at: Timestamp;
+  readonly started_at: Timestamp | null;
+  readonly finished_at: Timestamp | null;
+  readonly replied: number;
+  readonly escalated: number;
+  readonly error: string | null;
+}
+
+export const BOT_RUN_FILTER_COLUMNS = Object.freeze(["bot_channel_id", "status", "trigger"] as const);
+export interface ListBotResponderRunsParams extends ListParams<(typeof BOT_RUN_FILTER_COLUMNS)[number]> {
+  readonly channelId?: Id;
+}
+
+export type BotReplyOutcome = "replied" | "escalated" | "skipped";
+export interface BotReplyResult {
+  readonly result: BotReplyOutcome;
+  readonly contact: BotContact;
+}
+export interface BotTeachResult {
+  readonly learned: BotFact[];
+  readonly contact: BotContact;
+}
+
+function responderBody(input: UpdateBotResponderInput): JsonObject {
+  const body: JsonObject = {};
+  for (const key of ["enabled", "system_prompt", "knowledge", "signature", "model", "slots_per_day", "window_start", "window_end", "timezone", "history_limit", "language"] as const) {
+    if (input[key] !== undefined) body[key] = input[key] as JsonObject[string];
+  }
+  return body;
+}
+
 function channelBody(input: Partial<CreateBotChannelInput>): JsonObject {
   const body: JsonObject = {};
   if (input.name !== undefined) body["name"] = input.name;
   if (input.token !== undefined) body["token"] = input.token;
   if (input.kind !== undefined) body["kind"] = input.kind;
+  if (input.plugin !== undefined) body["plugin"] = input.plugin;
   if (input.enabled !== undefined) body["enabled"] = input.enabled;
   return body;
 }
@@ -222,12 +355,31 @@ export class BotContactsNamespace extends Resource {
     const body: JsonObject = {};
     if (input.name !== undefined) body["name"] = input.name;
     if (input.tags !== undefined) body["tags"] = [...input.tags];
+    if (input.needs_human !== undefined) body["needs_human"] = input.needs_human;
+    if (input.note !== undefined) body["note"] = input.note;
     return this.http.patch<BotContact>(`/bot_contacts/${encodeURIComponent(id)}`, body, options);
   }
 
   /** `POST /bot_contacts/:id/read` - the unread counter to zero. */
   async markRead(id: Id, options: RequestOptions = {}): Promise<BotContact> {
     return this.http.post<BotContact>(`/bot_contacts/${encodeURIComponent(id)}/read`, {}, options);
+  }
+
+  /**
+   * `POST /bot_contacts/:id/bot_reply` - the responder handles this conversation now.
+   *
+   * @throws {OmsApiError} 400 when the channel's plugin is not the responder or it was never saved; 502 when the model or the platform failed.
+   */
+  async botReply(id: Id, options: RequestOptions = {}): Promise<BotReplyResult> {
+    return this.http.post<BotReplyResult>(`/bot_contacts/${encodeURIComponent(id)}/bot_reply`, {}, { retry: false, ...options });
+  }
+
+  /**
+   * `POST /bot_contacts/:id/teach` - give the responder what it was missing: the general
+   * part is kept as facts, the contact gets an answer, the others waiting are retried.
+   */
+  async teach(id: Id, hint: string, options: RequestOptions = {}): Promise<BotTeachResult> {
+    return this.http.post<BotTeachResult>(`/bot_contacts/${encodeURIComponent(id)}/teach`, { hint }, { retry: false, ...options });
   }
 
   /** `DELETE /bot_contacts/:id` - the contact and its messages. `204`. */
@@ -270,15 +422,119 @@ export class BotMessagesNamespace extends Resource {
   }
 }
 
+/** `/bot_channels/:id/responder` - the responder plugin of a channel. */
+export class BotRespondersNamespace extends Resource {
+  /** @throws {OmsApiError} 400 when the channel's plugin is not the responder. */
+  async get(channelId: Id, options: RequestOptions = {}): Promise<BotResponder> {
+    return this.http.get<BotResponder>(`/bot_channels/${encodeURIComponent(channelId)}/responder`, options);
+  }
+
+  /** `PATCH /bot_channels/:id/responder` - creates it on first save. */
+  async update(channelId: Id, input: UpdateBotResponderInput, options: RequestOptions = {}): Promise<BotResponder> {
+    return this.http.patch<BotResponder>(`/bot_channels/${encodeURIComponent(channelId)}/responder`, responderBody(input), { retry: false, ...options });
+  }
+
+  /**
+   * `POST /bot_channels/:id/responder/run` - answer the pending conversations now, outside the schedule.
+   *
+   * @throws {OmsApiError} 400 when a run is already open or the responder was never saved.
+   */
+  async run(channelId: Id, options: RequestOptions = {}): Promise<BotResponderRun> {
+    return this.http.post<BotResponderRun>(`/bot_channels/${encodeURIComponent(channelId)}/responder/run`, {}, { retry: false, ...options });
+  }
+}
+
+/** `/bot_facts` - what the responder knows, with optional validity dates. */
+export class BotFactsNamespace extends Resource {
+  async list(params: ListBotFactsParams = {}, options: RequestOptions = {}): Promise<Paginated<BotFact>> {
+    const base = { order: "created_at:desc", exactSearch: { bot_channel_id: params.channelId } };
+    return paginate(params, 100, (at) => this.http.get<BotFact[]>("/bot_facts", { ...options, query: listQuery(params, at, base) }));
+  }
+
+  async get(id: Id, options: RequestOptions = {}): Promise<BotFact> {
+    return this.http.get<BotFact>(`/bot_facts/${encodeURIComponent(id)}`, options);
+  }
+
+  /** @throws {OmsApiError} 400 when the channel's plugin is not the responder. */
+  async create(input: CreateBotFactInput, options: RequestOptions = {}): Promise<BotFact> {
+    const body: JsonObject = { bot_channel_id: input.channelId, text: input.text };
+    if (input.valid_from !== undefined) body["valid_from"] = input.valid_from;
+    if (input.valid_until !== undefined) body["valid_until"] = input.valid_until;
+    return this.http.post<BotFact>("/bot_facts", body, { retry: false, ...options });
+  }
+
+  async update(id: Id, input: UpdateBotFactInput, options: RequestOptions = {}): Promise<BotFact> {
+    const body: JsonObject = {};
+    if (input.text !== undefined) body["text"] = input.text;
+    if (input.valid_from !== undefined) body["valid_from"] = input.valid_from;
+    if (input.valid_until !== undefined) body["valid_until"] = input.valid_until;
+    return this.http.patch<BotFact>(`/bot_facts/${encodeURIComponent(id)}`, body, { retry: false, ...options });
+  }
+
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/bot_facts/${encodeURIComponent(id)}`, options);
+  }
+}
+
+/** `/bot_sources` - pages the responder may read when a question calls for it. */
+export class BotSourcesNamespace extends Resource {
+  async list(params: ListBotSourcesParams = {}, options: RequestOptions = {}): Promise<Paginated<BotSource>> {
+    const base = { order: "created_at:asc", exactSearch: { bot_channel_id: params.channelId } };
+    return paginate(params, 100, (at) => this.http.get<BotSource[]>("/bot_sources", { ...options, query: listQuery(params, at, base) }));
+  }
+
+  async get(id: Id, options: RequestOptions = {}): Promise<BotSource> {
+    return this.http.get<BotSource>(`/bot_sources/${encodeURIComponent(id)}`, options);
+  }
+
+  async create(input: CreateBotSourceInput, options: RequestOptions = {}): Promise<BotSource> {
+    const body: JsonObject = { bot_channel_id: input.channelId, name: input.name, url: input.url };
+    if (input.description !== undefined) body["description"] = input.description;
+    return this.http.post<BotSource>("/bot_sources", body, { retry: false, ...options });
+  }
+
+  async update(id: Id, input: UpdateBotSourceInput, options: RequestOptions = {}): Promise<BotSource> {
+    const body: JsonObject = {};
+    if (input.name !== undefined) body["name"] = input.name;
+    if (input.url !== undefined) body["url"] = input.url;
+    if (input.description !== undefined) body["description"] = input.description;
+    return this.http.patch<BotSource>(`/bot_sources/${encodeURIComponent(id)}`, body, { retry: false, ...options });
+  }
+
+  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
+    await this.http.delete<void>(`/bot_sources/${encodeURIComponent(id)}`, options);
+  }
+}
+
+/** `/bot_responder_runs` - the responder's passes over the conversations, newest first. */
+export class BotResponderRunsNamespace extends Resource {
+  async list(params: ListBotResponderRunsParams = {}, options: RequestOptions = {}): Promise<Paginated<BotResponderRun>> {
+    const base = { order: "scheduled_at:desc", exactSearch: { bot_channel_id: params.channelId } };
+    return paginate(params, 50, (at) => this.http.get<BotResponderRun[]>("/bot_responder_runs", { ...options, query: listQuery(params, at, base) }));
+  }
+
+  async get(id: Id, options: RequestOptions = {}): Promise<BotResponderRun> {
+    return this.http.get<BotResponderRun>(`/bot_responder_runs/${encodeURIComponent(id)}`, options);
+  }
+}
+
 export class BotsNamespace extends Resource {
   readonly channels: BotChannelsNamespace;
   readonly contacts: BotContactsNamespace;
   readonly messages: BotMessagesNamespace;
+  readonly responders: BotRespondersNamespace;
+  readonly facts: BotFactsNamespace;
+  readonly sources: BotSourcesNamespace;
+  readonly runs: BotResponderRunsNamespace;
 
   constructor(http: ApiClient) {
     super(http);
     this.channels = new BotChannelsNamespace(http);
     this.contacts = new BotContactsNamespace(http);
     this.messages = new BotMessagesNamespace(http);
+    this.responders = new BotRespondersNamespace(http);
+    this.facts = new BotFactsNamespace(http);
+    this.sources = new BotSourcesNamespace(http);
+    this.runs = new BotResponderRunsNamespace(http);
   }
 }
