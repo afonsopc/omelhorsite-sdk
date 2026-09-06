@@ -137,7 +137,7 @@ describe("search.query", () => {
 
 describe("search.readPage", () => {
   test("asks for the page and renames maxChars on the way to the wire", async () => {
-    const page = { url: "https://exemplo.pt/a", host: "exemplo.pt", title: "Título", text: "corpo" };
+    const page = { url: "https://exemplo.pt/a", host: "exemplo.pt", title: "Título", text: "corpo", published_at: null };
     const { search, calls } = harness(page);
 
     const read = await search.readPage({ url: "https://exemplo.pt/a", maxChars: 500 });
@@ -150,7 +150,7 @@ describe("search.readPage", () => {
   });
 
   test("leaves max_chars out when not given", async () => {
-    const { search, calls } = harness({ url: "https://exemplo.pt/a", host: "exemplo.pt", title: "", text: "corpo" });
+    const { search, calls } = harness({ url: "https://exemplo.pt/a", host: "exemplo.pt", title: "", text: "corpo", published_at: null });
     await search.readPage({ url: "https://exemplo.pt/a" });
     expect(calls[0]?.search.has("max_chars")).toBe(false);
   });
