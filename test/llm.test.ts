@@ -138,6 +138,17 @@ describe("admin.llmProviders", () => {
     ]);
   });
 
+  test("modelEndpoints is a GET on the member with the model id in the query", async () => {
+    const { admin, calls } = harness([{ tag: "openai/flex", name: "OpenAI", input_price_per_million: 0.1, status: 0 }]);
+    const listed = await admin.llmProviders.modelEndpoints("p1", { modelId: "openai/gpt-5.6-luna" });
+    await admin.llmProviders.modelEndpoints("p1", { modelId: "a/b", fresh: true });
+    expect(listed[0]?.tag).toBe("openai/flex");
+    expect(calls.map((call) => [call.method, call.path, call.search])).toEqual([
+      ["GET", "/admin/llm_providers/p1/model_endpoints", "?model_id=openai/gpt-5.6-luna"],
+      ["GET", "/admin/llm_providers/p1/model_endpoints", "?model_id=a/b&fresh=1"],
+    ]);
+  });
+
   test("delete answers nothing", async () => {
     const { admin, calls } = harness(null, 204);
     await admin.llmProviders.delete("p1");

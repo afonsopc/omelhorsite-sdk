@@ -117,6 +117,23 @@ export interface LlmProviderTestResult {
   readonly error?: string;
 }
 
+/**
+ * One upstream serving a model on OpenRouter: the same model at a different
+ * price and health per real provider. `status` is `0` when healthy and
+ * negative while OpenRouter steers traffic away from it.
+ */
+export interface LlmModelEndpoint {
+  /** The routing tag, e.g. `"openai/flex"`; what goes in `metadata.routing.order`. */
+  readonly tag: string;
+  readonly name: string;
+  readonly input_price_per_million: number | null;
+  readonly output_price_per_million: number | null;
+  readonly context_window: number | null;
+  readonly max_output_tokens: number | null;
+  readonly status: number;
+  readonly capabilities: LlmCapabilities;
+}
+
 export interface TestLlmProviderInput {
   /** A `model_id` of that provider; defaults to its first enabled model. */
   readonly modelId?: string;
@@ -168,6 +185,13 @@ export interface CreateLlmModelInput {
   readonly free?: boolean;
   readonly capabilities?: LlmCapabilities;
   readonly limits?: LlmLimits;
+  /**
+   * Free-form notes on the model. One key is read: `routing`, the OpenRouter
+   * `provider` object sent with every request to this model, for instance
+   * `{ order: ["openai/flex"], allow_fallbacks: false }` to pin the cheapest
+   * upstream. Pick a tag from {@link AdminLlmProvidersNamespace.modelEndpoints}.
+   */
+  readonly metadata?: JsonObject;
 }
 
 /** The provider and the `model_id` are fixed after creation. */
@@ -286,6 +310,7 @@ function modelBody(input: Partial<CreateLlmModelInput>): JsonObject {
   if (input.free !== undefined) body["free"] = input.free;
   if (input.capabilities !== undefined) body["capabilities"] = { ...input.capabilities } as JsonObject;
   if (input.limits !== undefined) body["limits"] = { ...input.limits } as JsonObject;
+  if (input.metadata !== undefined) body["metadata"] = { ...input.metadata };
   return body;
 }
 
@@ -337,6 +362,20 @@ export class AdminLlmProvidersNamespace extends Resource {
       `/admin/llm_providers/${encodeURIComponent(id)}/available_models`,
       { ...(input.fresh ? { query: { fresh: 1 } } : {}), ...options },
     );
+  }
+
+  /**
+   * `GET /admin/llm_providers/:id/model_endpoints` - the upstreams that serve
+   * a model on OpenRouter, cheapest first, with their prices. Empty on any
+   * other kind of provider. Cached for ten minutes; `fresh` skips the cache.
+   *
+   * @throws {OmsApiError} 400 without `modelId`; 502 when OpenRouter does not answer.
+   */
+  async modelEndpoints(id: Id, input: { modelId: string; fresh?: boolean }, options: RequestOptions = {}): Promise<LlmModelEndpoint[]> {
+    return this.http.get<LlmModelEndpoint[]>(`/admin/llm_providers/${encodeURIComponent(id)}/model_endpoints`, {
+      ...options,
+      query: { model_id: input.modelId, ...(input.fresh ? { fresh: 1 } : {}) },
+    });
   }
 
   /** One tiny completion, to check the key, the URL and a model. */
