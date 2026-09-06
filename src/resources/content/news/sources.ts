@@ -258,12 +258,9 @@ export class NewsSourcesNamespace extends Resource {
   /**
    * `DELETE /news_sources/:id`. `204`, empty body.
    *
-   * Destructive well beyond the row: `has_many :news_items, dependent:
-   * :destroy` takes every raw item this source ever produced, and the stories
-   * built from them lose their citations
-   * ({@link IntelArticleDetail.sources} shrinks, {@link IntelArticle.n_sources}
-   * with it) while the stories themselves stay. Disabling is almost always what
-   * you meant: `update(id, { enabled: false })`.
+   * Destructive well beyond the row: every raw item this source ever produced
+   * goes with it. Disabling is almost always what you meant:
+   * `update(id, { enabled: false })`.
    *
    * @throws {OmsApiError} 404 when the source is not yours.
    */

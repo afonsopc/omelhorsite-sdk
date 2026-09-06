@@ -308,34 +308,6 @@
     "extra_options": [],
     "custom": []
   },
-  "intel_articles": {
-    "search": [
-      "title",
-      "summary",
-      "category",
-      "importance",
-      "enriched"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "intel_configs": {
-    "search": [],
-    "extra_options": [],
-    "custom": []
-  },
-  "intel_reports": {
-    "search": [
-      "kind"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "intel_stats": {
-    "search": [],
-    "extra_options": [],
-    "custom": []
-  },
   "ip_lookup": {
     "search": [],
     "extra_options": [],

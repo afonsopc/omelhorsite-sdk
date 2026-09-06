@@ -17,8 +17,6 @@
  * - Space Invaders scores arrive as STRINGS. The test decodes a realistic
  *   payload and asserts the types, so nobody "fixes" the interface to
  *   `number` without a server change;
- * - the intel proxy builds paths without inventing a schema, and forwards the
- *   query string.
  */
 
 import { describe, expect, test } from "bun:test";

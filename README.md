@@ -133,7 +133,6 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 - `oms.search` - web, image, news and video search, and reading a page's text.
 - `oms.social` - direct messages, friends, group chats.
 - `oms.content.news` - news feeds: sources driven by scripts (RSS, Telegram, YouTube, a page with a selector), the items they produce, full-text search over them.
-- `oms.content.intel` - the analysis built on top of news: stories, reports, rubric.
 - `oms.content` - blogs (several per account, public, unlisted or private with invited members; `oms.content.blogs.own` manages them), notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
 - `oms.tools` - media tools, each with its own daily quota.
 - `oms.jobs`, `oms.quotas` - background jobs and account limits.

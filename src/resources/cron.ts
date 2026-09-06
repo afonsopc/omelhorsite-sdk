@@ -39,7 +39,7 @@ export const CRON_JOB_MAX_CONFIG_BYTES = 64 * 1024;
 export const CRON_JOB_MIN_INTERVAL_MINUTES = 5;
 /** `timeout_seconds` range; above 120 the account needs a trusted tier, like `network`. */
 export const CRON_JOB_MIN_TIMEOUT_SECONDS = 5;
-export const CRON_JOB_MAX_TIMEOUT_SECONDS = 600;
+export const CRON_JOB_MAX_TIMEOUT_SECONDS = 1200;
 export const CRON_JOB_BASE_MAX_TIMEOUT_SECONDS = 120;
 
 export interface CronJob {
