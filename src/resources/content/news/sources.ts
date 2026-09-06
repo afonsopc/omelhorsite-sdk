@@ -114,6 +114,31 @@ export interface CreateNewsSourceInput {
  *
  * One key wider than the create form: `cursor` is updatable and not creatable.
  */
+/** Arguments for {@link NewsSourcesNamespace.test}. */
+export interface TestNewsSourceInput {
+  readonly scriptId: Id;
+  readonly config?: Record<string, Json>;
+}
+
+export interface NewsSourceTestItem {
+  readonly external_id: string;
+  readonly title: string;
+  readonly url: string | null;
+  readonly published_at: Timestamp | null;
+  readonly content: string | null;
+}
+
+/** What a dry run produced. `ok: false` carries the script's error. */
+export interface NewsSourceTest {
+  readonly ok: boolean;
+  readonly error?: string;
+  readonly items: NewsSourceTestItem[];
+  readonly count: number;
+  /** Items published in the last 30 days. */
+  readonly dated: number;
+  readonly logs: string[];
+}
+
 export interface UpdateNewsSourceInput {
   readonly name?: string;
   /** Moves the source (and nothing else: its items stay where they were written) to another of your feeds. */
@@ -296,6 +321,22 @@ export class NewsSourcesNamespace extends Resource {
    * @throws {OmsApiError} 404 `"Resource not found"` when the source is not
    *   yours.
    */
+  /**
+   * `POST /news_sources/test` - run a script with a config once, with no cursor
+   * and without creating anything, and get back the items it would produce.
+   * The dry run before creating or repairing a source.
+   *
+   * @throws {OmsApiError} 400 when the script is not a built-in or one of
+   *   yours; 502 when the runner is down.
+   */
+  async test(input: TestNewsSourceInput, options: RequestOptions = {}): Promise<NewsSourceTest> {
+    return this.http.post<NewsSourceTest>(
+      "/news_sources/test",
+      { news_script_id: input.scriptId, config: input.config ?? {} },
+      { retry: false, ...options },
+    );
+  }
+
   async run(id: Id, options: RequestOptions = {}): Promise<NewsSourceRunAccepted> {
     return this.http.post<NewsSourceRunAccepted>(
       `/news_sources/${encodeURIComponent(id)}/run`,

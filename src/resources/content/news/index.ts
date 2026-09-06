@@ -1,6 +1,6 @@
 /** The `news` namespace and everything under it. */
 
-import { type ApiClient, Resource } from "../../../http";
+import { type ApiClient, type RequestOptions, Resource } from "../../../http";
 import { NewsFeedsNamespace } from "./feeds";
 import { NewsItemsNamespace } from "./items";
 import { NewsScriptsNamespace } from "./scripts";
@@ -10,6 +10,23 @@ export * from "./feeds";
 export * from "./items";
 export * from "./scripts";
 export * from "./sources";
+
+/** One feed a site declares or answers on a common path, already read and measured. */
+export interface DiscoveredFeed {
+  readonly url: string;
+  readonly kind: "rss" | "atom";
+  readonly title: string;
+  readonly items: number;
+  /** Entries carrying a date. */
+  readonly dated: number;
+}
+
+export interface NewsDiscovery {
+  readonly url: string;
+  readonly host: string;
+  readonly title: string;
+  readonly feeds: DiscoveredFeed[];
+}
 
 /**
  * The `news` namespace, reachable as `oms.content.news`: the ingestion side
@@ -42,5 +59,15 @@ export class NewsNamespace extends Resource {
     this.sources = new NewsSourcesNamespace(http);
     this.scripts = new NewsScriptsNamespace(http);
     this.items = new NewsItemsNamespace(http);
+  }
+
+  /**
+   * `GET /news/discover?url=` - the RSS/Atom feeds of a site: the ones its page declares
+   * and the common paths that answer, each fetched and measured. Cached for hours server-side.
+   *
+   * @throws {OmsApiError} 422 when the site cannot be read (the message says why).
+   */
+  async discover(url: string, options: RequestOptions = {}): Promise<NewsDiscovery> {
+    return this.http.get<NewsDiscovery>("/news/discover", { ...options, query: { url } });
   }
 }
