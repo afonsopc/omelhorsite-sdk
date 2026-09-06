@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { BASE_FILTER_COLUMNS } from "../src/listing";
 import { ACCOUNT_SESSION_FILTER_COLUMNS } from "../src/resources/account";
+import { CRON_JOB_FILTER_COLUMNS, CRON_RUN_FILTER_COLUMNS } from "../src/resources/cron";
 import {
   ADMIN_JOB_FILTER_COLUMNS,
   ADMIN_LLM_ASSIGNMENT_FILTER_COLUMNS,
@@ -27,8 +28,6 @@ import {
 import { USER_FILTER_COLUMNS } from "../src/resources/auth/sessions";
 import {
   FEEDBACK_FILTER_COLUMNS,
-  CRON_JOB_FILTER_COLUMNS,
-  CRON_RUN_FILTER_COLUMNS,
   INTEL_ARTICLE_FILTER_COLUMNS,
   NEWS_FEED_FILTER_COLUMNS,
   NEWS_ITEM_FILTER_COLUMNS,
