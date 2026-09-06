@@ -270,6 +270,34 @@ export interface ListBotResponderRunsParams extends ListParams<(typeof BOT_RUN_F
   readonly channelId?: Id;
 }
 
+/** One line of the owner's conversation with the responder; `meta` says what a reply did. */
+export interface BotOwnerMessage {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  readonly bot_channel_id: Id;
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly meta: { readonly facts?: readonly Id[]; readonly removed?: readonly Id[]; readonly sources?: readonly Id[]; readonly retrying?: boolean };
+}
+
+export interface BotOwnerChat {
+  readonly messages: BotOwnerMessage[];
+  /** When the current session (no pause over two hours) started; null when there is none. */
+  readonly session_started_at: Timestamp | null;
+  /** Contacts the responder could not answer. */
+  readonly waiting: BotContact[];
+}
+
+export interface BotOwnerChatTurn {
+  readonly reply: BotOwnerMessage;
+  readonly facts: BotFact[];
+  readonly removed: Id[];
+  readonly sources: BotSource[];
+  /** Facts were saved while contacts were waiting: they are being answered in the background. */
+  readonly retrying: boolean;
+}
+
 export type BotReplyOutcome = "replied" | "escalated" | "skipped";
 export interface BotReplyResult {
   readonly result: BotReplyOutcome;
@@ -444,6 +472,22 @@ export class BotRespondersNamespace extends Resource {
   }
 }
 
+/** `/bot_channels/:id/owner_chat` - the owner talking to the responder: teach, ask, correct, delete, point to sources. */
+export class BotOwnerChatNamespace extends Resource {
+  async get(channelId: Id, options: RequestOptions = {}): Promise<BotOwnerChat> {
+    return this.http.get<BotOwnerChat>(`/bot_channels/${encodeURIComponent(channelId)}/owner_chat`, options);
+  }
+
+  /**
+   * `POST /bot_channels/:id/owner_chat` - one turn. The model's decisions are applied before the answer comes back.
+   *
+   * @throws {OmsApiError} 400 when the channel's plugin is not the responder or it was never saved; 502 when the model failed.
+   */
+  async send(channelId: Id, message: string, options: RequestOptions = {}): Promise<BotOwnerChatTurn> {
+    return this.http.post<BotOwnerChatTurn>(`/bot_channels/${encodeURIComponent(channelId)}/owner_chat`, { message }, { retry: false, ...options });
+  }
+}
+
 /** `/bot_facts` - what the responder knows, with optional validity dates. */
 export class BotFactsNamespace extends Resource {
   async list(params: ListBotFactsParams = {}, options: RequestOptions = {}): Promise<Paginated<BotFact>> {
@@ -523,6 +567,7 @@ export class BotsNamespace extends Resource {
   readonly contacts: BotContactsNamespace;
   readonly messages: BotMessagesNamespace;
   readonly responders: BotRespondersNamespace;
+  readonly ownerChat: BotOwnerChatNamespace;
   readonly facts: BotFactsNamespace;
   readonly sources: BotSourcesNamespace;
   readonly runs: BotResponderRunsNamespace;
@@ -533,6 +578,7 @@ export class BotsNamespace extends Resource {
     this.contacts = new BotContactsNamespace(http);
     this.messages = new BotMessagesNamespace(http);
     this.responders = new BotRespondersNamespace(http);
+    this.ownerChat = new BotOwnerChatNamespace(http);
     this.facts = new BotFactsNamespace(http);
     this.sources = new BotSourcesNamespace(http);
     this.runs = new BotResponderRunsNamespace(http);

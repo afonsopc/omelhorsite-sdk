@@ -114,6 +114,14 @@ describe("bots responder plugin", () => {
     expect(calls[3]?.search).toContain("modifiers[order]=scheduled_at:desc");
   });
 
+  test("the owner chat is read and written under the channel", async () => {
+    const { bots, calls } = harness({ messages: [], session_started_at: null, waiting: [] });
+    await bots.ownerChat.get("c1");
+    await bots.ownerChat.send("c1", "o livro custa 20 euros");
+    expect(calls[0]).toMatchObject({ method: "GET", path: "/bot_channels/c1/owner_chat" });
+    expect(calls[1]).toMatchObject({ method: "POST", path: "/bot_channels/c1/owner_chat", body: { message: "o livro custa 20 euros" } });
+  });
+
   test("teach posts the hint; botReply is a bare POST; the contact update carries needs_human", async () => {
     const { bots, calls } = harness({ result: "replied", contact: { id: "k1" } });
     await bots.contacts.teach("k1", "os portes custam 3 euros");
