@@ -76,11 +76,27 @@ export interface CronJob {
   readonly running: boolean;
 }
 
-/** `GET /cron_jobs/:id` (and every write) adds the code, the config and the state. */
+/** The types a script may give a variable it declares with `// @var key type Label | description`. */
+export const CRON_VAR_TYPES = Object.freeze(["string", "text", "number", "boolean", "list", "json"] as const);
+export type CronVarType = (typeof CRON_VAR_TYPES)[number];
+
+/**
+ * A variable a script declares as editable, parsed by the server from the
+ * `// @var` lines at the top of the code. Its value lives in `config[key]`.
+ */
+export interface CronVar {
+  readonly key: string;
+  readonly type: CronVarType;
+  readonly label: string;
+  readonly description: string | null;
+}
+
+/** `GET /cron_jobs/:id` (and every write) adds the code, the config, the state and the declared variables. */
 export interface CronJobDetail extends CronJob {
   readonly code: string;
   readonly config: Record<string, Json>;
   readonly state: Record<string, Json>;
+  readonly vars: CronVar[];
 }
 
 export const CRON_JOB_FILTER_COLUMNS = Object.freeze(["name", "enabled", "health", "template_slug"] as const);
@@ -163,6 +179,8 @@ export interface CronTemplate {
   readonly network: boolean;
   /** The config the script reads, with defaults. */
   readonly config: Record<string, Json>;
+  /** The variables the template declares as editable (`// @var`). */
+  readonly vars: CronVar[];
   /** SHA-256 of the code, so a client can tell an edited copy from a pristine one. */
   readonly hash: string;
 }
