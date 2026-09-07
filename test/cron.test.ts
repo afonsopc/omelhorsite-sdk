@@ -49,6 +49,8 @@ describe("cron.jobs", () => {
       notifyOnSuccess: true,
       templateSlug: "intel",
     });
+    await cron.jobs.create({ name: "Fonte", code: "x", scopes: [], output: { kind: "items" } });
+    expect(calls[1]?.body).toEqual({ name: "Fonte", code: "x", scopes: [], output: { kind: "items" } });
     expect(calls[0]?.method).toBe("POST");
     expect(calls[0]?.path).toBe("/cron_jobs");
     expect(calls[0]?.body).toEqual({
@@ -88,6 +90,22 @@ describe("cron.jobs", () => {
     expect(search?.get("modifiers[order]")).toBe("created_at:desc");
     expect(search?.get("exact_search[cron_job_id]")).toBe("job_1");
     expect(search?.get("exact_search[status]")).toBe("error");
+  });
+
+  test("schedules list by job, create with the job id on the wire, update and delete", async () => {
+    const { cron, calls } = harness({ id: "sch_1", cron: "0 8 * * *" });
+    await cron.schedules.list({ jobId: "job_1", enabled: true });
+    await cron.schedules.create({ jobId: "job_1", cron: "0 8 * * *", params: { feeds: ["a"] }, name: "Manhã" });
+    await cron.schedules.update("sch_1", { enabled: false });
+    expect(calls[0]?.path).toBe("/cron_schedules");
+    expect(calls[0]?.search.get("exact_search[cron_job_id]")).toBe("job_1");
+    expect(calls[0]?.search.get("exact_search[enabled]")).toBe("true");
+    expect(calls[0]?.search.get("modifiers[order]")).toBe("created_at:asc");
+    expect(calls[1]?.method).toBe("POST");
+    expect(calls[1]?.body).toEqual({ cron_job_id: "job_1", cron: "0 8 * * *", name: "Manhã", params: { feeds: ["a"] } });
+    expect(calls[2]?.method).toBe("PATCH");
+    expect(calls[2]?.path).toBe("/cron_schedules/sch_1");
+    expect(calls[2]?.body).toEqual({ enabled: false });
   });
 
   test("templates list without code and hand it out one by one", async () => {
