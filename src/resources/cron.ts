@@ -31,7 +31,7 @@
 import { Resource, type ApiClient } from "../http";
 import { listQuery, paginate } from "../listing";
 import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
-import type { Id, Json, Paginated, RequestOptions, Timestamp } from "../types";
+import type { Id, Json, JsonObject, Paginated, QueryParams, RequestOptions, Timestamp } from "../types";
 
 /**
  * Scopes a job may ask for its token. Anything else answers `400`. `cron:run`
@@ -420,11 +420,255 @@ export class CronTemplatesNamespace extends Resource {
 }
 
 /** The `cron` namespace, reachable as `oms.cron`. */
+/**
+ * A job's small database: rows a script keeps between runs, instead of one
+ * JSON file it has to read and rewrite whole to change a line.
+ *
+ * A row lives in a COLLECTION of the job (`"mentions"`, `"seen"`), under a
+ * KEY unique within it, and holds a JSON object. `at` is the row's own
+ * instant - the date of the mention, the delivery, the decision - and is what
+ * {@link CronRecordsNamespace.list} orders by and
+ * {@link CronRecordsNamespace.prune} trims. Writing is an upsert: the data is
+ * replaced, and `at` only changes when the write carries one.
+ *
+ * Reading needs `cron:read` and writing `cron:write`; a script running as the
+ * job reaches its OWN job's records with the token it already has.
+ */
+export interface CronRecord {
+  readonly id: Id;
+  readonly created_at: Timestamp;
+  readonly updated_at: Timestamp;
+  readonly cron_job_id: Id;
+  readonly collection: string;
+  readonly key: string;
+  readonly data: JsonObject;
+  readonly at: Timestamp | null;
+}
+
+/** Lowercase letters, digits, `-` and `_`, up to this many characters. */
+export const CRON_RECORD_COLLECTION_MAX = 64;
+/** Longer keys are shortened by {@link cronRecordKey} before they are sent. */
+export const CRON_RECORD_KEY_MAX = 200;
+/** A row's `data`, serialised. */
+export const CRON_RECORD_MAX_DATA_BYTES = 64 * 1024;
+/** Rows one job may hold. Past it new keys are refused; the ones already there still update. */
+export const CRON_RECORD_MAX_PER_JOB = 200_000;
+/** Rows one write may carry. {@link CronRecordsNamespace.putMany} splits longer lists. */
+export const CRON_RECORD_MAX_PER_BATCH = 500;
+/** Rows one {@link CronRecordsNamespace.prune} deletes. Call it again until it answers `0`. */
+export const CRON_RECORD_MAX_PER_DELETE = 10_000;
+/** `where` fields one listing may compare. */
+export const CRON_RECORD_MAX_WHERE = 5;
+export const CRON_RECORD_MAX_LIMIT = 500;
+
+/** What a listing sorts by. Descending unless the suffix says otherwise; rows without an `at` come last either way. */
+export type CronRecordOrder = "at" | "at:asc" | "at:desc" | "updated_at" | "updated_at:asc" | "updated_at:desc";
+
+export interface ListCronRecordsParams {
+  readonly collection: string;
+  /** 1 to {@link CRON_RECORD_MAX_LIMIT}; 50 by default. */
+  readonly limit?: number;
+  /** The `next_cursor` of the previous page. */
+  readonly cursor?: string | null;
+  /** Over `at`, inclusive. A row without an `at` is outside both. */
+  readonly since?: string | Date;
+  readonly until?: string | Date;
+  /** Fetch several rows at once. Long keys are shortened as {@link CronRecordsNamespace.put} shortens them. */
+  readonly keys?: readonly string[];
+  /** Equality against `data->>field`, as text. At most {@link CRON_RECORD_MAX_WHERE} fields. */
+  readonly where?: Readonly<Record<string, string | number | boolean>>;
+  readonly order?: CronRecordOrder;
+  /** Ask for `count`: how many rows the filter matches, not just this page. */
+  readonly count?: boolean;
+}
+
+export interface CronRecordPage {
+  readonly records: CronRecord[];
+  /** `null` on the last page. */
+  readonly next_cursor: string | null;
+  /** `null` unless the request asked for it. */
+  readonly count: number | null;
+}
+
+export interface CronRecordInput {
+  readonly collection: string;
+  readonly key: string;
+  /** Up to {@link CRON_RECORD_MAX_DATA_BYTES} serialised. Defaults to `{}`. */
+  readonly data?: JsonObject;
+  /** The row's own instant. Left out, a row that already exists keeps the one it has. */
+  readonly at?: string | Date | null;
+}
+
+export interface CronRecordWriteResult {
+  readonly created: number;
+  readonly updated: number;
+}
+
+export interface CronRecordDeleteResult {
+  readonly deleted: number;
+}
+
+/** One collection of a job, as {@link CronRecordsNamespace.collections} reports it. */
+export interface CronRecordCollection {
+  readonly collection: string;
+  readonly count: number;
+  readonly first_at: Timestamp | null;
+  readonly last_at: Timestamp | null;
+  readonly updated_at: Timestamp;
+}
+
+export interface PruneCronRecordsOptions {
+  /** Delete the rows at or before this instant. */
+  readonly before: string | Date;
+  /** Which instant to read: the row's own (default) or the last write. */
+  readonly on?: "at" | "updated_at";
+}
+
+/**
+ * The key the server stores for a value. Anything past
+ * {@link CRON_RECORD_KEY_MAX} keeps its start and gains a fingerprint of the
+ * whole, so a link stays a usable key and always resolves to the same row.
+ *
+ * @throws {TypeError} on a runtime without WebCrypto, and only for a value
+ *   long enough to need shortening.
+ */
+export async function cronRecordKey(value: string): Promise<string> {
+  if (value.length <= CRON_RECORD_KEY_MAX) return value;
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new TypeError("A key past 200 characters needs WebCrypto to shorten. Pass a shorter key on a runtime without it.");
+  const bytes = new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  let hex = "";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return `${value.slice(0, CRON_RECORD_KEY_MAX - 33)}#${hex.slice(0, 32)}`;
+}
+
+export class CronRecordsNamespace extends Resource {
+  /**
+   * `GET /cron_jobs/:id/records` - one page of a collection, newest first,
+   * paged by cursor rather than by offset so writes in between neither repeat
+   * nor skip a row.
+   *
+   * @throws {OmsApiError} 400 for a missing or malformed `collection`, a
+   *   `limit` outside 1..500, an unknown `order`, an unparsable date, a
+   *   cursor from somewhere else, or more than 5 `where` fields.
+   */
+  async list(jobId: Id, params: ListCronRecordsParams, options: RequestOptions = {}): Promise<CronRecordPage> {
+    return this.http.get<CronRecordPage>(`/cron_jobs/${encodeURIComponent(jobId)}/records`, {
+      ...options,
+      query: await listRecordsQuery(params),
+    });
+  }
+
+  /** Every row of a collection, page after page. The filters of {@link list} apply. */
+  async *all(jobId: Id, collection: string, params: Omit<ListCronRecordsParams, "collection" | "cursor" | "count"> = {}, options: RequestOptions = {}): AsyncGenerator<CronRecord> {
+    let cursor: string | null = null;
+    for (;;) {
+      const page: CronRecordPage = await this.list(jobId, { ...params, collection, cursor }, options);
+      for (const record of page.records) yield record;
+      if (!page.next_cursor) return;
+      cursor = page.next_cursor;
+    }
+  }
+
+  /** One row, or `null` when the collection has no such key. */
+  async get(jobId: Id, collection: string, key: string, options: RequestOptions = {}): Promise<CronRecord | null> {
+    const page = await this.list(jobId, { collection, keys: [key], limit: 1 }, options);
+    return page.records[0] ?? null;
+  }
+
+  /** `POST /cron_jobs/:id/records` - creates or replaces one row. */
+  async put(jobId: Id, collection: string, key: string, data: JsonObject = {}, at?: string | Date | null, options: RequestOptions = {}): Promise<CronRecordWriteResult> {
+    return this.putMany(jobId, [{ collection, key, data, at }], options);
+  }
+
+  /**
+   * Creates or replaces many rows. Each request is one transaction; a list
+   * longer than {@link CRON_RECORD_MAX_PER_BATCH} goes in several, so a
+   * failure part-way leaves the batches before it written.
+   *
+   * @throws {OmsApiError} 400 for a bad collection, an empty or too long key,
+   *   `data` that is not an object or is past the size ceiling, or
+   *   `record limit reached` when the job is full.
+   */
+  async putMany(jobId: Id, records: readonly CronRecordInput[], options: RequestOptions = {}): Promise<CronRecordWriteResult> {
+    const total = { created: 0, updated: 0 };
+    for (let from = 0; from < records.length; from += CRON_RECORD_MAX_PER_BATCH) {
+      const chunk = await Promise.all(records.slice(from, from + CRON_RECORD_MAX_PER_BATCH).map(recordBody));
+      const answer = await this.http.post<CronRecordWriteResult>(`/cron_jobs/${encodeURIComponent(jobId)}/records`, { records: chunk }, { retry: false, ...options });
+      total.created += answer.created;
+      total.updated += answer.updated;
+    }
+    return total;
+  }
+
+  /** `DELETE /cron_jobs/:id/records` - one row. `deleted` is `0` when there was none. */
+  async remove(jobId: Id, collection: string, key: string, options: RequestOptions = {}): Promise<CronRecordDeleteResult> {
+    return this.http.delete<CronRecordDeleteResult>(`/cron_jobs/${encodeURIComponent(jobId)}/records`, {
+      ...options,
+      query: { collection, key: await cronRecordKey(key) },
+    });
+  }
+
+  /** Several rows by key, in one request. */
+  async removeMany(jobId: Id, collection: string, keys: readonly string[], options: RequestOptions = {}): Promise<CronRecordDeleteResult> {
+    return this.http.delete<CronRecordDeleteResult>(`/cron_jobs/${encodeURIComponent(jobId)}/records`, {
+      ...options,
+      query: { collection, keys: await Promise.all(keys.map(cronRecordKey)) },
+    });
+  }
+
+  /**
+   * Deletes the old rows of a collection, up to
+   * {@link CRON_RECORD_MAX_PER_DELETE} per call - call it again while
+   * `deleted` comes back full.
+   */
+  async prune(jobId: Id, collection: string, options: PruneCronRecordsOptions, requestOptions: RequestOptions = {}): Promise<CronRecordDeleteResult> {
+    return this.http.delete<CronRecordDeleteResult>(`/cron_jobs/${encodeURIComponent(jobId)}/records`, {
+      ...requestOptions,
+      query: { collection, before: asIso(options.before), on: options.on },
+    });
+  }
+
+  /** `GET /cron_jobs/:id/records/collections` - what the job holds, by name. */
+  async collections(jobId: Id, options: RequestOptions = {}): Promise<CronRecordCollection[]> {
+    return this.http.get<CronRecordCollection[]>(`/cron_jobs/${encodeURIComponent(jobId)}/records/collections`, options);
+  }
+
+  /** The same methods bound to one job, which is what a running script is handed. */
+  for(jobId: Id): BoundCronRecords {
+    return {
+      list: (params, options) => this.list(jobId, params, options),
+      all: (collection, params, options) => this.all(jobId, collection, params, options),
+      get: (collection, key, options) => this.get(jobId, collection, key, options),
+      put: (collection, key, data, at, options) => this.put(jobId, collection, key, data, at, options),
+      putMany: (records, options) => this.putMany(jobId, records, options),
+      remove: (collection, key, options) => this.remove(jobId, collection, key, options),
+      removeMany: (collection, keys, options) => this.removeMany(jobId, collection, keys, options),
+      prune: (collection, options, requestOptions) => this.prune(jobId, collection, options, requestOptions),
+      collections: (options) => this.collections(jobId, options),
+    };
+  }
+}
+
+/** {@link CronRecordsNamespace} with the job already filled in. */
+export interface BoundCronRecords {
+  list(params: ListCronRecordsParams, options?: RequestOptions): Promise<CronRecordPage>;
+  all(collection: string, params?: Omit<ListCronRecordsParams, "collection" | "cursor" | "count">, options?: RequestOptions): AsyncGenerator<CronRecord>;
+  get(collection: string, key: string, options?: RequestOptions): Promise<CronRecord | null>;
+  put(collection: string, key: string, data?: JsonObject, at?: string | Date | null, options?: RequestOptions): Promise<CronRecordWriteResult>;
+  putMany(records: readonly CronRecordInput[], options?: RequestOptions): Promise<CronRecordWriteResult>;
+  remove(collection: string, key: string, options?: RequestOptions): Promise<CronRecordDeleteResult>;
+  removeMany(collection: string, keys: readonly string[], options?: RequestOptions): Promise<CronRecordDeleteResult>;
+  prune(collection: string, options: PruneCronRecordsOptions, requestOptions?: RequestOptions): Promise<CronRecordDeleteResult>;
+  collections(options?: RequestOptions): Promise<CronRecordCollection[]>;
+}
+
 export class CronNamespace extends Resource {
   readonly jobs: CronJobsNamespace;
   readonly schedules: CronSchedulesNamespace;
   readonly runs: CronRunsNamespace;
   readonly templates: CronTemplatesNamespace;
+  readonly records: CronRecordsNamespace;
 
   constructor(http: ApiClient) {
     super(http);
@@ -432,6 +676,7 @@ export class CronNamespace extends Resource {
     this.schedules = new CronSchedulesNamespace(http);
     this.runs = new CronRunsNamespace(http);
     this.templates = new CronTemplatesNamespace(http);
+    this.records = new CronRecordsNamespace(http);
   }
 }
 
@@ -469,4 +714,30 @@ function jobBody(input: Partial<CreateCronJobInput>): Record<string, unknown> {
   if (input.notifyOnSuccess !== undefined) body["notify_on_success"] = input.notifyOnSuccess;
   if (input.templateSlug !== undefined) body["template_slug"] = input.templateSlug;
   return body;
+}
+
+async function listRecordsQuery(params: ListCronRecordsParams): Promise<QueryParams> {
+  const query: Record<string, unknown> = { collection: params.collection };
+  if (params.limit !== undefined) query["limit"] = params.limit;
+  if (params.cursor) query["cursor"] = params.cursor;
+  if (params.since !== undefined) query["since"] = asIso(params.since);
+  if (params.until !== undefined) query["until"] = asIso(params.until);
+  if (params.keys !== undefined) query["keys"] = await Promise.all(params.keys.map(cronRecordKey));
+  if (params.where !== undefined) query["where"] = params.where;
+  if (params.order !== undefined) query["order"] = params.order;
+  if (params.count) query["count"] = true;
+  return query as QueryParams;
+}
+
+async function recordBody(input: CronRecordInput): Promise<Record<string, unknown>> {
+  return {
+    collection: input.collection,
+    key: await cronRecordKey(input.key),
+    data: input.data ?? {},
+    ...(input.at === undefined || input.at === null ? {} : { at: asIso(input.at) }),
+  };
+}
+
+function asIso(value: string | Date): string {
+  return value instanceof Date ? value.toISOString() : value;
 }
