@@ -14,7 +14,9 @@ export const NEWS_FEED_MAX_RETENTION_DAYS = 3650;
 /**
  * A feed: a named set of {@link NewsSource}s and the {@link NewsItem}s they
  * produce. Several per account, unique by name; the oldest is the default
- * one a source lands in when it names no feed.
+ * one a source lands in when it names no feed. A feed may INCLUDE other
+ * feeds of yours (one level): listing its items also returns theirs, so
+ * sources can be grouped by kind ("Newspapers", "TV news") and reused.
  */
 export interface NewsFeed {
   readonly id: Id;
@@ -28,12 +30,15 @@ export interface NewsFeed {
   readonly retention_days: number;
   /** A disabled feed's sources are not polled. */
   readonly enabled: boolean;
+  /** Feeds of yours whose items this feed also lists (one level, no chaining). */
+  readonly included_feed_ids: Id[];
 }
 
-/** `GET /news_feeds/:id` adds two live counters. */
+/** `GET /news_feeds/:id` adds two live counters (this feed's own sources and items) and who includes it. */
 export interface NewsFeedDetail extends NewsFeed {
   readonly sources_count: number;
   readonly items_count: number;
+  readonly included_by_feed_ids: Id[];
 }
 
 /** Filter columns of `GET /news_feeds`, on top of {@link BASE_FILTER_COLUMNS}. */
@@ -46,6 +51,8 @@ export interface CreateNewsFeedInput {
   readonly description?: string | null;
   readonly retentionDays?: number;
   readonly enabled?: boolean;
+  /** REPLACES the list. Your own feeds only, the feed itself is dropped; anything else is a `400`. */
+  readonly includedFeedIds?: readonly Id[];
 }
 
 export type UpdateNewsFeedInput = Partial<CreateNewsFeedInput>;
@@ -87,5 +94,6 @@ function feedBody(input: UpdateNewsFeedInput): Record<string, unknown> {
   if (input.description !== undefined) body["description"] = input.description;
   if (input.retentionDays !== undefined) body["retention_days"] = input.retentionDays;
   if (input.enabled !== undefined) body["enabled"] = input.enabled;
+  if (input.includedFeedIds !== undefined) body["included_feed_ids"] = [...input.includedFeedIds];
   return body;
 }
