@@ -44,8 +44,20 @@ export interface NewsSource {
   readonly config: Record<string, Json>;
   /** The {@link NewsFeed} it belongs to. */
   readonly news_feed_id: Id;
-  /** Which {@link NewsScript} fetches this source. */
-  readonly news_script_id: Id;
+  /** Which {@link NewsScript} fetches this source, or `null` when a job does. */
+  readonly news_script_id: Id | null;
+  /**
+   * The cron job (`oms.cron.jobs`, with `output` items) that fetches this
+   * source instead of a script, and the schedule of that job the source owns:
+   * its `cron` comes from `poll_interval_minutes` and its `params` are the
+   * source's `config`. `null` for a script source.
+   */
+  readonly cron_job_id: Id | null;
+  readonly cron_schedule_id: Id | null;
+  /** The schedule's cron expression, for a job source. */
+  readonly cron: string | null;
+  /** Where the job runs, for a job source: `sandbox` or `full`. */
+  readonly runtime: "sandbox" | "full" | null;
   /** Minutes between polls. Validated `in: 5..1440`. */
   readonly poll_interval_minutes: number;
   /**
@@ -74,7 +86,7 @@ export interface NewsSource {
 }
 
 /** Filter columns of `GET /news_sources`, on top of {@link BASE_FILTER_COLUMNS}. */
-export const NEWS_SOURCE_FILTER_COLUMNS = Object.freeze(["name", "health", "enabled", "news_feed_id", "news_script_id"] as const);
+export const NEWS_SOURCE_FILTER_COLUMNS = Object.freeze(["name", "health", "enabled", "news_feed_id", "news_script_id", "cron_job_id"] as const);
 
 /** Filters for {@link NewsSourcesNamespace.list}. */
 export interface ListNewsSourcesParams extends ListParams<(typeof NEWS_SOURCE_FILTER_COLUMNS)[number]> {
@@ -86,6 +98,8 @@ export interface ListNewsSourcesParams extends ListParams<(typeof NEWS_SOURCE_FI
   readonly feedId?: Id;
   /** Every source driven by one script. */
   readonly scriptId?: Id;
+  /** Every source driven by one job. */
+  readonly jobId?: Id;
 }
 
 /** Arguments for {@link NewsSourcesNamespace.create}. */
@@ -98,9 +112,17 @@ export interface CreateNewsSourceInput {
    * The script that fetches it. Must be a built-in or one of yours;
    * `script_visible_to_owner` rejects anything else with
    * `400 "News script is not accessible"` rather than a 404, so this also
-   * tells you the id exists. Do not use it as an existence oracle.
+   * tells you the id exists. Do not use it as an existence oracle. Give
+   * either this or `jobId`.
    */
-  readonly scriptId: Id;
+  readonly scriptId?: Id;
+  /**
+   * A cron job of yours with `output: { kind: "items" }` that fetches it
+   * instead of a script. The source gets a schedule of that job: the cron
+   * from `pollIntervalMinutes`, the `config` as the run params. `400` when
+   * the job has no items output.
+   */
+  readonly jobId?: Id;
   /** Whatever that script reads. Free-form; the API validates nothing in it. */
   readonly config?: Record<string, Json>;
   /** 5-1440. Defaults to 15 server-side. */
@@ -114,9 +136,10 @@ export interface CreateNewsSourceInput {
  *
  * One key wider than the create form: `cursor` is updatable and not creatable.
  */
-/** Arguments for {@link NewsSourcesNamespace.test}. */
+/** Arguments for {@link NewsSourcesNamespace.test}: a script, or a sandbox job (its config goes under the given one). */
 export interface TestNewsSourceInput {
-  readonly scriptId: Id;
+  readonly scriptId?: Id;
+  readonly jobId?: Id;
   readonly config?: Record<string, Json>;
 }
 
@@ -143,7 +166,9 @@ export interface UpdateNewsSourceInput {
   readonly name?: string;
   /** Moves the source (and nothing else: its items stay where they were written) to another of your feeds. */
   readonly newsFeedId?: Id;
+  /** Setting a script drops the job (and its schedule); setting a job drops the script. */
   readonly scriptId?: Id;
+  readonly jobId?: Id;
   /**
    * REPLACES the whole object; there is no merge. `assign_attributes` writes
    * the JSON column wholesale, so sending `{ url: "..." }` to a source that
@@ -193,6 +218,7 @@ export class NewsSourcesNamespace extends Resource {
         enabled: params.enabled,
         news_feed_id: params.feedId,
         news_script_id: params.scriptId,
+        cron_job_id: params.jobId,
       },
     };
     return paginate(params, 100, (at) =>
@@ -239,7 +265,8 @@ export class NewsSourcesNamespace extends Resource {
       "/news_sources",
       {
         name: input.name,
-        news_script_id: input.scriptId,
+        ...(input.scriptId === undefined ? {} : { news_script_id: input.scriptId }),
+        ...(input.jobId === undefined ? {} : { cron_job_id: input.jobId }),
         ...(input.newsFeedId === undefined ? {} : { news_feed_id: input.newsFeedId }),
         ...(input.config === undefined ? {} : { config: input.config }),
         ...(input.pollIntervalMinutes === undefined ? {} : { poll_interval_minutes: input.pollIntervalMinutes }),
@@ -271,6 +298,7 @@ export class NewsSourcesNamespace extends Resource {
         ...(input.name === undefined ? {} : { name: input.name }),
         ...(input.newsFeedId === undefined ? {} : { news_feed_id: input.newsFeedId }),
         ...(input.scriptId === undefined ? {} : { news_script_id: input.scriptId }),
+        ...(input.jobId === undefined ? {} : { cron_job_id: input.jobId }),
         ...(input.config === undefined ? {} : { config: input.config }),
         ...(input.pollIntervalMinutes === undefined ? {} : { poll_interval_minutes: input.pollIntervalMinutes }),
         ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
@@ -332,7 +360,11 @@ export class NewsSourcesNamespace extends Resource {
   async test(input: TestNewsSourceInput, options: RequestOptions = {}): Promise<NewsSourceTest> {
     return this.http.post<NewsSourceTest>(
       "/news_sources/test",
-      { news_script_id: input.scriptId, config: input.config ?? {} },
+      {
+        ...(input.scriptId === undefined ? {} : { news_script_id: input.scriptId }),
+        ...(input.jobId === undefined ? {} : { cron_job_id: input.jobId }),
+        config: input.config ?? {},
+      },
       { retry: false, ...options },
     );
   }
