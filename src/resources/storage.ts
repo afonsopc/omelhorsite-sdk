@@ -937,19 +937,26 @@ export class StorageNamespace extends Resource {
    * the store rejects a request that carries a bearer header alongside it.
    */
   private async fetchObject(url: string, options: RequestOptions): Promise<Response> {
-    const response = await this.transport(url, {
-      method: "GET",
-      ...(options.signal ? { signal: options.signal } : {}),
-      credentials: "omit",
-      redirect: "follow",
-    });
-    if (!response.ok) {
-      throw new OmsApiError(
-        `Object storage refused the download (${response.status}). A signed URL is good for six hours; ask for a fresh one if it expired.`,
-        { status: response.status, method: "GET", url, attempts: 1 },
-      );
+    // The store sits behind a proxy that answers 5xx of its own now and then
+    // (a 520 for a healthy object is not rare). Three tries, backing off, before
+    // the caller hears about it. A 4xx is the signature or the object: no retry.
+    let last: Response | null = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const response = await this.transport(url, {
+        method: "GET",
+        ...(options.signal ? { signal: options.signal } : {}),
+        credentials: "omit",
+        redirect: "follow",
+      });
+      if (response.ok) return response;
+      last = response;
+      if (response.status < 500 || attempt === 3) break;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
     }
-    return response;
+    throw new OmsApiError(
+      `Object storage refused the download (${last?.status}). A signed URL is good for six hours; ask for a fresh one if it expired.`,
+      { status: last?.status ?? 0, method: "GET", url, attempts: 3 },
+    );
   }
 }
 
