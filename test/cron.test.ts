@@ -65,16 +65,18 @@ describe("cron.jobs", () => {
     });
   });
 
-  test("run, test and check hit their own paths", async () => {
+  test("run, test and check hit their own paths; params travel only when given", async () => {
     const { cron, calls } = harness({ id: "run_1", status: "queued" });
     await cron.jobs.run("job_1");
-    await cron.jobs.test("job_1");
+    await cron.jobs.test("job_1", { params: { day: "2026-09-07" } });
     await cron.jobs.check("x {");
     expect(calls.map((c) => [c.method, c.path])).toEqual([
       ["POST", "/cron_jobs/job_1/run"],
       ["POST", "/cron_jobs/job_1/test"],
       ["POST", "/cron_jobs/check"],
     ]);
+    expect(calls[0]?.body).toEqual({});
+    expect(calls[1]?.body).toEqual({ params: { day: "2026-09-07" } });
     expect(calls[2]?.body).toEqual({ code: "x {" });
   });
 
@@ -98,6 +100,7 @@ describe("cron.jobs", () => {
 
   test("publishes the server's vocabulary", () => {
     expect(CRON_JOB_SCOPES).toContain("llm");
+    expect(CRON_JOB_SCOPES).toContain("cron:run");
     expect(CRON_JOB_SCOPES).not.toContain("cron:write");
     expect([...CRON_RUN_STATUSES]).toEqual(["queued", "running", "ok", "error", "timeout", "skipped"]);
   });

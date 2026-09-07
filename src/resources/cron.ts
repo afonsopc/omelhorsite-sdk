@@ -10,8 +10,13 @@
  * when a run ends well and handed back on the next one; what it returns is
  * the run's `result`, and `result.summary` is what the listing shows.
  *
+ * A run carries `params`: an object merged over the job's `config` (so the
+ * script reads `ctx.config` as usual) and handed on its own as `ctx.params`.
+ * They come from the schedule that fired, or from whoever called `run`.
+ *
  * Needs the `cron:read` scope to read and `cron:write` to change anything.
- * A job's own token never carries either: a script cannot edit jobs.
+ * A job's own token never carries either; with `cron:run` it may start other
+ * jobs.
  */
 
 import { Resource, type ApiClient } from "../http";
@@ -19,9 +24,12 @@ import { listQuery, paginate } from "../listing";
 import type { BASE_FILTER_COLUMNS, ListParams } from "../listing";
 import type { Id, Json, Paginated, RequestOptions, Timestamp } from "../types";
 
-/** Scopes a job may ask for its token. Anything else answers `400`. */
+/**
+ * Scopes a job may ask for its token. Anything else answers `400`. `cron:run`
+ * lets a script run other jobs (with params) without reading or editing them.
+ */
 export const CRON_JOB_SCOPES = Object.freeze([
-  "profile", "news:read", "news:write", "storage:read", "storage:write", "llm", "tools:read", "tools:write", "blogs:read", "blogs:write", "bots:read", "bots:write",
+  "profile", "news:read", "news:write", "storage:read", "storage:write", "llm", "tools:read", "tools:write", "blogs:read", "blogs:write", "bots:read", "bots:write", "cron:run",
 ] as const);
 export type CronJobScope = (typeof CRON_JOB_SCOPES)[number];
 
@@ -129,7 +137,11 @@ export type UpdateCronJobInput = Partial<Omit<CreateCronJobInput, "templateSlug"
 
 export const CRON_RUN_STATUSES = Object.freeze(["queued", "running", "ok", "error", "timeout", "skipped"] as const);
 export type CronRunStatus = (typeof CRON_RUN_STATUSES)[number];
-export const CRON_RUN_TRIGGERS = Object.freeze(["schedule", "manual", "test"] as const);
+/**
+ * Who asked for a run: a schedule, a person with a session (`manual`), a
+ * third-party OAuth token (`api`), another job's run token (`job`), or a test.
+ */
+export const CRON_RUN_TRIGGERS = Object.freeze(["schedule", "manual", "api", "job", "test"] as const);
 export type CronRunTrigger = (typeof CRON_RUN_TRIGGERS)[number];
 
 export interface CronRun {
@@ -140,6 +152,8 @@ export interface CronRun {
   readonly status: CronRunStatus;
   /** `test` runs never write the state back and never count as failures. */
   readonly trigger: CronRunTrigger;
+  /** Merged over the job's config for this run and handed to the script as `ctx.params`. */
+  readonly params: Record<string, Json>;
   readonly scheduled_at: Timestamp;
   readonly started_at: Timestamp | null;
   readonly finished_at: Timestamp | null;
@@ -166,6 +180,12 @@ export const CRON_RUN_FILTER_COLUMNS = Object.freeze(["cron_job_id", "status", "
 export interface ListCronRunsParams extends ListParams<(typeof CRON_RUN_FILTER_COLUMNS)[number]> {
   readonly jobId?: Id;
   readonly status?: CronRunStatus;
+}
+
+/** What `run` and `test` accept. */
+export interface RunCronJobInput {
+  /** Merged over the job's config for this run only; the script also gets them as `ctx.params`. Up to 64 KB. */
+  readonly params?: Record<string, Json>;
 }
 
 /** A ready-made script: copy it into a job with {@link CronJobsNamespace.create}. */
@@ -232,16 +252,17 @@ export class CronJobsNamespace extends Resource {
    * `POST /cron_jobs/:id/run` - runs now, outside the schedule, as a normal
    * run (the state is stored). `202` with the queued run.
    *
-   * @throws {OmsApiError} 400 `this job is already running`; 429
-   *   `error: "limit"` when the day's `cron_run_seconds` are spent.
+   * @throws {OmsApiError} 400 `this job is already running`, or
+   *   `params must be an object`; 429 `error: "limit"` when the day's
+   *   `cron_run_seconds` are spent.
    */
-  async run(id: Id, options: RequestOptions = {}): Promise<CronRun> {
-    return this.http.post<CronRun>(`/cron_jobs/${encodeURIComponent(id)}/run`, {}, { retry: false, ...options });
+  async run(id: Id, input: RunCronJobInput = {}, options: RequestOptions = {}): Promise<CronRun> {
+    return this.http.post<CronRun>(`/cron_jobs/${encodeURIComponent(id)}/run`, runBody(input), { retry: false, ...options });
   }
 
   /** `POST /cron_jobs/:id/test` - runs now WITHOUT storing the state or counting a failure. `202`. */
-  async test(id: Id, options: RequestOptions = {}): Promise<CronRun> {
-    return this.http.post<CronRun>(`/cron_jobs/${encodeURIComponent(id)}/test`, {}, { retry: false, ...options });
+  async test(id: Id, input: RunCronJobInput = {}, options: RequestOptions = {}): Promise<CronRun> {
+    return this.http.post<CronRun>(`/cron_jobs/${encodeURIComponent(id)}/test`, runBody(input), { retry: false, ...options });
   }
 
   /** `POST /cron_jobs/check` - the syntax check the server runs before storing code, on its own. */
@@ -290,6 +311,10 @@ export class CronNamespace extends Resource {
     this.runs = new CronRunsNamespace(http);
     this.templates = new CronTemplatesNamespace(http);
   }
+}
+
+function runBody(input: RunCronJobInput): Record<string, unknown> {
+  return input.params === undefined ? {} : { params: input.params };
 }
 
 function jobBody(input: Partial<CreateCronJobInput>): Record<string, unknown> {

@@ -114,6 +114,7 @@ export const OMS_SCOPES = [
   "news:write",
   "cron:read",
   "cron:write",
+  "cron:run",
   "bots:read",
   "bots:write",
 ] as const;
