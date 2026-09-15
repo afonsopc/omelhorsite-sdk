@@ -48,6 +48,7 @@ import { objectStoreFetch } from "../storage/upload";
 import { BackgroundRemovalNamespace } from "./backgroundRemoval";
 import { CaptionsNamespace } from "./captions";
 import { DownloaderNamespace } from "./downloader";
+import { ImageGenerationNamespace } from "./imageGeneration";
 import { JumpstyleNamespace } from "./jumpstyle";
 import { TranscriptionNamespace } from "./transcription";
 import { UpscaleNamespace } from "./upscale";
@@ -57,6 +58,7 @@ import { VocalSeparationNamespace } from "./vocalSeparation";
 export * from "./backgroundRemoval";
 export * from "./captions";
 export * from "./downloader";
+export * from "./imageGeneration";
 export * from "./jumpstyle";
 export * from "./transcription";
 export * from "./upscale";
@@ -374,6 +376,8 @@ export class ToolsNamespace extends Resource {
   readonly backgroundRemoval: BackgroundRemovalNamespace;
   /** Enlarges an image without the mush. */
   readonly upscale: UpscaleNamespace;
+  /** A prompt in, a PNG out. Runs on the server or at a paid provider. */
+  readonly imageGeneration: ImageGenerationNamespace;
   /** Speech to text, with SRT and VTT output. */
   readonly transcription: TranscriptionNamespace;
   /** Splits a track into vocals and instrumental. */
@@ -391,6 +395,7 @@ export class ToolsNamespace extends Resource {
     super(http);
     this.backgroundRemoval = new BackgroundRemovalNamespace(http);
     this.upscale = new UpscaleNamespace(http);
+    this.imageGeneration = new ImageGenerationNamespace(http);
     this.transcription = new TranscriptionNamespace(http);
     this.vocalSeparation = new VocalSeparationNamespace(http);
     this.captions = new CaptionsNamespace(http);
