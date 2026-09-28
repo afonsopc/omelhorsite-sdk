@@ -103,6 +103,7 @@ function transcriptionRow(overrides: Record<string, unknown> = {}): Record<strin
     has_original: true,
     progress_percent: null,
     text: null,
+    segments: null,
     srt_url: null,
     vtt_url: null,
     ...overrides,
@@ -255,6 +256,18 @@ describe("create", () => {
     expect(form.has("model_id")).toBe(false);
     expect(form.has("language")).toBe(false);
     expect(form.has("cf_turnstile_token")).toBe(false);
+    expect(form.has("condition")).toBe(false);
+    expect(form.has("priority")).toBe(false);
+  });
+
+  test("condition and priority ride as form fields when given", async () => {
+    const { transcription, calls } = harness(() => json(201, transcriptionRow()));
+
+    await transcription.create({ audio: audio(), condition: false, priority: 10 });
+
+    const form = calls[0]!.form!;
+    expect(form.get("condition")).toBe("false");
+    expect(form.get("priority")).toBe("10");
   });
 
   test("separation posts to its own path with `audio` too", async () => {

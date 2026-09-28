@@ -84,10 +84,23 @@ export interface Transcription extends ToolRecord {
    * across the wire every few seconds.
    */
   readonly text: string | null;
+  /**
+   * The transcript as timed segments, or `null`. Same rule as `text`: only
+   * once complete. Also `null` on a run that finished before the server kept
+   * segments.
+   */
+  readonly segments: readonly TranscriptionSegment[] | null;
   /** Signed SubRip URL once complete and attached, `null` otherwise. */
   readonly srt_url: string | null;
   /** Signed WebVTT URL once complete and attached, `null` otherwise. */
   readonly vtt_url: string | null;
+}
+
+/** One timed line of a transcript. Times are seconds from the start of the audio. */
+export interface TranscriptionSegment {
+  readonly start: number;
+  readonly end: number;
+  readonly text: string;
 }
 
 /** Arguments for starting a transcription. */
@@ -98,6 +111,17 @@ export interface CreateTranscriptionInput extends ToolCaptcha {
   readonly modelId?: string;
   /** ISO language hint. Omit to let the model detect it. */
   readonly language?: string;
+  /**
+   * `false` stops the model from conditioning on its own previous text, which
+   * keeps repetitive audio (music, jingles, short blocks) out of hallucination
+   * loops. Omit for the server default.
+   */
+  readonly condition?: boolean;
+  /**
+   * Queue priority, lower runs first (0 to 100). Only service accounts may
+   * send it; anyone else gets a 403.
+   */
+  readonly priority?: number;
 }
 
 /** Which subtitle format {@link TranscriptionNamespace.subtitles} should fetch. */
@@ -159,6 +183,7 @@ export class TranscriptionNamespace extends Resource {
    *   is missing, undecodable, names an unknown model, or is longer on its own
    *   than the whole daily quota.
    * @throws {OmsAuthError} 401 when anonymous and the captcha is missing or bad.
+   *   403 when `priority` is sent by an account that is not a service account.
    */
   async create(input: CreateTranscriptionInput, options: RequestOptions = {}): Promise<Transcription> {
     return this.http.postForm<Transcription>(
@@ -167,6 +192,8 @@ export class TranscriptionNamespace extends Resource {
         audio: input.audio,
         ...(input.modelId === undefined ? {} : { model_id: input.modelId }),
         ...(input.language === undefined ? {} : { language: input.language }),
+        ...(input.condition === undefined ? {} : { condition: input.condition }),
+        ...(input.priority === undefined ? {} : { priority: input.priority }),
         ...toolCaptchaFields(input),
       },
       { ...options, retry: options.retry ?? false },

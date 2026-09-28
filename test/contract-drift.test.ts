@@ -1004,6 +1004,7 @@ describe("tools: transcription", () => {
       has_original: true,
       progress_percent: 42,
       text: null,
+      segments: null,
       srt_url: null,
       vtt_url: null,
     });
@@ -1019,6 +1020,7 @@ describe("tools: transcription", () => {
       "has_original",
       "progress_percent",
       "text",
+      "segments",
       "srt_url",
       "vtt_url",
     ]);
@@ -1045,6 +1047,7 @@ describe("tools: transcription", () => {
       has_original: false,
       progress_percent: null,
       text: "olá mundo",
+      segments: [{ start: 0, end: 1.2, text: "olá mundo" }],
       srt_url: "https://cdn.test/subs.srt",
       vtt_url: "https://cdn.test/subs.vtt",
     });
