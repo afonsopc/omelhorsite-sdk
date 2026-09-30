@@ -28,10 +28,6 @@ import {
 import { USER_FILTER_COLUMNS } from "../src/resources/auth/sessions";
 import {
   FEEDBACK_FILTER_COLUMNS,
-  NEWS_FEED_FILTER_COLUMNS,
-  NEWS_ITEM_FILTER_COLUMNS,
-  NEWS_SCRIPT_FILTER_COLUMNS,
-  NEWS_SOURCE_FILTER_COLUMNS,
   JOKE_FILTER_COLUMNS,
   NOTIFICATION_FILTER_COLUMNS,
   SPACE_INVADERS_GAME_FILTER_COLUMNS,
@@ -86,10 +82,6 @@ const RESOURCES: Record<string, { columns: readonly string[]; extra?: readonly s
   identities: { columns: LINKED_IDENTITY_FILTER_COLUMNS },
   cron_jobs: { columns: CRON_JOB_FILTER_COLUMNS },
   cron_runs: { columns: CRON_RUN_FILTER_COLUMNS },
-  news_feeds: { columns: NEWS_FEED_FILTER_COLUMNS },
-  news_items: { columns: NEWS_ITEM_FILTER_COLUMNS },
-  news_scripts: { columns: NEWS_SCRIPT_FILTER_COLUMNS },
-  news_sources: { columns: NEWS_SOURCE_FILTER_COLUMNS },
   jobs: { columns: JOB_FILTER_COLUMNS },
   jokes: { columns: JOKE_FILTER_COLUMNS },
   llm_chats: { columns: LLM_CHAT_FILTER_COLUMNS },

@@ -519,48 +519,6 @@
     "extra_options": [],
     "custom": []
   },
-  "news_feeds": {
-    "search": [
-      "name",
-      "enabled"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_items": {
-    "search": [
-      "news_feed_id",
-      "news_source_id",
-      "external_id",
-      "title",
-      "content",
-      "url",
-      "media_status",
-      "parent_id"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_scripts": {
-    "search": [
-      "name",
-      "builtin",
-      "slug"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_sources": {
-    "search": [
-      "name",
-      "health",
-      "enabled",
-      "news_feed_id",
-      "news_script_id"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
   "notepads": {
     "search": [],
     "extra_options": [],

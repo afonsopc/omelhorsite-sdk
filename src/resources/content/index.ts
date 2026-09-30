@@ -4,7 +4,6 @@ import { type ApiClient, Resource } from "../../http";
 import { AnalysisNamespace } from "./analysis";
 import { BlogsNamespace } from "./blogs";
 import { FeedbacksNamespace } from "./feedbacks";
-import { NewsNamespace } from "./news/index";
 import { JokesNamespace } from "./jokes";
 import { NotificationsNamespace } from "./notifications";
 import { ServiceUsagesNamespace } from "./serviceUsages";
@@ -15,7 +14,6 @@ import { SpaceInvadersNamespace } from "./spaceInvaders";
 export * from "./analysis";
 export * from "./blogs";
 export * from "./feedbacks";
-export * from "./news/index";
 export * from "./jokes";
 export * from "./notifications";
 export * from "./serviceUsages";
@@ -26,7 +24,7 @@ export * from "./spaceInvaders";
 /**
  * The `content` namespace, reachable as `oms.content`.
  *
- * An umbrella over ten unrelated corners of the API. Nothing is shared between
+ * An umbrella over nine unrelated corners of the API. Nothing is shared between
  * them, so mount the sub-namespaces directly if a flatter surface reads better
  * - each one is exported on its own.
  */
@@ -49,8 +47,6 @@ export class ContentNamespace extends Resource {
   readonly analysis: AnalysisNamespace;
   /** The Space Invaders leaderboard. */
   readonly spaceInvaders: SpaceInvadersNamespace;
-  /** News: feeds, sources, scripts and the items they produce. See {@link NewsNamespace}. */
-  readonly news: NewsNamespace;
 
   constructor(http: ApiClient) {
     super(http);
@@ -63,6 +59,5 @@ export class ContentNamespace extends Resource {
     this.serviceUsages = new ServiceUsagesNamespace(http);
     this.analysis = new AnalysisNamespace(http);
     this.spaceInvaders = new SpaceInvadersNamespace(http);
-    this.news = new NewsNamespace(http);
   }
 }
