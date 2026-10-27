@@ -6,18 +6,18 @@ import type { BASE_FILTER_COLUMNS, ListParams } from "../../listing";
 import type { Id, Paginated, RequestOptions, Timestamp } from "../../types";
 
 /** The identity providers this server accepts. */
-export const IDENTITY_PROVIDERS = ["google_oauth2", "github", "spotify"] as const;
+export const IDENTITY_PROVIDERS = ["pocket_id", "spotify"] as const;
 
 /**
- * One of {@link IDENTITY_PROVIDERS}. Note `"google_oauth2"`, not `"google"`:
- * it is the exact value the server stores and matches on.
+ * One of {@link IDENTITY_PROVIDERS}. `"pocket_id"` is the sign-in
+ * provider; `"spotify"` can only be linked, never used to sign in.
  */
 export type IdentityProvider = (typeof IDENTITY_PROVIDERS)[number];
 
 /**
  * A social login linked to your account.
  *
- * This is OAuth coming IN - signing in with Google, GitHub or Spotify - and it
+ * This is OAuth coming IN - signing in with Pocket ID, or linking Spotify - and it
  * is the opposite direction from {@link AuthorizedApplication}.
  *
  * Seven fields and NOTHING else, which is the interesting part: the server also
@@ -54,7 +54,7 @@ export interface ListLinkedIdentitiesParams extends ListParams<(typeof LINKED_ID
 }
 
 /**
- * `oms.admin.identities` - the Google, GitHub and Spotify logins linked to
+ * `oms.admin.identities` - the Pocket ID and Spotify logins linked to
  * YOUR account.
  *
  * Any authenticated user, and strictly their own rows: the listing is narrowed
@@ -78,7 +78,7 @@ export class LinkedIdentitiesNamespace extends Resource {
    * (default page size applies even when you do not ask) and it answers ETag
    * and `304`.
    *
-   * In practice this returns at most three rows, one per provider, since
+   * In practice this returns at most two rows, one per provider, since
    * `(provider, uid)` is unique and a person has one account per provider. The
    * pagination is the framework's, not a hint that the list is long.
    */
@@ -99,11 +99,9 @@ export class LinkedIdentitiesNamespace extends Resource {
    * else's identity id is a `404` and never a `403`.
    *
    * **This is the last-credential footgun.** Nothing here checks that you still
-   * have another way in. An account created through a provider gets a random
-   * UUID as its password, which nobody knows, so unlinking the only identity on
-   * such an account can lock it out until a password reset is done through
-   * email. Check what else the account has - a password, a passkey, another
-   * provider - before calling this.
+   * have another way in. Signing in is only possible through
+   * Pocket ID, so unlinking that identity can lock the account out. Check
+   * that the account has another way in before calling this.
    *
    * It does not revoke anything at the provider, and it does not touch the
    * sessions that identity was used to create. Those keep working; this only

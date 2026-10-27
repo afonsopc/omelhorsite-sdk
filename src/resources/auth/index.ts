@@ -7,26 +7,26 @@
  * | | `src/auth/` -> `oms.auth` | this directory |
  * |---|---|---|
  * | credential | OAuth access token (JWT) | opaque `Session` token or cookie |
- * | who issues it | `/oauth/token`, the device grant | `POST /sessions` |
+ * | who issues it | `/oauth/token`, the device grant | `POST /sessions/adopt` |
  * | authority | only the granted scopes | the whole account |
  * | who uses it | third-party apps and automation | first-party apps |
  * | reaches | endpoints declaring an `oauth_scope` | everything |
  *
  * `enforce_oauth_scope!` denies by omission, so an OAuth token cannot reach
  * most of the API at all. A first-party client signs in with
- * {@link AuthSessionsNamespace.signIn} or a passkey and holds a session token;
+ * OAuth through Pocket ID and holds a session token;
  * a third-party client does the device grant and holds a scoped one.
  *
  * The two namespaces mount at the top level rather than under a shared parent,
- * because `oms.auth` is already taken by OAuth and burying sign-in one level
- * deeper than sign-out would read worse than either:
+ * because `oms.auth` is already taken by OAuth:
  *
  * ```ts
+ * // Send the browser to `${baseUrl}/auth/pocket_id?mode=signin`; it comes back
+ * // with `?ticket=...`.
  * const anon = new Oms({ baseUrl });
- * const session = await anon.sessions.signIn({ email, password });
+ * const session = await anon.sessions.adopt(ticket);
  * const oms = new Oms({ baseUrl, token: session.token });
  *
- * await oms.passkeys.list();
  * await oms.account.sessions.list();  // the sessions you already have
  * await oms.sessions.signOut();       // end the one you are holding
  * ```
@@ -36,5 +36,4 @@
  * credential, `account.sessions` administers the ones that exist.
  */
 
-export * from "./passkeys";
 export * from "./sessions";

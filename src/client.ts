@@ -17,7 +17,6 @@ import { ApiClient, type TokenProvider } from "./http";
 import { local, type LocalNamespace } from "./local/index";
 import { AccountNamespace } from "./resources/account";
 import { AdminNamespace } from "./resources/admin";
-import { PasskeysNamespace } from "./resources/auth/passkeys";
 import { AuthSessionsNamespace } from "./resources/auth/sessions";
 import { ChestsNamespace } from "./resources/chests";
 import { ContentNamespace } from "./resources/content";
@@ -143,10 +142,8 @@ export class Oms {
 
   /** OAuth: refreshing, revoking, the RFC 8628 device grant, OIDC discovery. */
   readonly auth: AuthNamespace;
-  /** Password sign-in, sign-up, and the emailed six-digit ceremonies. */
+  /** Adopting a sign-in ticket, signing out, and the emailed six-digit ceremonies. */
   readonly sessions: AuthSessionsNamespace;
-  /** WebAuthn credentials: register one, sign in with one, list, revoke. */
-  readonly passkeys: PasskeysNamespace;
   /** The signed-in user, their profile, and their usage report. */
   readonly account: AccountNamespace;
   /** Support tickets and their message threads. */
@@ -233,7 +230,6 @@ export class Oms {
 
     this.auth = new AuthNamespace(this.http);
     this.sessions = new AuthSessionsNamespace(this.http);
-    this.passkeys = new PasskeysNamespace(this.http);
     this.account = new AccountNamespace(this.http);
     this.tickets = new TicketsNamespace(this.http);
     this.storage = new StorageNamespace(this.http);

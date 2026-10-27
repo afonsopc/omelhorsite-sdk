@@ -100,65 +100,6 @@ function sessionRow(overrides: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
-describe("signIn", () => {
-  test("posts the credentials and hands back the token with the user inlined", async () => {
-    const { sessions, calls } = harness([{ status: 201, body: sessionRow({ token: "the-uuid" }) }]);
-
-    const session = await sessions.signIn({ email: "A@Example.com", password: "hunter2" });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.method).toBe("POST");
-    expect(calls[0]!.path).toBe("/sessions");
-    expect(calls[0]!.body).toEqual({ email: "A@Example.com", password: "hunter2" });
-    expect(session.token).toBe("the-uuid");
-    // The :token view INHERITS the base view, so the inline user is there and a
-    // GET /account straight after sign-in is a wasted round trip.
-    expect(session.user.handle).toBe("afonso");
-  });
-
-  // The email is normalised server-side. Normalising it here too would make the
-  // SDK and the server disagree about what the user typed for no gain.
-  test("sends the address exactly as given, without lowercasing it", async () => {
-    const { sessions, calls } = harness([{ status: 201, body: sessionRow({ token: "t" }) }]);
-
-    await sessions.signIn({ email: "  Mixed@Case.PT  ", password: "p" });
-
-    expect((calls[0]!.body as { email: string }).email).toBe("  Mixed@Case.PT  ");
-  });
-
-  test("carries no credential of its own in token mode: sign-in is anonymous", async () => {
-    const { sessions, calls } = harness([{ status: 201, body: sessionRow({ token: "t" }) }]);
-
-    await sessions.signIn({ email: "a@b.pt", password: "p" });
-
-    expect(calls[0]!.headers["Authorization"]).toBeUndefined();
-    expect(calls[0]!.credentials).toBe("omit");
-  });
-
-  // Cookie mode is the web app's mode, and it is the one where the SDK cannot
-  // read the credential it just established: the Set-Cookie is httpOnly. All
-  // the SDK controls is that the browser is ASKED to keep it.
-  test("asks the browser to keep the cookie in cookie mode, and still sends no header", async () => {
-    const { sessions, calls } = harness([{ status: 201, body: sessionRow({ token: "t" }) }], {
-      sessionCookie: true,
-    });
-
-    const session = await sessions.signIn({ email: "a@b.pt", password: "p" });
-
-    expect(calls[0]!.credentials).toBe("include");
-    expect(calls[0]!.headers["Authorization"]).toBeUndefined();
-    // The token is in the body even in cookie mode. The SDK returns it; the
-    // documented rule is that a cookie-mode host must not persist it.
-    expect(session.token).toBe("t");
-  });
-
-  test("a wrong password is an auth error, not a generic one", async () => {
-    const { sessions } = harness([{ status: 401, body: "Invalid email address or password." }]);
-
-    await expect(sessions.signIn({ email: "a@b.pt", password: "no" })).rejects.toBeInstanceOf(OmsAuthError);
-  });
-});
-
 describe("signOut", () => {
   test("costs one request, to the placeholder path, and never names a real id", async () => {
     const { sessions, calls } = harness([{ status: 204 }]);
@@ -270,50 +211,6 @@ describe("current and oauthTicket", () => {
 });
 
 describe("the two-step email flows", () => {
-  test("signUpStart sends only the address and returns the bare string body", async () => {
-    const { sessions, calls } = harness([{ status: 200, body: "Verification code sent to your email." }]);
-
-    const message = await sessions.signUpStart("new@user.pt");
-
-    expect(calls[0]!.path).toBe("/users/create_start");
-    expect(calls[0]!.body).toEqual({ email: "new@user.pt" });
-    // Bare JSON strings, not objects. A caller reaching for .message finds
-    // undefined.
-    expect(message).toBe("Verification code sent to your email.");
-  });
-
-  test("signUpComplete sends the four permitted fields and no handle", async () => {
-    const { sessions, calls } = harness([{ status: 201, body: { id: "user-2", handle: "novo" } }]);
-
-    await sessions.signUpComplete({ email: "new@user.pt", code: "012345", name: "Novo", password: "p" });
-
-    expect(calls[0]!.path).toBe("/users/create_end");
-    expect(calls[0]!.body).toEqual({ email: "new@user.pt", code: "012345", name: "Novo", password: "p" });
-    // handle is generated server-side from the name; sending one would be
-    // dropped in silence and would read like it had been honoured.
-    expect(Object.keys(calls[0]!.body as object)).not.toContain("handle");
-  });
-
-  test("signUpComplete does not sign anyone in", async () => {
-    const { sessions, calls } = harness([{ status: 201, body: { id: "user-2" } }]);
-
-    await sessions.signUpComplete({ email: "a@b.pt", code: "111111", name: "N", password: "p" });
-
-    // One request. A namespace that quietly chained POST /sessions would hide
-    // the fact that the caller has to do it, and would sign the user in on a
-    // client that cannot hold the token.
-    expect(calls).toHaveLength(1);
-  });
-
-  test("resetPasswordComplete sends only email, code and the new password", async () => {
-    const { sessions, calls } = harness([{ status: 200, body: { id: "user-1" } }]);
-
-    await sessions.resetPasswordComplete({ email: "a@b.pt", code: "222222", password: "novo" });
-
-    expect(calls[0]!.path).toBe("/users/reset_password_end");
-    expect(calls[0]!.body).toEqual({ email: "a@b.pt", code: "222222", password: "novo" });
-  });
-
   test("verifyEmailStart sends no body and verifyEmailComplete carries the code", async () => {
     const { sessions, calls } = harness([
       { status: 200, body: "Verification code sent to your email." },
@@ -381,7 +278,7 @@ describe("the two-step email flows", () => {
   test("a wrong code is a 404, indistinguishable from an expired or burned one", async () => {
     const { sessions } = harness([{ status: 404, body: "Invalid Verification" }]);
 
-    const failure = sessions.signUpComplete({ email: "a@b.pt", code: "000000", name: "N", password: "p" });
+    const failure = sessions.deleteAccountComplete("000000");
 
     await expect(failure).rejects.toMatchObject({ status: 404 });
   });

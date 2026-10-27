@@ -346,7 +346,7 @@ describe("authorizedApplications", () => {
 describe("identities", () => {
   test("list pages through the list DSL rather than sending a bare request", async () => {
     const { admin, calls } = harness([
-      { id: "id_1", provider: "github", email: null, name: null, avatar_url: null, created_at: "", updated_at: "" },
+      { id: "id_1", provider: "pocket_id", email: null, name: null, avatar_url: null, created_at: "", updated_at: "" },
     ]);
 
     const page = await admin.identities.list({ pageSize: 25 });
@@ -354,7 +354,7 @@ describe("identities", () => {
     expect(calls[0]?.search).toContain("modifiers[page]=1:25");
     expect(calls[0]?.search).toContain("modifiers[order]=created_at:desc");
     expect(page.items).toHaveLength(1);
-    expect(page.items[0]?.provider).toBe("github");
+    expect(page.items[0]?.provider).toBe("pocket_id");
   });
 
   test("destroy is a 204 and resolves to nothing", async () => {

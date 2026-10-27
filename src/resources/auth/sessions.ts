@@ -1,15 +1,14 @@
 /**
- * The `sessions` namespace: establishing a credential, ending it, and the
- * two-step email flows that create an account, reset a password, move an
- * address or delete the account.
+ * The `sessions` namespace: adopting a credential, ending it, and the
+ * two-step email flows that move an address or delete the account.
  *
  * This is the module the rest of the SDK stands on. Every other namespace
  * assumes a credential already exists; this one is where it comes from.
  *
  * ## What a credential actually is
  *
- * An opaque UUID, and nothing more. `POST /sessions` mints one and hands it
- * back as `token`. That UUID IS the credential.
+ * An opaque UUID, and nothing more. `POST /sessions/adopt` hands one
+ * back as `token`, after the Pocket ID sign-in. That UUID IS the credential.
  *
  * There is no JWT, no signature to verify, no `exp`, no refresh token and no
  * rotation. A session token never expires on its own: it lives until the
@@ -53,7 +52,7 @@
  * ## Cookie mode and token mode
  *
  * Sign-in works in BOTH, and the difference is only in what you do with the
- * answer. See {@link AuthSessionsNamespace.signIn}.
+ * answer. See {@link AuthSessionsNamespace.adopt}.
  *
  * The cookie is named `oms_session` ({@link SESSION_COOKIE_NAME}) and is set by
  * every session-minting endpoint with `httpOnly`, `secure` in production,
@@ -245,49 +244,18 @@ export function isVerificationCode(value: string): boolean {
   return new RegExp(`^[0-9]{${VERIFICATION_CODE_LENGTH}}$`).test(value);
 }
 
-/** Credentials for {@link AuthSessionsNamespace.signIn}. */
-export interface SignInInput {
-  /** Trimmed and lowercased server-side; send it as the user typed it. */
-  readonly email: string;
-  /**
-   * Compared in constant time: a wrong password and an unknown address take
-   * the same time and give the same
-   * message, so this endpoint cannot be used to test whether an account exists.
-   */
-  readonly password: string;
-}
-
-/**
- * What `POST /sessions` answers with: the session record plus, ONCE, the token.
- *
- * Everything an ordinary {@link AccountSession} carries is here too, including
- * the inlined `user`, plus `token`. That inline user saves a round trip: there
- * is no need to call `oms.account.me()` straight after signing in.
- *
- * `token` appears in this response and in NO other. Nothing else in the API
- * ever renders it again: `GET /sessions` and `GET /sessions/mine` never
- * include a `token` field. Lose it and the only way back is to
- * sign in again, minting another row.
- */
-export interface SignedInSession extends AccountSession {
-  /**
-   * The credential. A bare UUID, no prefix.
-   *
-   * Store it where the platform stores secrets (Keychain / Keystore via
-   * SecureStore on React Native, the OS keyring on a desktop). Do NOT store it
-   * when you are in cookie mode - see {@link AuthSessionsNamespace.signIn}.
-   */
-  readonly token: string;
-  /** The signed-in user, rendered inline. Always present on this view. */
-  readonly user: User;
-}
-
 /**
  * What `POST /sessions/adopt` answers with. Two fields short of a session: the
  * endpoint returns only the token, not the record.
  */
 export interface AdoptedSession {
-  /** The credential, same kind of value as {@link SignedInSession.token}. */
+  /**
+   * The credential. A bare UUID, no prefix.
+   *
+   * Store it where the platform stores secrets (Keychain / Keystore via
+   * SecureStore on React Native, the OS keyring on a desktop). Do NOT store it
+   * when you are in cookie mode.
+   */
   readonly token: string;
 }
 
@@ -301,32 +269,6 @@ export interface SessionOAuthTicket {
    * {@link AuthSessionsNamespace.adopt}.
    */
   readonly ticket: string;
-}
-
-/** Arguments for {@link AuthSessionsNamespace.signUpComplete}. */
-export interface SignUpInput {
-  /** The address the code was sent to. Must match `signUpStart` exactly. */
-  readonly email: string;
-  /** The six digits from the email. */
-  readonly code: string;
-  /**
-   * Display name, 1 to 50 characters. The `handle` is NOT settable here: the
-   * server generates one from this name. Change it
-   * afterwards with `oms.account.update({ handle })`.
-   */
-  readonly name: string;
-  /** The password. The backend enforces no minimum beyond presence. */
-  readonly password: string;
-}
-
-/** Arguments for {@link AuthSessionsNamespace.resetPasswordComplete}. */
-export interface ResetPasswordInput {
-  /** The address the code was sent to. */
-  readonly email: string;
-  /** The six digits from the email. */
-  readonly code: string;
-  /** The new password. This is the only field the call changes. */
-  readonly password: string;
 }
 
 /** Arguments for {@link AuthSessionsNamespace.changeEmailComplete}. */
@@ -363,90 +305,6 @@ export interface ListUsersParams extends ListParams<(typeof USER_FILTER_COLUMNS)
  * session.
  */
 export class AuthSessionsNamespace extends Resource {
-  // ---------------------------------------------------------------- sign-in
-
-  /**
-   * `POST /sessions` - trades an email and a password for a session token.
-   *
-   * Answers `201` with {@link SignedInSession}: the session row, the signed-in
-   * user inline, and the token, which appears here and nowhere else ever again.
-   *
-   * ## What to do with the answer, per mode
-   *
-   * **Token mode** (React Native, Bun, anything not served from
-   * `omelhorsite.pt`): store `token` in the platform's secret store and build a
-   * client with it. The client you called this on has no credential, and adding
-   * one to an existing client is not possible - `Oms` takes its token at
-   * construction.
-   *
-   * ```ts
-   * const anon = new Oms({ baseUrl });
-   * const session = await anon.sessions.signIn({ email, password });
-   * await secureStore.set("oms_token", session.token);
-   * const oms = new Oms({ baseUrl, token: session.token });
-   * ```
-   *
-   * **Cookie mode** (`new Oms({ sessionCookie: true })`, a first-party page on
-   * `omelhorsite.pt` or `music.omelhorsite.pt`): the response carries
-   * `Set-Cookie: oms_session=...` and, because the transport sends
-   * `credentials: "include"`, the browser stores it. The SAME client is
-   * authenticated from the next call onwards; there is nothing to construct and
-   * nothing to store.
-   *
-   * ```ts
-   * const oms = new Oms({ sessionCookie: true });
-   * await oms.sessions.signIn({ email, password });
-   * const me = await oms.account.me(); // already authenticated
-   * ```
-   *
-   * **In cookie mode, throw the token away.** It is still in the response body,
-   * in plain JSON, readable by any script on the page - the httpOnly cookie
-   * cannot hide what the body already said. Persisting it to `localStorage`
-   * re-creates precisely the XSS-exfiltratable copy the cookie mode exists to
-   * eliminate, and it also gives you a second credential that outlives the
-   * first: sign out, and the cookie dies while the stored token keeps working.
-   *
-   * Note that an `Oms` cannot be both: passing `sessionCookie: true` together
-   * with a token throws a `TypeError` at construction, deliberately, so that no
-   * request ever carries two credentials and leaves the server to choose.
-   *
-   * ## Cost and failure
-   *
-   * Throttled to **10 POSTs per minute per IP**, which is a password-guessing
-   * bound and is keyed by address, so several users behind one NAT share it.
-   * The throttle matches a normalised path, so `/sessions/`, `//sessions` and
-   * `/sessions.json` all count against the same bucket.
-   *
-   * Every successful sign-in creates a session AND sends the owner a login
-   * alert. Signing in once per process invocation is how a device list fills up
-   * with a hundred identical entries; persist the token instead.
-   *
-   * Retries: an ambiguous network failure is NOT replayed, because this is a
-   * `POST` and the transport only replays safe methods by default. That is the
-   * right default here - a replay after a lost response mints a second session.
-   * A `429` IS still waited out and retried, which on a login screen can mean a
-   * silent minute-long pause; pass `retry: false` if you would rather show the
-   * user the rate-limit error immediately.
-   *
-   * Send a meaningful `clientName` on the `Oms` (it becomes `X-Oms-Client`) and,
-   * where the platform lets you set it, a real `User-Agent`: the server derives
-   * the session's `name`, `description` and `device_type` from the User-Agent of
-   * THIS request, and a blank one produces an unhelpful row in the user's own
-   * device list that they cannot fix except by renaming it.
-   *
-   * @throws {OmsAuthError} 401 `"Invalid email address or password."` for a
-   *   wrong password, an unknown address, and a deactivated account alike. The
-   *   three are not distinguishable, on purpose.
-   * @throws {OmsQuotaError} 429 once the per-IP login budget is spent.
-   */
-  async signIn(input: SignInInput, options: RequestOptions = {}): Promise<SignedInSession> {
-    return this.http.post<SignedInSession>(
-      "/sessions",
-      { email: input.email, password: input.password },
-      options,
-    );
-  }
-
   /**
    * `DELETE /sessions/:id` - ends the session THIS credential is using.
    *
@@ -569,7 +427,7 @@ export class AuthSessionsNamespace extends Resource {
    *
    * Unauthenticated by design: this IS the sign-in step. Call it on a client
    * with no credential. Answers `201 {"token": "..."}` and sets the cookie,
-   * exactly like {@link signIn}, so the same "which mode am I in" reasoning
+   * so the same "which mode am I in" reasoning
    * applies to the token it returns.
    *
    * ## MUST NOT BE RETRIED, and this method enforces that
@@ -622,154 +480,6 @@ export class AuthSessionsNamespace extends Resource {
    */
   async oauthTicket(options: RequestOptions = {}): Promise<SessionOAuthTicket> {
     return this.http.get<SessionOAuthTicket>("/sessions/oauth_ticket", options);
-  }
-
-  // ------------------------------------------------- account creation (OTP)
-
-  /**
-   * `POST /users/create_start` - emails a six-digit code to an address that
-   * does not have an account yet.
-   *
-   * Step one of two. Nothing is created here: the row appears only when
-   * {@link signUpComplete} presents the code back. Anonymous, and it must be -
-   * the caller has no account yet.
-   *
-   * Answers `200` with a BARE JSON STRING, not an object:
-   * `"Verification code sent to your email."`. Several endpoints in this
-   * namespace do that; the transport parses it into a `string`, so read it as
-   * one and do not reach for a `.message` that is not there.
-   *
-   * This is the one `*_start` in the family that leaks whether an address is
-   * registered: it answers `409 "Email already registered."` when it is. That
-   * is a deliberate trade for a usable signup form, and it is why
-   * {@link resetPasswordStart} does the opposite.
-   *
-   * Issuing a code DELETES any live code for the same address and flow. One
-   * code per flow per address, always. A user who asks for a second code and
-   * then types the first
-   * one gets `404 "Invalid Verification"` and, worse, spends one of the five
-   * guesses belonging to the code they cannot see. Tell them the old code is
-   * dead when they request a new one.
-   *
-   * Throttled hard, and shared across all four `*_start` endpoints of the
-   * family: **4 per minute AND 20 per hour, per IP**. Both windows apply. This
-   * is anti-email-bombing, and the hourly one is what a "resend code" button
-   * with no cooldown will hit. Put a client-side cooldown on that button.
-   *
-   * @throws {OmsApiError} 409 when the address already has an account.
-   * @throws {OmsApiError} 422 with an array of validation messages when the
-   *   address is not a valid email.
-   * @throws {OmsQuotaError} 429 on either the per-minute or the hourly bucket.
-   */
-  async signUpStart(email: string, options: RequestOptions = {}): Promise<string> {
-    return this.http.post<string>("/users/create_start", { email }, options);
-  }
-
-  /**
-   * `POST /users/create_end` - presents the code and creates the account.
-   *
-   * Answers `201` with the new {@link User}. Anonymous.
-   *
-   * ## IT DOES NOT SIGN YOU IN
-   *
-   * No session is created and no token is returned. The account exists and the
-   * caller is still anonymous. Follow it immediately with {@link signIn} using
-   * the same email and password; forgetting it is the classic "signup worked
-   * but the app is still on the login screen" bug.
-   *
-   * ```ts
-   * await oms.sessions.signUpStart(email);
-   * // user reads the email, types six digits
-   * await oms.sessions.signUpComplete({ email, code, name, password });
-   * const session = await oms.sessions.signIn({ email, password });
-   * ```
-   *
-   * `handle` cannot be chosen here: the parameter is ignored, and the server
-   * generates one from `name`. Let the user change it afterwards with
-   * `oms.account.update({ handle })`, where 15 characters is the ceiling.
-   *
-   * Consuming the code also marks the address as verified.
-   * The address is proven, so a freshly signed-up account is never in the
-   * "verify your email" limbo.
-   *
-   * Throttled to **10 a minute per IP**, shared with the other three `*_end`
-   * endpoints. Remember the per-code budget is separate and much smaller:
-   * {@link VERIFICATION_CODE_MAX_ATTEMPTS} wrong guesses destroy the code
-   * outright.
-   *
-   * @throws {OmsApiError} 404 `"Invalid Verification"` for a wrong code, an
-   *   expired code, a code issued for a different address, and a code that has
-   *   already been burned. All four look identical.
-   * @throws {OmsApiError} 422 with validation messages when the code was right
-   *   but the account could not be created - a name that is too long, an
-   *   address taken in the meantime. The code is CONSUMED by then, so the user
-   *   has to restart at {@link signUpStart}.
-   */
-  async signUpComplete(input: SignUpInput, options: RequestOptions = {}): Promise<User> {
-    return this.http.post<User>(
-      "/users/create_end",
-      { email: input.email, code: input.code, name: input.name, password: input.password },
-      options,
-    );
-  }
-
-  // -------------------------------------------------- password reset (OTP)
-
-  /**
-   * `POST /users/reset_password_start` - emails a reset code, if the address is
-   * registered.
-   *
-   * Anonymous. **Always answers `200` with the same bare string**, whether or
-   * not the address exists: `"If that email is registered, password reset
-   * instructions have been sent."`. That is anti-enumeration, and it is the
-   * deliberate opposite of {@link signUpStart}, which does tell you. Do not
-   * present this result to the user as confirmation that mail is on its way to
-   * a real account, because it is not evidence of that.
-   *
-   * A real send also sends the owner a security alert.
-   *
-   * Same throttle family as every other `*_start`: **4 a minute and 20 an hour
-   * per IP**, shared.
-   */
-  async resetPasswordStart(email: string, options: RequestOptions = {}): Promise<string> {
-    return this.http.post<string>("/users/reset_password_start", { email }, options);
-  }
-
-  /**
-   * `POST /users/reset_password_end` - presents the code and sets a new
-   * password.
-   *
-   * Anonymous, and answers `200` with the updated {@link User}. `password` is
-   * the ONLY field it writes; anything else in the body is dropped.
-   *
-   * It does NOT sign you in and it does NOT revoke other sessions. Resetting a
-   * password because it may have leaked leaves every existing session token
-   * alive, since a session is a row and not a signature over the password. If
-   * you are building a "my account was compromised" flow, changing the password
-   * is not enough on its own, and this API gives a user no way to end their own
-   * other sessions ({@link signOut} only ends the caller's). Escalating to an
-   * administrator and {@link deactivateUser} is the only lever that clears them.
-   *
-   * Consuming the code marks the address as verified: proving control of the
-   * mailbox verifies the address even if it never was verified before.
-   *
-   * Throttled to **10 a minute per IP**, shared with the other `*_end`
-   * endpoints, on top of the per-code budget of
-   * {@link VERIFICATION_CODE_MAX_ATTEMPTS}.
-   *
-   * @throws {OmsApiError} 404 `"Invalid Verification"` for a wrong, expired,
-   *   burned or mismatched code; also `"User not found."` in the narrow race
-   *   where the account is deleted between the code being verified and the row
-   *   being loaded.
-   * @throws {OmsApiError} 422 with validation messages when the new password is
-   *   rejected. The code is already consumed at that point.
-   */
-  async resetPasswordComplete(input: ResetPasswordInput, options: RequestOptions = {}): Promise<User> {
-    return this.http.post<User>(
-      "/users/reset_password_end",
-      { email: input.email, code: input.code, password: input.password },
-      options,
-    );
   }
 
   // --------------------------------------------------- email change (OTP x2)

@@ -242,7 +242,6 @@ describe("namespace registry", () => {
       "movies",
       "music",
       "notepads",
-      "passkeys",
       "quotas",
       "realtime",
       "search",
