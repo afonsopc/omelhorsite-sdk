@@ -10,6 +10,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { AuthNamespace } from "../src/auth/index";
+import { ID_ISSUER, ID_PATHS } from "../src/auth/id";
 import {
   DEVICE_CODE_GRANT_TYPE,
   OmsDeviceDeniedError,
@@ -104,13 +105,13 @@ describe("device.start", () => {
     expect(calls.length).toBe(1);
     const call = calls[0]!;
     expect(call.method).toBe("POST");
-    expect(call.url).toBe(`${BASE_URL}/oauth/authorize_device`);
+    expect(call.url).toBe(`${ID_ISSUER}${ID_PATHS.deviceAuthorization}`);
     expect(call.headers["content-type"]).toBe("application/x-www-form-urlencoded");
     expect(call.headers["authorization"]).toBeUndefined();
 
     const params = new URLSearchParams(call.body);
     expect(params.get("client_id")).toBe(CLIENT_ID);
-    expect(params.get("scope")).toBe("openid storage:read");
+    expect(params.get("scope")).toBe("openid storage:read offline_access");
 
     expect(grant.deviceCode).toBe(DEVICE_CODE);
     expect(grant.userCode).toBe("0A44L90H");
@@ -121,12 +122,12 @@ describe("device.start", () => {
     expect(grant.expiresAt).toBeLessThanOrEqual(Date.now() + 600_000);
   });
 
-  test("omits scope entirely when the caller asked for none", async () => {
+  test("asks for openid and offline_access when the caller asked for nothing", async () => {
     const { auth, calls } = fakeFetch(() => json(200, grantBody()));
 
     await auth.device.start({ clientId: CLIENT_ID });
 
-    expect(new URLSearchParams(calls[0]!.body).get("scope")).toBeNull();
+    expect(new URLSearchParams(calls[0]!.body).get("scope")).toBe("openid offline_access");
   });
 
   test("copes with the optional members being absent", async () => {
@@ -407,7 +408,7 @@ describe("auth.refresh and auth.revoke", () => {
     const tokens = await auth.refresh("old-refresh", { clientId: CLIENT_ID });
 
     const params = new URLSearchParams(calls[0]!.body);
-    expect(calls[0]!.url).toBe(`${BASE_URL}/oauth/token`);
+    expect(calls[0]!.url).toBe(`${ID_ISSUER}${ID_PATHS.token}`);
     expect(params.get("grant_type")).toBe("refresh_token");
     expect(params.get("refresh_token")).toBe("old-refresh");
     expect(params.get("client_id")).toBe(CLIENT_ID);
@@ -419,7 +420,7 @@ describe("auth.refresh and auth.revoke", () => {
 
     await auth.revoke("granted-refresh", { clientId: CLIENT_ID });
 
-    expect(calls[0]!.url).toBe(`${BASE_URL}/oauth/revoke`);
+    expect(calls[0]!.url).toBe(`${ID_ISSUER}${ID_PATHS.revoke}`);
     const params = new URLSearchParams(calls[0]!.body);
     expect(params.get("token")).toBe("granted-refresh");
     expect(params.get("client_id")).toBe(CLIENT_ID);

@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { AuthNamespace } from "../src/auth/index";
+import { ID_ISSUER, ID_PATHS } from "../src/auth/id";
 import {
   decodeIdToken,
   isExpired,
@@ -204,7 +205,7 @@ describe("OAuthTokenProvider", () => {
 
     const call = calls[0]!;
     expect(call.method).toBe("POST");
-    expect(call.url).toBe(`${BASE_URL}/oauth/token`);
+    expect(call.url).toBe(`${ID_ISSUER}${ID_PATHS.token}`);
     expect(call.headers["content-type"]).toBe("application/x-www-form-urlencoded");
     expect(call.headers["authorization"]).toBeUndefined();
 

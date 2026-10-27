@@ -24,6 +24,7 @@
  * swapped by libraries often enough that a cached answer goes stale.
  */
 
+import { ID_ISSUER } from "./auth/id";
 import {
   OmsNetworkError,
   OmsTimeoutError,
@@ -203,6 +204,8 @@ export type TokenLike = string | TokenProvider | (() => string | null | Promise<
 export interface ApiClientOptions {
   /** API root. Defaults to {@link DEFAULT_BASE_URL}. */
   readonly baseUrl?: string;
+  /** Where sign-in and tokens live. Defaults to {@link ID_ISSUER}. */
+  readonly idUrl?: string;
   /** Injected fetch. Defaults to the ambient `globalThis.fetch`. */
   readonly fetch?: FetchLike;
   /** Where the bearer token comes from. */
@@ -337,6 +340,8 @@ export interface GetOptions extends RequestOptions {
 export class ApiClient {
   /** API root with no trailing slash. */
   readonly baseUrl: string;
+  /** Root of the sign-in and token endpoints, with no trailing slash. */
+  readonly idUrl: string;
 
   private readonly fetchImpl: FetchLike;
   private readonly customFetch: boolean;
@@ -348,6 +353,7 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.idUrl = (options.idUrl ?? ID_ISSUER).replace(/\/+$/, "");
 
     const injected = options.fetch ?? (globalThis.fetch as FetchLike | undefined);
     if (typeof injected !== "function") {
@@ -562,8 +568,10 @@ export class ApiClient {
 
   /** Absolute URL for a path, with the query string applied. */
   url(path: string, query?: QueryParams): string {
-    const suffix = path.startsWith("/") ? path : `/${path}`;
     const encoded = query ? encodeQuery(query) : "";
+    // An absolute URL (the auth endpoints at id.omelhorsite.pt) goes as is.
+    if (/^https?:\/\//.test(path)) return `${path}${encoded ? `?${encoded}` : ""}`;
+    const suffix = path.startsWith("/") ? path : `/${path}`;
     return `${this.baseUrl}${suffix}${encoded ? `?${encoded}` : ""}`;
   }
 

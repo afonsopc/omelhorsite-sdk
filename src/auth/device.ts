@@ -6,10 +6,8 @@
  * browser and approves, and the client polls the token endpoint until the
  * approval lands.
  *
- * The approval page is rendered by RAILS at `backend.omelhorsite.pt`, not by
- * the Next.js frontend - the browser already holds the host-only `oms_session`
- * cookie for that origin, so the person is usually already signed in when they
- * arrive.
+ * The approval page is id.omelhorsite.pt's own `/device`, where the person is
+ * usually already signed in.
  *
  * The core never opens a browser and never prints a URL. It returns the
  * verification URI and lets the host decide what to do with it.
@@ -18,6 +16,7 @@
 import { OmsApiError, OmsError, OmsNetworkError, OmsQuotaError, OmsTimeoutError } from "../errors";
 import { Resource, sleep } from "../http";
 import type { RequestOptions } from "../types";
+import { ID_PATHS, withOfflineAccess } from "./id";
 import { oauthErrorFrom, oauthPost, OmsOAuthError, type TokenSet, tokenSetFromResponse } from "./tokens";
 
 /** The RFC 8628 `grant_type` URN. Sent literally; `URLSearchParams` escapes it. */
@@ -50,7 +49,7 @@ export interface DeviceAuthorization {
 
 /** Arguments for starting a device flow. */
 export interface StartDeviceFlowInput {
-  /** The registered doorkeeper application id. */
+  /** The client's id at id.omelhorsite.pt, e.g. {@link ID_CLIENT_IDS}.cli. */
   readonly clientId: string;
   /** Space-separated scopes to request. */
   readonly scope?: string;
@@ -115,7 +114,7 @@ export class OmsDeviceDeniedError extends OmsDeviceFlowError {}
  */
 export class DeviceFlow extends Resource {
   /**
-   * `POST /oauth/authorize_device` - asks for a device code and a user code.
+   * `POST /oauth/v2/device_authorization` at id.omelhorsite.pt - asks for a device code and a user code.
    *
    * `scope` is omitted from the request when the caller passes none, and the
    * server then grants `openid` alone. An unknown scope is rejected here
@@ -130,8 +129,8 @@ export class DeviceFlow extends Resource {
     try {
       body = await oauthPost(
         this.http,
-        "/oauth/authorize_device",
-        { client_id: input.clientId, ...(input.scope === undefined ? {} : { scope: input.scope }) },
+        `${this.http.idUrl}${ID_PATHS.deviceAuthorization}`,
+        { client_id: input.clientId, scope: withOfflineAccess(input.scope) },
         options,
       );
     } catch (thrown) {
@@ -144,7 +143,7 @@ export class DeviceFlow extends Resource {
   }
 
   /**
-   * Polls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`
+   * Polls `POST /oauth/v2/token` at id.omelhorsite.pt with `grant_type=urn:ietf:params:oauth:grant-type:device_code`
    * until the person approves.
    *
    * Timing, in order:
@@ -245,7 +244,7 @@ export class DeviceFlow extends Resource {
   private async exchange(clientId: string, deviceCode: string, options: RequestOptions): Promise<TokenSet> {
     const body = await oauthPost(
       this.http,
-      "/oauth/token",
+      `${this.http.idUrl}${ID_PATHS.token}`,
       { grant_type: DEVICE_CODE_GRANT_TYPE, device_code: deviceCode, client_id: clientId },
       options,
     );

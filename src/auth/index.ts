@@ -32,10 +32,12 @@
 import { ApiClient, Resource } from "../http";
 import type { RequestOptions } from "../types";
 import { DeviceFlow } from "./device";
+import { ID_PATHS } from "./id";
 import type { IdentityClaims, TokenSet } from "./tokens";
 import { oauthErrorFrom, oauthPost, parseScopes, tokenSetFromResponse } from "./tokens";
 
 export * from "./device";
+export * from "./id";
 export * from "./tokens";
 
 /** Who the current credential belongs to. */
@@ -110,7 +112,7 @@ export class AuthNamespace extends Resource {
     try {
       body = await oauthPost(
         this.http,
-        "/oauth/token",
+        `${this.http.idUrl}${ID_PATHS.token}`,
         { grant_type: "refresh_token", refresh_token: refreshToken, client_id: input.clientId },
         options,
       );
@@ -121,7 +123,7 @@ export class AuthNamespace extends Resource {
   }
 
   /**
-   * Revokes a token at `POST /oauth/revoke` (RFC 7009). Revoking a refresh
+   * Revokes a token at `POST /oauth/v2/revoke` at id.omelhorsite.pt (RFC 7009). Revoking a refresh
    * token kills the whole grant.
    *
    * Answers `200` both for a real revocation and for a token the server has
@@ -131,7 +133,7 @@ export class AuthNamespace extends Resource {
    */
   async revoke(token: string, input: { clientId: string }, options: RequestOptions = {}): Promise<void> {
     try {
-      await oauthPost(this.http, "/oauth/revoke", { token, client_id: input.clientId }, options);
+      await oauthPost(this.http, `${this.http.idUrl}${ID_PATHS.revoke}`, { token, client_id: input.clientId }, options);
     } catch (thrown) {
       throw oauthErrorFrom(thrown) ?? thrown;
     }
@@ -139,7 +141,7 @@ export class AuthNamespace extends Resource {
 
   /**
    * Reads the OIDC claims of the current credential from
-   * `GET /oauth/userinfo`. `sub` is the user's stable `id`.
+   * `GET /oidc/v1/userinfo` at id.omelhorsite.pt. `sub` is the id.omelhorsite.pt user id.
    *
    * Needs the `openid` scope; without it the answer is 403. Members whose
    * value is null or empty are omitted from the response, so read defensively.
@@ -148,7 +150,7 @@ export class AuthNamespace extends Resource {
    * NOT that the address is wrong. Do not present it as an invalid email.
    */
   async userinfo(options: RequestOptions = {}): Promise<IdentityClaims> {
-    return this.http.get<IdentityClaims>("/oauth/userinfo", options);
+    return this.http.get<IdentityClaims>(`${this.http.idUrl}${ID_PATHS.userinfo}`, options);
   }
 
   /**

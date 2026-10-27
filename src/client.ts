@@ -80,6 +80,8 @@ export interface OmsOptions {
   readonly sessionCookie?: boolean;
   /** API root. Defaults to `https://backend.omelhorsite.pt`. */
   readonly baseUrl?: string;
+  /** Where sign-in and tokens live. Defaults to `https://id.omelhorsite.pt`. */
+  readonly idUrl?: string;
   /**
    * The fetch to talk through. Defaults to `globalThis.fetch`. Injecting one is
    * how a Worker adds a cache, how a test swaps in a double, and how a host
@@ -219,6 +221,7 @@ export class Oms {
 
     this.http = new ApiClient({
       ...(options.baseUrl === undefined ? {} : { baseUrl: options.baseUrl }),
+      ...(options.idUrl === undefined ? {} : { idUrl: options.idUrl }),
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(tokens === undefined ? {} : { tokens }),
       ...(options.sessionCookie === undefined ? {} : { sessionCookie: options.sessionCookie }),
@@ -269,7 +272,7 @@ export class Oms {
    * in-progress request finish under the wrong identity.
    */
   withToken(token: OmsCredential): Oms {
-    return new Oms({ baseUrl: this.http.baseUrl, token });
+    return new Oms({ baseUrl: this.http.baseUrl, idUrl: this.http.idUrl, token });
   }
 
   /** Convenience over {@link withToken} for an OAuth {@link TokenSet}. */
