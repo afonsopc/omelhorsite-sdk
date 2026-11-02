@@ -4,6 +4,11 @@
     "extra_options": [],
     "custom": []
   },
+  "admin/analytics": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "admin/base": {
     "search": [],
     "extra_options": [],
@@ -35,6 +40,11 @@
     "search": [
       "feature"
     ],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/llm_budget": {
+    "search": [],
     "extra_options": [],
     "custom": []
   },
@@ -76,12 +86,27 @@
     "extra_options": [],
     "custom": []
   },
+  "admin/quotas": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "admin/short_links": {
     "search": [],
     "extra_options": [],
     "custom": []
   },
+  "admin/telemetry": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "admin/user_quotas": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "admin/user_services": {
     "search": [],
     "extra_options": [],
     "custom": []
@@ -195,31 +220,26 @@
     ],
     "custom": []
   },
-  "bot_channels": {
+  "calendar_events": {
+    "search": [
+      "title",
+      "category",
+      "status",
+      "source"
+    ],
+    "extra_options": [],
+    "custom": []
+  },
+  "calendar_ics": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "calendars": {
     "search": [
       "name",
-      "kind",
-      "enabled"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "bot_contacts": {
-    "search": [
-      "bot_channel_id",
-      "external_id",
-      "username",
-      "kind",
-      "blocked"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "bot_messages": {
-    "search": [
-      "bot_channel_id",
-      "bot_contact_id",
-      "direction",
+      "slug",
+      "visibility",
       "source"
     ],
     "extra_options": [],
@@ -246,30 +266,6 @@
     "custom": []
   },
   "configs": {
-    "search": [],
-    "extra_options": [],
-    "custom": []
-  },
-  "cron_jobs": {
-    "search": [
-      "name",
-      "enabled",
-      "health",
-      "template_slug"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "cron_runs": {
-    "search": [
-      "cron_job_id",
-      "status",
-      "trigger"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "cron_templates": {
     "search": [],
     "extra_options": [],
     "custom": []
@@ -338,6 +334,51 @@
     "extra_options": [],
     "custom": []
   },
+  "image_generations": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/app_sessions": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/base": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/cable": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/library_searches": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/music": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/storage_auth": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/storage_events": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "internal/users": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "ip_lookup": {
     "search": [],
     "extra_options": [],
@@ -380,24 +421,12 @@
     "extra_options": [],
     "custom": []
   },
-  "llm_chat_messages": {
+  "llm_completions": {
     "search": [],
     "extra_options": [],
     "custom": []
   },
-  "llm_chats": {
-    "search": [
-      "title",
-      "pinned",
-      "archived",
-      "llm_model_id",
-      "tools_enabled",
-      "account_tools_enabled"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "llm_completions": {
+  "llm_decisions": {
     "search": [],
     "extra_options": [],
     "custom": []
@@ -499,6 +528,11 @@
     "extra_options": [],
     "custom": []
   },
+  "music_profiles": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "music_radios": {
     "search": [],
     "extra_options": [],
@@ -509,55 +543,28 @@
     "extra_options": [],
     "custom": []
   },
+  "music/auth": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
   "music/external_search": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music/sessions": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "music/spotify": {
     "search": [],
     "extra_options": [],
     "custom": []
   },
   "my_blogs": {
     "search": [],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_feeds": {
-    "search": [
-      "name",
-      "enabled"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_items": {
-    "search": [
-      "news_feed_id",
-      "news_source_id",
-      "external_id",
-      "title",
-      "content",
-      "url",
-      "media_status",
-      "parent_id"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_scripts": {
-    "search": [
-      "name",
-      "builtin",
-      "slug"
-    ],
-    "extra_options": [],
-    "custom": []
-  },
-  "news_sources": {
-    "search": [
-      "name",
-      "health",
-      "enabled",
-      "news_feed_id",
-      "news_script_id"
-    ],
     "extra_options": [],
     "custom": []
   },
@@ -573,9 +580,13 @@
   },
   "notifications": {
     "search": [
-      "user_id"
+      "user_id",
+      "kind",
+      "read"
     ],
-    "extra_options": [],
+    "extra_options": [
+      "category"
+    ],
     "custom": []
   },
   "oauth_applications": {
@@ -599,6 +610,11 @@
     "custom": []
   },
   "oauth/discovery": {
+    "search": [],
+    "extra_options": [],
+    "custom": []
+  },
+  "osnodata": {
     "search": [],
     "extra_options": [],
     "custom": []
@@ -655,7 +671,9 @@
   "relationships": {
     "search": [
       "requester_id",
-      "accepter_id"
+      "accepter_id",
+      "kind",
+      "status"
     ],
     "extra_options": [
       "user_id"
@@ -784,12 +802,12 @@
     "extra_options": [],
     "custom": []
   },
-  "webauthn_credentials": {
+  "webhooks/id": {
     "search": [],
     "extra_options": [],
     "custom": []
   },
-  "webhooks/telegram": {
+  "webhooks/otlp": {
     "search": [],
     "extra_options": [],
     "custom": []

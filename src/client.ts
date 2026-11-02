@@ -20,8 +20,6 @@ import { AdminNamespace } from "./resources/admin";
 import { AuthSessionsNamespace } from "./resources/auth/sessions";
 import { ChestsNamespace } from "./resources/chests";
 import { ContentNamespace } from "./resources/content";
-import { CronNamespace } from "./resources/cron";
-import { BotsNamespace } from "./resources/bots";
 import { DynamicQrsNamespace } from "./resources/dynamicQrs";
 import { FormsNamespace } from "./resources/forms";
 import { IpLookupNamespace } from "./resources/ipLookup";
@@ -190,10 +188,6 @@ export class Oms {
   readonly search: SearchNamespace;
   /** The language models the signed-in person may pick, and their own usage. */
   readonly llm: LlmNamespace;
-  /** TypeScript scripts the server runs on a schedule as the signed-in person. */
-  readonly cron: CronNamespace;
-  /** Messaging channels (Telegram bots): contacts, conversations, sending. */
-  readonly bots: BotsNamespace;
   /**
    * The WebSocket connection: playback handoff, jams, notifications, job
    * progress. Opens nothing until {@link RealtimeNamespace.connect} is called,
@@ -256,8 +250,6 @@ export class Oms {
     this.realtime = new RealtimeNamespace(this.http);
     this.search = new SearchNamespace(this.http);
     this.llm = new LlmNamespace(this.http);
-    this.cron = new CronNamespace(this.http);
-    this.bots = new BotsNamespace(this.http);
   }
 
   /** The API root this client talks to, with no trailing slash. */

@@ -5,11 +5,20 @@ import { listQuery, paginate } from "../../listing";
 import type { BASE_FILTER_COLUMNS, ListParams } from "../../listing";
 import type { Id, Paginated, RequestOptions, Timestamp } from "../../types";
 
-/** Filter columns of `GET /notifications`, on top of {@link BASE_FILTER_COLUMNS}. `read` and `kind` are not filterable. */
-export const NOTIFICATION_FILTER_COLUMNS = Object.freeze(["user_id"] as const);
+/** Filter columns of `GET /notifications`, on top of {@link BASE_FILTER_COLUMNS}. Filter `read` with `exactSearch`. */
+export const NOTIFICATION_FILTER_COLUMNS = Object.freeze(["user_id", "kind", "read"] as const);
+
+/** `extra_options` keys of `GET /notifications`. */
+export const NOTIFICATION_EXTRA_OPTION_KEYS = Object.freeze(["category"] as const);
+
+/** `extra_options` of `GET /notifications`. */
+export interface NotificationExtraOptions {
+  /** Only the kinds of one category ({@link NOTIFICATION_CATEGORIES}). */
+  readonly category?: NotificationCategory;
+}
 
 /** Filters for {@link NotificationsNamespace.list}. */
-export type ListNotificationsParams = ListParams<(typeof NOTIFICATION_FILTER_COLUMNS)[number]>;
+export type ListNotificationsParams = ListParams<(typeof NOTIFICATION_FILTER_COLUMNS)[number], NotificationExtraOptions>;
 
 /** Primary key of a notification. An INTEGER. */
 export type NotificationId = number;

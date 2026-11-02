@@ -8,10 +8,8 @@
  * `oms.admin.llmAssignments` and `oms.admin.llmUsage`.
  */
 
-import { Resource, type ApiClient } from "../http";
-import { listQuery, paginate } from "../listing";
-import type { ListParams } from "../listing";
-import type { Id, Paginated, QueryParams, RequestOptions, Timestamp } from "../types";
+import { Resource } from "../http";
+import type { Id, QueryParams, RequestOptions } from "../types";
 
 /** What a model can do. Absent keys mean "unknown", not "no". */
 export const LLM_CAPABILITY_KEYS = Object.freeze([
@@ -134,23 +132,10 @@ export interface LlmUsageQuery {
   readonly days?: number;
 }
 
-/** Filter columns of `GET /llm_chats`, on top of the base ones. */
-export const LLM_CHAT_FILTER_COLUMNS = Object.freeze(["title", "pinned", "archived", "llm_model_id", "tools_enabled", "account_tools_enabled"] as const);
-
-export interface ListLlmChatsParams extends ListParams<(typeof LLM_CHAT_FILTER_COLUMNS)[number]> {}
-
-export const LLM_CHAT_ROLES = Object.freeze(["user", "assistant", "system", "tool"] as const);
-export type LlmChatRole = (typeof LLM_CHAT_ROLES)[number];
-
-/** `streaming` while the answer is still being written, then `done` or `error`. */
-export const LLM_CHAT_MESSAGE_STATUSES = Object.freeze(["streaming", "done", "error"] as const);
-export type LlmChatMessageStatus = (typeof LLM_CHAT_MESSAGE_STATUSES)[number];
-
 /**
- * The tools the assistant can use in a chat. `web_search` and `read_url` are
- * the web tools (`tools_enabled`); `search` and `execute` are the account
- * tools (`account_tools_enabled`): the assistant looks up the SDK's type
- * declarations and runs TypeScript against the API as the user.
+ * The tools a model may have used. A completion offers only `web_search` and
+ * `read_url` ({@link LLM_COMPLETION_TOOLS}); `search` and `execute` were the
+ * account tools of the assistant chat, which is gone.
  */
 export const LLM_TOOL_NAMES = Object.freeze(["web_search", "read_url", "search", "execute"] as const);
 export type LlmToolName = (typeof LLM_TOOL_NAMES)[number] | (string & {});
@@ -172,270 +157,6 @@ export interface LlmToolCall {
   readonly summary?: string;
   readonly ms?: number;
   readonly error?: string;
-}
-
-/** One conversation with the assistant. Pinned chats list first, then by `last_message_at`. */
-export interface LlmChat {
-  readonly id: Id;
-  readonly created_at: Timestamp;
-  readonly updated_at: Timestamp;
-  /** Taken from the first question when not set by the caller. */
-  readonly title: string | null;
-  /** The chosen model; `null` means the server's default for chats. */
-  readonly llm_model_id: Id | null;
-  /** The provider's identifier of the model that answered last. */
-  readonly model_id: string | null;
-  readonly pinned: boolean;
-  /** An archived chat can be read but not written to. */
-  readonly archived: boolean;
-  /** Whether the assistant may search the web and read pages in this chat. On by default. */
-  readonly tools_enabled: boolean;
-  /**
-   * Whether the assistant may act on the user's account in this chat (the
-   * `search` and `execute` tools: it reads the SDK's declarations and runs
-   * TypeScript against the API as the user, with a short-lived token that
-   * dies with each answer). Off by default; every write it wants to make
-   * it is told to confirm first.
-   */
-  readonly account_tools_enabled: boolean;
-  readonly last_message_at: Timestamp;
-  readonly message_count: number;
-}
-
-export interface LlmChatMessage {
-  readonly id: Id;
-  readonly created_at: Timestamp;
-  readonly updated_at: Timestamp;
-  readonly llm_chat_id: Id;
-  readonly role: LlmChatRole;
-  readonly content: string;
-  readonly status: LlmChatMessageStatus;
-  readonly model_id: string | null;
-  readonly input_tokens: number | null;
-  readonly output_tokens: number | null;
-  readonly cost: number | null;
-  /** Why an answer ended in `error`, or `"interrupted"` on a `done` answer cut short by the reader. */
-  readonly error: string | null;
-  /** What the assistant did with its tools while writing this answer, in order. */
-  readonly tool_calls: readonly LlmToolCall[];
-  /** From the request to the model until the answer ended, in milliseconds; `null` on questions. */
-  readonly duration_ms: number | null;
-  /** From the request until the first token; `null` when nothing was generated. Tokens per second is `output_tokens / ((duration_ms - first_token_ms) / 1000)`. */
-  readonly first_token_ms: number | null;
-  /** The question this answer belongs to. */
-  readonly parent_id: Id | null;
-}
-
-/** `GET /llm_chats/:id`: the chat plus its messages, oldest first. */
-export interface LlmChatDetail extends LlmChat {
-  readonly messages: LlmChatMessage[];
-}
-
-export interface CreateLlmChatInput {
-  readonly title?: string;
-  /** Must be a model the caller may choose (see {@link LlmNamespace.models}); the server answers `400` otherwise. */
-  readonly llmModelId?: Id;
-  /** Defaults to `true`. */
-  readonly toolsEnabled?: boolean;
-  /** Defaults to `false`. See {@link LlmChat.account_tools_enabled}. */
-  readonly accountToolsEnabled?: boolean;
-}
-
-export interface UpdateLlmChatInput {
-  readonly title?: string | null;
-  readonly llmModelId?: Id | null;
-  readonly pinned?: boolean;
-  readonly archived?: boolean;
-  readonly toolsEnabled?: boolean;
-  readonly accountToolsEnabled?: boolean;
-}
-
-export interface SendLlmChatMessageInput {
-  /** At most 32,000 characters. */
-  readonly content: string;
-  /** Answer with this model and remember it on the chat. */
-  readonly llmModelId?: Id;
-}
-
-/**
- * What a streamed answer yields, in order: any number of `delta` and `tool`
- * events (a tool yields `running` first, then `done` or `error`), then
- * exactly one `done` or `error`. A refusal before the first token (the
- * provider is busy, the daily ceiling is reached, no model is available) is
- * not an event but a thrown `OmsApiError` with status `503`, `429` or `502`,
- * whose body carries `message_id` - the failed answer is kept on the chat so
- * it can be regenerated.
- */
-export type LlmChatStreamEvent =
-  | { readonly type: "delta"; readonly delta: string }
-  | ({ readonly type: "tool" } & LlmToolCall)
-  | {
-      readonly type: "done";
-      readonly messageId: Id;
-      readonly modelId: string | null;
-      readonly inputTokens: number | null;
-      readonly outputTokens: number | null;
-      readonly cost: number | null;
-      readonly durationMs: number | null;
-      readonly firstTokenMs: number | null;
-    }
-  | {
-      readonly type: "error";
-      /** `busy`, `limit`, `unavailable`, `unknown_model` or `interrupted`. */
-      readonly error: string;
-      readonly message: string;
-      readonly messageId: Id | null;
-    };
-
-interface WireStreamFrame {
-  readonly delta?: string;
-  readonly tool?: LlmToolCall;
-  readonly done?: boolean;
-  readonly message_id?: Id | null;
-  readonly model_id?: string | null;
-  readonly input_tokens?: number | null;
-  readonly output_tokens?: number | null;
-  readonly cost?: number | null;
-  readonly duration_ms?: number | null;
-  readonly first_token_ms?: number | null;
-  readonly error?: string;
-  readonly message?: string;
-}
-
-function toEvent(frame: WireStreamFrame): LlmChatStreamEvent | undefined {
-  if (typeof frame.error === "string") {
-    return { type: "error", error: frame.error, message: frame.message ?? frame.error, messageId: frame.message_id ?? null };
-  }
-  if (frame.done === true) {
-    return {
-      type: "done",
-      messageId: frame.message_id ?? "",
-      modelId: frame.model_id ?? null,
-      inputTokens: frame.input_tokens ?? null,
-      outputTokens: frame.output_tokens ?? null,
-      cost: frame.cost ?? null,
-      durationMs: frame.duration_ms ?? null,
-      firstTokenMs: frame.first_token_ms ?? null,
-    };
-  }
-  if (typeof frame.delta === "string" && frame.delta.length > 0) return { type: "delta", delta: frame.delta };
-  if (frame.tool && typeof frame.tool.name === "string") return { type: "tool", ...frame.tool };
-  return undefined;
-}
-
-/** The messages of one chat: send, regenerate, delete. Reached through `oms.llm.chats.messages`. */
-export class LlmChatMessagesNamespace extends Resource {
-  /**
-   * Sends a question and streams the answer. Consume with `for await`; stop
-   * early by aborting `options.signal` - the server keeps what had arrived.
-   * The chat's title is set from the first question.
-   */
-  send(chatId: Id, input: SendLlmChatMessageInput, options: RequestOptions = {}): AsyncGenerator<LlmChatStreamEvent, void, undefined> {
-    const body: Record<string, unknown> = { content: input.content };
-    if (input.llmModelId !== undefined) body["llm_model_id"] = input.llmModelId;
-    return this.stream("POST", `/llm_chats/${encodeURIComponent(chatId)}/messages`, { ...options, body });
-  }
-
-  /**
-   * Answers the same question again. Only the chat's last message qualifies,
-   * and it must be an answer; the old answer is discarded, the new one takes
-   * its place with the same `parent_id`.
-   */
-  regenerate(chatId: Id, messageId: Id, options: RequestOptions = {}): AsyncGenerator<LlmChatStreamEvent, void, undefined> {
-    return this.stream(
-      "POST",
-      `/llm_chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/regenerate`,
-      options,
-    );
-  }
-
-  /**
-   * Removes a message from the end of the chat. Deleting a question also
-   * removes the answers to it; anything earlier answers `400`.
-   */
-  async delete(chatId: Id, messageId: Id, options: RequestOptions = {}): Promise<void> {
-    await this.http.delete<void>(
-      `/llm_chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
-      options,
-    );
-  }
-
-  private async *stream(
-    method: string,
-    path: string,
-    options: RequestOptions & { body?: unknown },
-  ): AsyncGenerator<LlmChatStreamEvent, void, undefined> {
-    let buffer = "";
-    for await (const chunk of this.http.streamText(method, path, options)) {
-      buffer += chunk;
-      for (;;) {
-        const newline = buffer.indexOf("\n");
-        if (newline === -1) break;
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data.length === 0) continue;
-        let frame: WireStreamFrame;
-        try {
-          frame = JSON.parse(data) as WireStreamFrame;
-        } catch {
-          continue;
-        }
-        const event = toEvent(frame);
-        if (event === undefined) continue;
-        yield event;
-        if (event.type === "done" || event.type === "error") return;
-      }
-    }
-    // The connection ended before the frame that says the answer finished.
-    yield { type: "error", error: "interrupted", message: "The answer was cut short.", messageId: null };
-  }
-}
-
-/** The caller's conversations with the assistant. Reached through `oms.llm.chats`. */
-export class LlmChatsNamespace extends Resource {
-  readonly messages: LlmChatMessagesNamespace;
-
-  constructor(http: ApiClient) {
-    super(http);
-    this.messages = new LlmChatMessagesNamespace(http);
-  }
-
-  /** Pinned first, then most recently active. Archived chats are included; filter with `exactSearch: { archived: false }`. */
-  async list(params: ListLlmChatsParams = {}, options: RequestOptions = {}): Promise<Paginated<LlmChat>> {
-    return paginate(params, 50, (at) => this.http.get<LlmChat[]>("/llm_chats", { ...options, query: listQuery(params, at) }));
-  }
-
-  /** The chat with all its messages, oldest first. */
-  async get(id: Id, options: RequestOptions = {}): Promise<LlmChatDetail> {
-    return this.http.get<LlmChatDetail>(`/llm_chats/${encodeURIComponent(id)}`, options);
-  }
-
-  async create(input: CreateLlmChatInput = {}, options: RequestOptions = {}): Promise<LlmChatDetail> {
-    const body: Record<string, unknown> = {};
-    if (input.title !== undefined) body["title"] = input.title;
-    if (input.llmModelId !== undefined) body["llm_model_id"] = input.llmModelId;
-    if (input.toolsEnabled !== undefined) body["tools_enabled"] = input.toolsEnabled;
-    if (input.accountToolsEnabled !== undefined) body["account_tools_enabled"] = input.accountToolsEnabled;
-    return this.http.post<LlmChatDetail>("/llm_chats", body, options);
-  }
-
-  async update(id: Id, input: UpdateLlmChatInput, options: RequestOptions = {}): Promise<LlmChatDetail> {
-    const body: Record<string, unknown> = {};
-    if (input.title !== undefined) body["title"] = input.title;
-    if (input.llmModelId !== undefined) body["llm_model_id"] = input.llmModelId;
-    if (input.pinned !== undefined) body["pinned"] = input.pinned;
-    if (input.archived !== undefined) body["archived"] = input.archived;
-    if (input.toolsEnabled !== undefined) body["tools_enabled"] = input.toolsEnabled;
-    if (input.accountToolsEnabled !== undefined) body["account_tools_enabled"] = input.accountToolsEnabled;
-    return this.http.patch<LlmChatDetail>(`/llm_chats/${encodeURIComponent(id)}`, body, options);
-  }
-
-  /** Removes the chat and every message in it. */
-  async delete(id: Id, options: RequestOptions = {}): Promise<void> {
-    await this.http.delete<void>(`/llm_chats/${encodeURIComponent(id)}`, options);
-  }
 }
 
 /** The tools a completion may hand the model. Each call the model makes counts as one search or one page read. */
@@ -497,14 +218,6 @@ export interface LlmCompletion {
 }
 
 export class LlmNamespace extends Resource {
-  /** Conversations with the assistant. */
-  readonly chats: LlmChatsNamespace;
-
-  constructor(http: ApiClient) {
-    super(http);
-    this.chats = new LlmChatsNamespace(http);
-  }
-
   /** The models the caller may choose, with today's remaining allowance on each. */
   async models(options: RequestOptions = {}): Promise<LlmModelChoice[]> {
     return this.http.get<LlmModelChoice[]>("/llm/models", options);
@@ -512,8 +225,7 @@ export class LlmNamespace extends Resource {
 
   /**
    * `POST /llm/completions` - one answer to a list of messages, with nothing
-   * remembered between calls. For programs; people talk to the assistant
-   * through {@link chats}.
+   * remembered between calls.
    *
    * Every completion counts on the account's daily ceilings (`llm_requests`
    * and `llm_cost_microusd` in `oms.quotas.list()`) and on the chosen model's

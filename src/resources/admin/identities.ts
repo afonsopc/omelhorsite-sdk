@@ -6,18 +6,20 @@ import type { BASE_FILTER_COLUMNS, ListParams } from "../../listing";
 import type { Id, Paginated, RequestOptions, Timestamp } from "../../types";
 
 /** The identity providers this server accepts. */
-export const IDENTITY_PROVIDERS = ["pocket_id", "spotify"] as const;
+export const IDENTITY_PROVIDERS = ["zitadel", "spotify", "pocket_id", "google_oauth2", "github"] as const;
 
 /**
- * One of {@link IDENTITY_PROVIDERS}. `"pocket_id"` is the sign-in
- * provider; `"spotify"` can only be linked, never used to sign in.
+ * One of {@link IDENTITY_PROVIDERS}. `"zitadel"` is the sign-in provider
+ * (id.omelhorsite.pt); `"spotify"` can only be linked, never used to sign in.
+ * `"pocket_id"`, `"google_oauth2"` and `"github"` only appear on links made
+ * before 2026-10-28; none of them signs anybody in any more.
  */
 export type IdentityProvider = (typeof IDENTITY_PROVIDERS)[number];
 
 /**
  * A social login linked to your account.
  *
- * This is OAuth coming IN - signing in with Pocket ID, or linking Spotify - and it
+ * This is OAuth coming IN - signing in through id.omelhorsite.pt, or linking Spotify - and it
  * is the opposite direction from {@link AuthorizedApplication}.
  *
  * Seven fields and NOTHING else, which is the interesting part: the server also
@@ -54,7 +56,7 @@ export interface ListLinkedIdentitiesParams extends ListParams<(typeof LINKED_ID
 }
 
 /**
- * `oms.admin.identities` - the Pocket ID and Spotify logins linked to
+ * `oms.admin.identities` - the id.omelhorsite.pt and Spotify logins linked to
  * YOUR account.
  *
  * Any authenticated user, and strictly their own rows: the listing is narrowed
@@ -100,7 +102,8 @@ export class LinkedIdentitiesNamespace extends Resource {
    *
    * **This is the last-credential footgun.** Nothing here checks that you still
    * have another way in. Signing in is only possible through
-   * Pocket ID, so unlinking that identity can lock the account out. Check
+   * id.omelhorsite.pt (`zitadel`), so unlinking that identity can lock the
+   * account out. Check
    * that the account has another way in before calling this.
    *
    * It does not revoke anything at the provider, and it does not touch the

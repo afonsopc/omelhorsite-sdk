@@ -1,0 +1,82 @@
+# Publishes this package to npm when a version tag (v1.2.3) is pushed.
+#
+# No npm token anywhere: npm trusts this workflow through GitHub's OIDC
+# ("trusted publishing", set once per package on npmjs.com under
+# Settings > Trusted Publisher: user afonsopc, this repository, workflow
+# file publish.yml, no environment). npm adds the provenance statement by
+# itself when the repository is public.
+#
+# Bun does the install, the checks and the build; npm only publishes, because
+# the OIDC exchange lives in the npm CLI.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Node 24 brings npm 11, which is what trusted publishing needs (11.5.1+).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Version
+        id: version
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version $version"
+            exit 1
+          fi
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already on npm, nothing to do"
+          fi
+          npm --version
+
+      # A tag here can be pushed before the @omelhorsite package it needs is
+      # out; wait for it (up to half an hour) instead of failing the install.
+      - name: Wait for @omelhorsite dependencies
+        if: steps.version.outputs.already != 'true'
+        run: |
+          deps=$(node -e "const p=require('./package.json');for(const [n,v] of Object.entries(p.dependencies||{}))if(n.startsWith('@omelhorsite/'))console.log(n+'@'+v)")
+          for dep in $deps; do
+            for i in $(seq 1 60); do
+              [ -n "$(npm view "$dep" version 2>/dev/null)" ] && break
+              echo "waiting for $dep ($i)"; sleep 30
+            done
+            [ -n "$(npm view "$dep" version 2>/dev/null)" ] || { echo "::error::$dep is not on npm"; exit 1; }
+          done
+      - name: Install
+        if: steps.version.outputs.already != 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        if: steps.version.outputs.already != 'true'
+        run: bun run typecheck && bun test && bun run build
+
+      - name: Publish
+        if: steps.version.outputs.already != 'true'
+        run: npm publish --access public --ignore-scripts

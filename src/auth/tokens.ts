@@ -110,13 +110,6 @@ export const OMS_SCOPES = [
   "llm",
   "blogs:read",
   "blogs:write",
-  "news:read",
-  "news:write",
-  "cron:read",
-  "cron:write",
-  "cron:run",
-  "bots:read",
-  "bots:write",
 ] as const;
 
 /** One of {@link OMS_SCOPES}. */

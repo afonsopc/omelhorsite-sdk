@@ -45,7 +45,7 @@ export type RelationshipStatus = "pending" | "accepted";
 /* -------------------------------------------------------------------------- */
 
 /** Filter columns of `GET /relationships`, on top of {@link BASE_FILTER_COLUMNS}. */
-export const RELATIONSHIP_FILTER_COLUMNS = Object.freeze(["requester_id", "accepter_id"] as const);
+export const RELATIONSHIP_FILTER_COLUMNS = Object.freeze(["requester_id", "accepter_id", "kind", "status"] as const);
 
 /** `extra_options` keys of `GET /relationships`. */
 export const RELATIONSHIP_EXTRA_OPTION_KEYS = Object.freeze(["user_id"] as const);

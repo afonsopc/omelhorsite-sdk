@@ -5,6 +5,10 @@
 TypeScript client for the [omelhorsite](https://omelhorsite.pt) API. Works in
 browsers, Bun, Node 18+, React Native and Cloudflare Workers.
 
+One base URL for everything. Behind it the Drive and the chests are served by
+oms-storage and music by oms-music-backend, on the same routes; sign-in and
+tokens live at id.omelhorsite.pt (`idUrl`).
+
 ```sh
 bun add @omelhorsite/sdk
 ```
@@ -82,16 +86,6 @@ const result = await oms.tools.transcription.run(
 `run` starts the job and waits for it. Use `create` + `oms.jobs.wait` if you
 would rather come back to it later.
 
-Talking to the assistant:
-
-```ts
-const chat = await oms.llm.chats.create();
-
-for await (const event of oms.llm.chats.send(chat.id, { content: "Olá!" })) {
-  if (event.type === "delta") process.stdout.write(event.delta);
-}
-```
-
 One answer from a model, for a program rather than a person:
 
 ```ts
@@ -122,17 +116,15 @@ const rows = await oms.http.get<{ id: string }[]>("/some/path");
 ## Namespaces
 
 - `oms.auth` - OAuth: device grant, refresh, revoke, `whoami`. `decodeIdToken(idToken).sub` is the stable identifier; `email` is a contact and `email_verified` is often `false`, so never find or merge users by email.
-- `oms.sessions` - adopt a sign-in ticket, sign out, the emailed code flows. Sign-in itself is OAuth through Pocket ID: send the browser to `{backend}/auth/pocket_id?mode=signin` and trade the returned `?ticket=` with `oms.sessions.adopt(ticket)`.
+- `oms.sessions` - adopt a sign-in ticket, sign out, the emailed code flows. Sign-in itself is OAuth through id.omelhorsite.pt: send the browser to `{backend}/auth/zitadel?mode=signin` and trade the returned `?ticket=` with `oms.sessions.adopt(ticket)`.
 - `oms.account` - the signed-in user, profile, sessions, usage. `oms.account.notificationPreferences` decides, per notification kind, whether it shows in the inbox and whether it is emailed; the security kinds always email, unless the master switch is off.
 - `oms.storage` - files and folders: upload, download, share.
 - `oms.music` - songs, artists, playlists, jams.
 - `oms.movies` - addons, collections, watch progress.
 - `oms.library` - books, shelves, annotations.
-- `oms.llm` - models, one-shot completions and assistant chats.
-- `oms.cron` - your TypeScript scripts run on a schedule by the server, with this SDK in scope; runs, logs and templates.
+- `oms.llm` - models and one-shot completions.
 - `oms.search` - web, image, news and video search, and reading a page's text.
 - `oms.social` - direct messages, friends, group chats.
-- `oms.content.news` - news feeds: sources driven by scripts (RSS, Telegram, YouTube, a page with a selector), the items they produce, full-text and similarity search over them.
 - `oms.content` - blogs (several per account, public, unlisted or private with invited members; `oms.content.blogs.own` manages them), notifications, feedback, site status. `oms.content.notifications.unsubscribe(token)` honours the link at the foot of a notification email and needs no credential.
 - `oms.tools` - media tools, each with its own daily quota.
 - `oms.jobs`, `oms.quotas` - background jobs and account limits.
@@ -170,3 +162,8 @@ bun test
 bun run typecheck
 bun run build
 ```
+
+## Publishing
+
+Push a tag `v<version>` matching `package.json`; `.github/workflows/publish.yml`
+publishes through npm trusted publishing (no token).

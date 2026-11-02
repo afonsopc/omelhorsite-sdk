@@ -8,7 +8,7 @@
  * ## What a credential actually is
  *
  * An opaque UUID, and nothing more. `POST /sessions/adopt` hands one
- * back as `token`, after the Pocket ID sign-in. That UUID IS the credential.
+ * back as `token`, after the sign-in at id.omelhorsite.pt. That UUID IS the credential.
  *
  * There is no JWT, no signature to verify, no `exp`, no refresh token and no
  * rotation. A session token never expires on its own: it lives until the
@@ -85,9 +85,9 @@
  * `DELETE /users/:id` is also absent, and that one is not a delegation: the
  * route cannot succeed for anybody. Every caller, administrator included, gets
  * `401 "You are not authorized to destroy this resource"`. Use
- * {@link AuthSessionsNamespace.deactivateUser} for the operational need, or
- * {@link AuthSessionsNamespace.deleteAccountStart} for a user deleting
- * themselves, which is a different code path and does work.
+ * {@link AuthSessionsNamespace.deactivateUser} for the operational need. A
+ * person deletes their own account at id.omelhorsite.pt ("A minha conta"),
+ * not through this API.
  */
 
 import { OmsApiError } from "../../errors";
@@ -578,56 +578,6 @@ export class AuthSessionsNamespace extends Resource {
       },
       options,
     );
-  }
-
-  // ----------------------------------------------- account deletion (OTP)
-
-  /**
-   * `POST /users/destroy_start` - emails a deletion code to the address on the
-   * account.
-   *
-   * Requires a live session. The address is taken from the session, so a user
-   * can only ever start deleting themselves; there is no argument and nothing
-   * to point at somebody else.
-   *
-   * Not in the same league as the other flows: {@link deleteAccountComplete}
-   * destroys the row and everything hanging off it. Make the confirmation
-   * unmistakable, and note that the code is the only thing standing between a
-   * hijacked session and a deleted account.
-   *
-   * Answers `200` with the bare string `"User deletion instructions sent."`.
-   * Shared `*_start` throttle: **4 a minute and 20 an hour per IP**.
-   *
-   * @throws {OmsAuthError} 401 without a live session.
-   */
-  async deleteAccountStart(options: RequestOptions = {}): Promise<string> {
-    return this.http.post<string>("/users/destroy_start", undefined, options);
-  }
-
-  /**
-   * `POST /users/destroy_end` - presents the code and DESTROYS THE ACCOUNT.
-   *
-   * Requires a live session. Irreversible: it takes the user's sessions,
-   * files, music library and everything else with it. There is no soft-delete
-   * on this path and no undo.
-   * {@link deactivateUser} is the reversible operation, and it is
-   * administrators only.
-   *
-   * Answers `200` with an empty body. The credential is dead the moment this
-   * resolves - the sessions went with the user - so discard the client and
-   * every stored token; do not try to {@link signOut} afterwards.
-   *
-   * Throttled to **10 a minute per IP**, shared with the other `*_end`
-   * endpoints, plus the per-code budget.
-   *
-   * @throws {OmsAuthError} 401 without a live session.
-   * @throws {OmsApiError} 404 `"Invalid Verification"` for a wrong, expired or
-   *   burned code.
-   * @throws {OmsApiError} 500 with the server's error messages when the
-   *   account could not be destroyed. The account survives; the code does not.
-   */
-  async deleteAccountComplete(code: string, options: RequestOptions = {}): Promise<void> {
-    await this.http.post<unknown>("/users/destroy_end", { code }, options);
   }
 
   // ------------------------------------------------------ user administration

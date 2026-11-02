@@ -256,32 +256,6 @@ describe("the two-step email flows", () => {
       new_email_code: "444444",
     });
   });
-
-  test("deleteAccountStart takes no argument and sends no body", async () => {
-    const { sessions, calls } = harness([{ status: 200, body: "User deletion instructions sent." }]);
-
-    await sessions.deleteAccountStart();
-
-    expect(calls[0]!.method).toBe("POST");
-    expect(calls[0]!.path).toBe("/users/destroy_start");
-    expect(calls[0]!.body).toBeUndefined();
-  });
-
-  test("deleteAccountComplete sends the code and returns nothing readable", async () => {
-    const { sessions, calls } = harness([{ status: 200, body: null }]);
-
-    await expect(sessions.deleteAccountComplete("555555")).resolves.toBeUndefined();
-    expect(calls[0]!.path).toBe("/users/destroy_end");
-    expect(calls[0]!.body).toEqual({ code: "555555" });
-  });
-
-  test("a wrong code is a 404, indistinguishable from an expired or burned one", async () => {
-    const { sessions } = harness([{ status: 404, body: "Invalid Verification" }]);
-
-    const failure = sessions.deleteAccountComplete("000000");
-
-    await expect(failure).rejects.toMatchObject({ status: 404 });
-  });
 });
 
 describe("verification code constants", () => {

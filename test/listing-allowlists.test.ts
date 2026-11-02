@@ -16,7 +16,6 @@ import { fileURLToPath } from "node:url";
 
 import { BASE_FILTER_COLUMNS } from "../src/listing";
 import { ACCOUNT_SESSION_FILTER_COLUMNS } from "../src/resources/account";
-import { CRON_JOB_FILTER_COLUMNS, CRON_RUN_FILTER_COLUMNS } from "../src/resources/cron";
 import {
   ADMIN_JOB_FILTER_COLUMNS,
   ADMIN_LLM_ASSIGNMENT_FILTER_COLUMNS,
@@ -28,16 +27,12 @@ import {
 import { USER_FILTER_COLUMNS } from "../src/resources/auth/sessions";
 import {
   FEEDBACK_FILTER_COLUMNS,
-  NEWS_FEED_FILTER_COLUMNS,
-  NEWS_ITEM_FILTER_COLUMNS,
-  NEWS_SCRIPT_FILTER_COLUMNS,
-  NEWS_SOURCE_FILTER_COLUMNS,
   JOKE_FILTER_COLUMNS,
+  NOTIFICATION_EXTRA_OPTION_KEYS,
   NOTIFICATION_FILTER_COLUMNS,
   SPACE_INVADERS_GAME_FILTER_COLUMNS,
 } from "../src/resources/content";
 import { JOB_FILTER_COLUMNS } from "../src/resources/jobs";
-import { LLM_CHAT_FILTER_COLUMNS } from "../src/resources/llm";
 import {
   BOOK_ANNOTATION_FILTER_COLUMNS,
   BOOK_EXTRA_OPTION_KEYS,
@@ -65,9 +60,12 @@ import {
 import { FS_NODE_EXTRA_OPTION_KEYS, FS_NODE_FILTER_COLUMNS } from "../src/resources/storage";
 import { TICKET_FILTER_COLUMNS, TICKET_MESSAGE_FILTER_COLUMNS } from "../src/resources/tickets";
 import { parseControllerAllowlists, type BackendAllowlists } from "./support/backend-allowlists";
-import { DEFAULT_CONTROLLERS_DIR, FIXTURE_PATH } from "./support/backend-paths";
+import { DEFAULT_CONTROLLERS_DIR, FIXTURE_PATH, MUSIC_CONTROLLERS_DIR } from "./support/backend-paths";
 
 const NONE: readonly string[] = [];
+
+/** Served by oms-storage (Go); no Ruby controller to compare with. */
+const GO_SERVED = new Set(["fs_nodes", "fs_grants", "chests", "chest_entries"]);
 
 /** Resource path on the server, and what the SDK declares for it. */
 const RESOURCES: Record<string, { columns: readonly string[]; extra?: readonly string[] }> = {
@@ -84,22 +82,15 @@ const RESOURCES: Record<string, { columns: readonly string[]; extra?: readonly s
   fs_grants: { columns: NONE },
   fs_nodes: { columns: FS_NODE_FILTER_COLUMNS, extra: FS_NODE_EXTRA_OPTION_KEYS },
   identities: { columns: LINKED_IDENTITY_FILTER_COLUMNS },
-  cron_jobs: { columns: CRON_JOB_FILTER_COLUMNS },
-  cron_runs: { columns: CRON_RUN_FILTER_COLUMNS },
-  news_feeds: { columns: NEWS_FEED_FILTER_COLUMNS },
-  news_items: { columns: NEWS_ITEM_FILTER_COLUMNS },
-  news_scripts: { columns: NEWS_SCRIPT_FILTER_COLUMNS },
-  news_sources: { columns: NEWS_SOURCE_FILTER_COLUMNS },
   jobs: { columns: JOB_FILTER_COLUMNS },
   jokes: { columns: JOKE_FILTER_COLUMNS },
-  llm_chats: { columns: LLM_CHAT_FILTER_COLUMNS },
   messages: { columns: MESSAGE_FILTER_COLUMNS, extra: MESSAGE_EXTRA_OPTION_KEYS },
   movie_addon_grants: { columns: MOVIE_ADDON_GRANT_FILTER_COLUMNS },
   movie_addon_groups: { columns: MOVIE_ADDON_GROUP_FILTER_COLUMNS },
   movie_addons: { columns: MOVIE_ADDON_FILTER_COLUMNS },
   movie_collection_items: { columns: MOVIE_COLLECTION_ITEM_FILTER_COLUMNS },
   movie_collections: { columns: MOVIE_COLLECTION_FILTER_COLUMNS },
-  notifications: { columns: NOTIFICATION_FILTER_COLUMNS },
+  notifications: { columns: NOTIFICATION_FILTER_COLUMNS, extra: NOTIFICATION_EXTRA_OPTION_KEYS },
   playlist_songs: { columns: PLAYLIST_SONG_FILTER_COLUMNS },
   playlists: { columns: PLAYLIST_FILTER_COLUMNS },
   relationships: { columns: RELATIONSHIP_FILTER_COLUMNS, extra: RELATIONSHIP_EXTRA_OPTION_KEYS },
@@ -133,8 +124,16 @@ describe("filter columns match the server's allowlists", () => {
 describe("the fixture is current", () => {
   const available = existsSync(DEFAULT_CONTROLLERS_DIR);
   test.skipIf(!available)("matches the sibling checkout of the server", () => {
-    const live = parseControllerAllowlists(DEFAULT_CONTROLLERS_DIR);
+    // Music lives in oms-music-backend since 2026-11-01; read its controllers
+    // too when that checkout is beside this one. The Drive and the chests
+    // (GO_SERVED) are oms-storage, in Go, which this parser cannot read: the
+    // fixture is the only record of those.
+    const live = {
+      ...parseControllerAllowlists(DEFAULT_CONTROLLERS_DIR),
+      ...(existsSync(MUSIC_CONTROLLERS_DIR) ? parseControllerAllowlists(MUSIC_CONTROLLERS_DIR) : {}),
+    };
     for (const resource of Object.keys(RESOURCES)) {
+      if (live[resource] === undefined && GO_SERVED.has(resource)) continue;
       expect({ [resource]: fixture[resource] }).toEqual({ [resource]: live[resource] });
     }
   });

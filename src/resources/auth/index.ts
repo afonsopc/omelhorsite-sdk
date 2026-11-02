@@ -14,14 +14,14 @@
  *
  * `enforce_oauth_scope!` denies by omission, so an OAuth token cannot reach
  * most of the API at all. A first-party client signs in with
- * OAuth through Pocket ID and holds a session token;
+ * OAuth through id.omelhorsite.pt and holds a session token;
  * a third-party client does the device grant and holds a scoped one.
  *
  * The two namespaces mount at the top level rather than under a shared parent,
  * because `oms.auth` is already taken by OAuth:
  *
  * ```ts
- * // Send the browser to `${baseUrl}/auth/pocket_id?mode=signin`; it comes back
+ * // Send the browser to `${baseUrl}/auth/zitadel?mode=signin`; it comes back
  * // with `?ticket=...`.
  * const anon = new Oms({ baseUrl });
  * const session = await anon.sessions.adopt(ticket);

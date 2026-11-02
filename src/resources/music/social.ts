@@ -41,8 +41,8 @@
  *
  * Every path here sits under the general authenticated ceiling of **600
  * requests a minute**, keyed by the `Authorization` header. The single extra
- * ceiling is forty DJ generations per user per hour, shared between
- * `/music_dj` and `/music_dj/batch` and counted per REQUEST, refused ones
+ * ceiling is the DJ's hourly cap per user on `/music_dj/next`, counted per
+ * REQUEST, refused ones
  * included, which is why {@link MusicDjNamespace} turns retrying off by
  * default - see {@link MUSIC_DJ_HOURLY_CAP}.
  *

@@ -8,7 +8,7 @@ import type { OauthApprovalStatus } from "./types";
  * An application holding a live token for YOUR account.
  *
  * This is OAuth going OUT (a third party acting in your account), which is the
- * opposite direction from {@link LinkedIdentity} - logging IN with Pocket ID or
+ * opposite direction from {@link LinkedIdentity} - logging IN through id.omelhorsite.pt or
  * linking Spotify. Two things with similar names that live in the same settings tab.
  */
 export interface AuthorizedApplication {
